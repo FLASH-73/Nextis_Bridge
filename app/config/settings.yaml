@@ -1,0 +1,34 @@
+robot:
+  cameras:
+    camera_1:
+      fps: 30
+      height: 480
+      serial_number_or_name: '218622275492'
+      type: intelrealsense
+      width: 640
+    camera_2:
+      fps: 30
+      height: 480
+      index_or_path: /dev/video0
+      type: opencv
+      width: 640
+    camera_3:
+      fps: 30
+      height: 480
+      index_or_path: /dev/video2
+      type: opencv
+      width: 640
+  id: umbra_bi_2
+  left_arm_port: /dev/ttyUSB3
+  right_arm_port: /dev/ttyUSB1
+  type: bi_umbra_follower
+teleop:
+  id: leader_bi_3
+  left_arm_port: /dev/ttyUSB0
+  right_arm_port: /dev/ttyUSB2
+  type: bi_umbra_leader
+training:
+  batch_size: 8
+  offline_steps: 10000
+  policy: diffusion
+  steps: 5000
