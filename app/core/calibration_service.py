@@ -206,8 +206,15 @@ class CalibrationService:
             if self.robot_lock:
                 with self.robot_lock:
                     arm.bus.disable_torque(target_motors)
+                    # Enforce Position Mode for calibration (in case it was Velocity/PWM)
+                    for motor in target_motors:
+                         if motor in arm.bus.motors:
+                            arm.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
             else:
                 arm.bus.disable_torque(target_motors)
+                for motor in target_motors:
+                     if motor in arm.bus.motors:
+                        arm.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
 
     def enable_torque(self, arm_id: str):
         arm, target_motors = self._get_arm_context(arm_id)

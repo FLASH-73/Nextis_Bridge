@@ -65,23 +65,66 @@ class SystemState:
             from lerobot.cameras.opencv import OpenCVCameraConfig
             from lerobot.cameras.realsense import RealSenseCameraConfig
             
-            # Construct Camera Configs
+            from app.core.camera_discovery import discover_cameras
+            
+            # Discover working cameras
+            print("Scanning for available cameras...")
+            discovered = discover_cameras()
+            working_opencv_ports = [c["index_or_path"] for c in discovered["opencv"]]
+            working_realsense_serials = [c["serial_number_or_name"] for c in discovered["realsense"]]
+            
+            print(f"Discovered OpenCV: {working_opencv_ports}")
+            print(f"Discovered RealSense: {working_realsense_serials}")
+
+            # Construct Camera Configs from Discovery
             cameras = {}
-            for name, cam_data in robot_cfg.get("cameras", {}).items():
-                if cam_data["type"] == "opencv":
-                    cameras[name] = OpenCVCameraConfig(
-                        fps=cam_data["fps"],
-                        width=cam_data["width"],
-                        height=cam_data["height"],
-                        index_or_path=cam_data.get("index_or_path")
-                    )
-                elif cam_data["type"] == "intelrealsense":
-                    cameras[name] = RealSenseCameraConfig(
-                        fps=cam_data["fps"],
-                        width=cam_data["width"],
-                        height=cam_data["height"],
-                        serial_number_or_name=cam_data.get("serial_number_or_name")
-                    )
+            
+            # Add OpenCV Cameras
+            for i, cam in enumerate(discovered["opencv"]):
+                # Use a generic name or try to match with config if possible
+                # User wants "check which one actually work and only add them"
+                # We can try to map back to config names if ports match, otherwise generate new names
+                
+                # Try to find if this port was in config
+                config_name = None
+                for name, cfg in robot_cfg.get("cameras", {}).items():
+                    if cfg.get("type") == "opencv" and cfg.get("index_or_path") == cam["index_or_path"]:
+                        config_name = name
+                        break
+                
+                cam_name = config_name if config_name else f"camera_{i+1}_opencv"
+                
+                cameras[cam_name] = OpenCVCameraConfig(
+                    fps=cam.get("fps", 30),
+                    width=cam.get("width", 640),
+                    height=cam.get("height", 480),
+                    index_or_path=cam["index_or_path"]
+                )
+                print(f"Added {cam_name} at {cam['index_or_path']}")
+
+            # Add RealSense Cameras
+            for i, cam in enumerate(discovered["realsense"]):
+                serial = cam["serial_number_or_name"]
+                
+                # Try to find if this serial was in config
+                config_name = None
+                for name, cfg in robot_cfg.get("cameras", {}).items():
+                    if cfg.get("type") == "intelrealsense" and cfg.get("serial_number_or_name") == serial:
+                        config_name = name
+                        break
+                
+                cam_name = config_name if config_name else f"camera_{i+1}_realsense"
+                
+                cameras[cam_name] = RealSenseCameraConfig(
+                    fps=cam.get("fps", 30),
+                    width=cam.get("width", 848),
+                    height=cam.get("height", 480),
+                    serial_number_or_name=serial
+                )
+                print(f"Added {cam_name} (RealSense {serial})")
+            
+            if not cameras:
+                print("⚠️ No cameras found! Robot might fail to initialize if it requires cameras.")
             
             # Construct Robot Config
             # We assume bi_umbra_follower for now as per user request
@@ -142,11 +185,16 @@ class SystemState:
 
         # Initialize Planner
         try:
-            from app.core.planner import LocalPlanner
-            # Using a smaller model for faster download/dev, user can swap to 7B later
-            # or we can use 7B if we are confident. Let's use 1.5B for now to be safe on download time
-            # self.planner = LocalPlanner("Qwen/Qwen2.5-1.5B-Instruct") 
-            self.planner = LocalPlanner("Qwen/Qwen2.5-7B-Instruct")
+            from app.core.planner import LocalPlanner, GeminiPlanner
+            
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            if gemini_key:
+                print("✨ GEMINI_API_KEY found! Using GeminiPlanner.")
+                self.planner = GeminiPlanner(api_key=gemini_key)
+            else:
+                print("⚠️ GEMINI_API_KEY not found. Using LocalPlanner (Qwen).")
+                self.planner = LocalPlanner("Qwen/Qwen2.5-7B-Instruct", device="cuda")
+                
         except Exception as e:
             print(f"⚠️ Failed to load Planner: {e}")
             self.planner = None
@@ -333,6 +381,11 @@ def video_feed(camera_key: str):
 
 @app.get("/calibration/arms")
 def get_calibration_arms():
+    # Stop Orchestrator to free up the robot bus for calibration
+    if system.orchestrator and system.orchestrator.is_running:
+        print("Stopping Orchestrator for Calibration...")
+        system.orchestrator.stop()
+        
     if not system.calibration_service:
         return {"arms": []}
     return {"arms": system.calibration_service.get_arms()}
