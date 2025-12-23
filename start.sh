@@ -14,7 +14,7 @@ echo "Starting Nextis App..."
 # Start Backend
 echo "Starting Backend on http://localhost:8000 (using 'umbra' env)..."
 export PYTHONPATH=$(pwd)/lerobot/src:$PYTHONPATH
-/home/roberto/miniconda3/envs/umbra/bin/python run_backend.py > app.log 2>&1 &
+/home/roberto/miniconda3/bin/python run_backend.py > app.log 2>&1 &
 BACKEND_PID=$!
 
 # Wait for backend to be ready (optional, but good practice)

@@ -4,8 +4,8 @@ from pathlib import Path
 
 # Add project root and lerobot/src to sys.path
 root_path = Path(__file__).parent
-sys.path.append(str(root_path))
-sys.path.append(str(root_path / "lerobot" / "src"))
+sys.path.insert(0, str(root_path))
+sys.path.insert(0, str(root_path / "lerobot" / "src"))
 
 import uvicorn
 

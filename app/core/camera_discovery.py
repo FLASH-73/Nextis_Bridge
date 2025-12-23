@@ -36,7 +36,15 @@ def is_camera_available(port):
         return ret
     except Exception as e:
         logger.error(f"Error checking camera {port}: {e}")
+        print(f"DEBUG: Camera {port} ERROR: {e}")
         return False
+
+    if not ret:
+        print(f"DEBUG: Camera {port} failed to read frame.")
+    else:
+        print(f"DEBUG: Camera {port} ok.")
+    
+    return ret
 
 def discover_cameras():
     """
@@ -56,7 +64,9 @@ def discover_cameras():
         if is_camera_available(port):
             print(f"Camera found at {port}")
             available_cameras["opencv"].append({
+                "id": port,
                 "index_or_path": port,
+                "name": f"Camera {port}",
                 "width": 640, # Default
                 "height": 480, # Default
                 "fps": 30
@@ -75,7 +85,9 @@ def discover_cameras():
             name = dev.get_info(rs.camera_info.name)
             print(f"RealSense found: {name} ({serial})")
             available_cameras["realsense"].append({
+                "id": serial,
                 "serial_number_or_name": serial,
+                "name": name,
                 "width": 848, # Default for RealSense
                 "height": 480,
                 "fps": 30

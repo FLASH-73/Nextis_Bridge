@@ -1,13 +1,17 @@
 import sys
 import os
+from dotenv import load_dotenv
 from pathlib import Path
 import json
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Add the project root to sys.path so we can import 'app'
 root_path = Path(__file__).parent.parent
-sys.path.append(str(root_path))
+sys.path.insert(0, str(root_path))
 # Add lerobot/src to sys.path
-sys.path.append(str(root_path / "lerobot" / "src"))
+sys.path.insert(0, str(root_path / "lerobot" / "src"))
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +21,9 @@ from app.core.orchestrator import TaskOrchestrator
 from app.core.recorder import DataRecorder
 from app.core.calibration_service import CalibrationService
 from lerobot.robots.utils import make_robot_from_config
+from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
+from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
+from lerobot.robots.bi_umbra_follower.config_bi_umbra_follower import BiUmbraFollowerConfig
 from app.core.config import load_config
 
 app = FastAPI(title="Nextis Robotics API")
@@ -42,7 +49,9 @@ class SystemState:
         self.orchestrator = None
         self.calibration_service = None
         self.camera_service = None
+        self.teleop_service = None
         self.lock = threading.Lock()
+
 
     def initialize(self):
         print("Initializing System...")
@@ -78,6 +87,31 @@ class SystemState:
 
             # Construct Camera Configs from Discovery
             cameras = {}
+
+            # --- Fix Config Format Mismatch (List vs Dict) ---
+            raw_cameras = robot_cfg.get("cameras", [])
+            configured_cameras = {}
+            if isinstance(raw_cameras, list):
+                for c in raw_cameras:
+                    c_id = c.get("id", "unknown")
+                    vid = c.get("video_device_id")
+                    # Heuristic for type if missing
+                    c_type = c.get("type")
+                    if not c_type:
+                        if str(vid).startswith("/dev/video") or (str(vid).isdigit() and len(str(vid)) < 4):
+                             c_type = "opencv"
+                        else:
+                             c_type = "intelrealsense"
+                    
+                    configured_cameras[c_id] = {
+                        "type": c_type,
+                        "index_or_path": vid,
+                        "serial_number_or_name": vid,
+                        **c
+                    }
+            elif isinstance(raw_cameras, dict):
+                configured_cameras = raw_cameras
+            # -------------------------------------------------
             
             # Add OpenCV Cameras
             for i, cam in enumerate(discovered["opencv"]):
@@ -85,32 +119,79 @@ class SystemState:
                 # User wants "check which one actually work and only add them"
                 # We can try to map back to config names if ports match, otherwise generate new names
                 
+                cam_id = cam.get("id")
+                
+                # Critical Fix: Skip if ID is missing to prevent OpenCVCamera(None) crash
+                if cam_id is None:
+                    print(f"⚠️ Skipping OpenCV camera {i} due to missing ID.")
+                    continue
+                
                 # Try to find if this port was in config
                 config_name = None
-                for name, cfg in robot_cfg.get("cameras", {}).items():
-                    if cfg.get("type") == "opencv" and cfg.get("index_or_path") == cam["index_or_path"]:
+                print(f"DEBUG: Checking OpenCV Camera Discovered ID: '{cam_id}' (type: {type(cam_id)})")
+                
+                for name, cfg in configured_cameras.items():
+                    cfg_type = cfg.get("type")
+                    cfg_idx = cfg.get("index_or_path")
+                    # print(f"  - Comparing against Config '{name}': type={cfg_type}, idx='{cfg_idx}'")
+                    
+                    if cfg_type == "opencv" and str(cfg_idx) == str(cam_id):
                         config_name = name
+                        print(f"  -> MATCH FOUND: '{name}' matches device '{cam_id}'")
                         break
                 
+                if not config_name:
+                    print(f"  -> NO MATCH found for device '{cam_id}'. Will use auto-generated name.")
+
                 cam_name = config_name if config_name else f"camera_{i+1}_opencv"
                 
                 cameras[cam_name] = OpenCVCameraConfig(
                     fps=cam.get("fps", 30),
-                    width=cam.get("width", 640),
+                    width=cam.get("width", 848),
                     height=cam.get("height", 480),
-                    index_or_path=cam["index_or_path"]
+                    index_or_path=cam_id
                 )
-                print(f"Added {cam_name} at {cam['index_or_path']}")
+                print(f"Added {cam_name} at {cam_id}")
+
+            # --- Explicitly Add Configured Cameras if Missed by Discovery ---
+            # e.g. /dev/video16 might be a loopback or not found by simple glob
+            for name, cfg in configured_cameras.items():
+                if name not in cameras and cfg.get("type") == "opencv":
+                    idx = cfg.get("index_or_path")
+                    if idx:
+                        print(f"Adding configured camera '{name}' explicitly (was not in discovery scan) at {idx}")
+                        cameras[name] = OpenCVCameraConfig(
+                            fps=cfg.get("fps", 30),
+                            width=cfg.get("width", 640),
+                            height=cfg.get("height", 480),
+                            index_or_path=idx
+                        )
+            # ----------------------------------------------------------------
 
             # Add RealSense Cameras
             for i, cam in enumerate(discovered["realsense"]):
-                serial = cam["serial_number_or_name"]
-                
+                serial = cam.get("id")
+                if not serial and "serial_number" in cam:
+                    serial = cam["serial_number"]
+
+                if not serial:
+                    print(f"⚠️ Skipping RealSense camera {i} due to missing serial number.")
+                    continue
+                    
+                # Ensure serial is a string
+                serial = str(serial)
+
                 # Try to find if this serial was in config
                 config_name = None
-                for name, cfg in robot_cfg.get("cameras", {}).items():
-                    if cfg.get("type") == "intelrealsense" and cfg.get("serial_number_or_name") == serial:
+                print(f"DEBUG: Checking RealSense Camera Discovered Serial: '{serial}'")
+
+                for name, cfg in configured_cameras.items():
+                    cfg_type = cfg.get("type")
+                    cfg_serial = cfg.get("serial_number_or_name")
+                    
+                    if cfg_type == "intelrealsense" and str(cfg_serial) == serial:
                         config_name = name
+                        print(f"  -> MATCH FOUND: '{name}' matches serial '{serial}'")
                         break
                 
                 cam_name = config_name if config_name else f"camera_{i+1}_realsense"
@@ -125,6 +206,60 @@ class SystemState:
             
             if not cameras:
                 print("⚠️ No cameras found! Robot might fail to initialize if it requires cameras.")
+
+            # --- ROBUSTNESS: Verify cameras can actually connect before passing to Robot ---
+            print("Verifying camera connections...")
+            verified_cameras = {}
+            for name, cfg in cameras.items():
+                try:
+                    # Instantiate and test connection temporarily
+                    if isinstance(cfg, OpenCVCameraConfig):
+                        test_cam = OpenCVCamera(cfg)
+                    elif isinstance(cfg, RealSenseCameraConfig):
+                        test_cam = RealSenseCamera(cfg)
+                    else:
+                        print(f"Skipping verification for unknown type {type(cfg)}")
+                        verified_cameras[name] = cfg
+                        continue
+
+                    # Attempt connection with warmup to verify READ works
+                    test_cam.connect(warmup=False) 
+                    
+                    # Stress test: Read multiple frames to ensure stability (filter out flaky video4)
+                    stress_passed = True
+                    for _ in range(10):
+                        if test_cam.read() is None:
+                            stress_passed = False
+                            break
+                            
+                    if stress_passed and test_cam.is_connected:
+                        print(f"  [OK] Camera {name} connected and passed stress test.")
+                        test_cam.disconnect()
+                        verified_cameras[name] = cfg
+                    else:
+                         print(f"  [FAIL] Camera {name} failed check (unstable/null frames). Ignoring.")
+                except Exception as e:
+                    print(f"  [FAIL] Camera {name} failed to connect: {e}. Ignoring.")
+                finally:
+                    # Clean up if connected or thread started
+                    try:
+                        if 'test_cam' in locals() and test_cam is not None:
+                            # Check if connected or if explicit disconnect needed
+                            # OpenCVCamera.disconnect() is safe to call if not connected? 
+                            # It raises DeviceNotConnectedError if not connected.
+                            if test_cam.is_connected or (hasattr(test_cam, 'thread') and test_cam.thread is not None):
+                                test_cam.disconnect()
+                    except Exception as cleanup_err:
+                        # Ignore cleanup errors (e.g. already disconnected)
+                        pass
+                
+                # Tiny sleep to ensure OS releases the device handle
+                import time
+                time.sleep(0.2)
+            
+            cameras = verified_cameras
+            print(f"Proceeding with {len(cameras)} verified cameras.")
+            # -------------------------------------------------------------------------------
             
             # Construct Robot Config
             # We assume bi_umbra_follower for now as per user request
@@ -135,25 +270,33 @@ class SystemState:
                     cameras=cameras
                 )
                 
-                self.robot = make_robot_from_config(r_config)
-                self.robot.connect(calibrate=False)
-                print("✅ Real Robot Connected Successfully!")
-                
-                # Initialize Leader if configured
-                if teleop_cfg and teleop_cfg.get("type") == "bi_umbra_leader":
-                    print("Initializing BiUmbraLeader...")
-                    from lerobot.teleoperators.bi_umbra_leader.bi_umbra_leader import BiUmbraLeader
-                    from lerobot.teleoperators.bi_umbra_leader.config_bi_umbra_leader import BiUmbraLeaderConfig
+                try:
+                    self.robot = make_robot_from_config(r_config)
+                    self.robot.connect(calibrate=False)
+                    print("✅ Real Robot Connected Successfully!")
                     
-                    l_config = BiUmbraLeaderConfig(
-                        left_arm_port=teleop_cfg["left_arm_port"],
-                        right_arm_port=teleop_cfg["right_arm_port"],
-                        calibration_dir=Path(teleop_cfg.get("calibration_dir", ".cache/calibration"))
-                    )
-                    self.leader = BiUmbraLeader(l_config)
-                    self.leader.connect(calibrate=False)
-                    print("✅ Leader Arms Connected Successfully!")
-                else:
+                    # Initialize Leader if configured
+                    if teleop_cfg and teleop_cfg.get("type") == "bi_umbra_leader":
+                        print("Initializing BiUmbraLeader...")
+                        from lerobot.teleoperators.bi_umbra_leader.bi_umbra_leader import BiUmbraLeader
+                        from lerobot.teleoperators.bi_umbra_leader.config_bi_umbra_leader import BiUmbraLeaderConfig
+                        
+                        l_config = BiUmbraLeaderConfig(
+                            left_arm_port=teleop_cfg["left_arm_port"],
+                            right_arm_port=teleop_cfg["right_arm_port"],
+                            calibration_dir=Path(teleop_cfg.get("calibration_dir", ".cache/calibration"))
+                        )
+                        self.leader = BiUmbraLeader(l_config)
+                        self.leader.connect(calibrate=False)
+                        print("✅ Leader Arms Connected Successfully!")
+                    else:
+                        self.leader = None
+                        
+                except Exception as e:
+                    print(f"⚠️ Robot Connection Failed (will fallback to Mock): {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self.robot = None
                     self.leader = None
 
             else:
@@ -162,7 +305,12 @@ class SystemState:
                 self.leader = None
 
         except Exception as e:
-            print(f"⚠️ Failed to connect robot: {e}")
+            import traceback
+            err_msg = f"⚠️ Failed to connect robot: {e}\n{traceback.format_exc()}"
+            print(err_msg)
+            with open("startup_error.log", "w") as f:
+                f.write(err_msg)
+                
             print("Falling back to Mock Robot for MVP.")
             self.robot = None
             self.leader = None
@@ -188,7 +336,7 @@ class SystemState:
             from app.core.planner import LocalPlanner, GeminiPlanner
             
             gemini_key = os.getenv("GEMINI_API_KEY")
-            if gemini_key:
+            if gemini_key and gemini_key.strip():
                 print("✨ GEMINI_API_KEY found! Using GeminiPlanner.")
                 self.planner = GeminiPlanner(api_key=gemini_key)
             else:
@@ -283,10 +431,12 @@ async def execute_endpoint(request: Request, background_tasks: BackgroundTasks):
 async def chat_endpoint(request: Request):
     data = await request.json()
     user_msg = data.get("message", "").lower()
+    messages = data.get("messages", []) # Full conversation history
     
     # Simple keyword matching for MVP
     actions = []
     response = ""
+    plan = []
     
     if "stop" in user_msg:
         actions = []
@@ -297,13 +447,20 @@ async def chat_endpoint(request: Request):
     else:
         if system.planner:
             print(f"Planning for: {user_msg}")
-            plan = system.planner.plan(user_msg) # Corrected user_message to user_msg
+            
+            # Use history if available, otherwise just the message
+            input_data = messages if messages else user_msg
+            
+            plan = system.planner.plan(input_data)
             print(f"Task chain loaded: {json.dumps(plan, indent=2)}")
             
             # Orchestrator expects a list of strings for now, or we need to upgrade Orchestrator
             # For now, let's extract the task names or format them
             actions = [p.get("task") for p in plan]
-            response = f"Plan generated: {actions}"
+            
+            # CRITICAL: The response content MUST be the JSON string so it gets added to the chat history
+            # this allows the planner to 'see' its previous plans in future turns.
+            response = json.dumps(plan)
         else:
             # Fallback
             actions = ["move_to_bin", "pick_object", "place_in_box"]
@@ -314,9 +471,10 @@ async def chat_endpoint(request: Request):
         system.orchestrator.load_task_chain(actions)
     
     return {
-        "response": response,
+        "reply": response, # Frontend expects 'reply'
+        "response": response, # Legacy
         "actions": actions,
-        "plan": plan if system.planner else [] # Return full plan for frontend
+        "plan": plan if system.planner else [] # For visualizer
     }
 
 from fastapi.responses import StreamingResponse
@@ -350,11 +508,32 @@ def generate_frames(camera_key: str):
                             break
         
         if frame is None:
-            # Yield a placeholder (black frame with text)
-            import numpy as np
-            blank_image = np.zeros((480, 640, 3), np.uint8)
-            cv2.putText(blank_image, f"Waiting for {camera_key}...", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            frame = blank_image
+            # Fallback 1: If Robot is connected, ask IT for the frame (reuses existing connection)
+            if system.robot and system.robot.is_connected and system.robot.cameras and camera_key in system.robot.cameras:
+                cam = system.robot.cameras[camera_key]
+                try:
+                    # Using async_read because Orchestrator might be running background thread
+                    frame = cam.async_read()
+                except Exception as e:
+                    # print(f"Robot cam read failed: {e}")
+                    pass
+
+            # Fallback 2: Try to get a direct snapshot if the robot isn't streaming it
+            # This is useful for the settings preview.
+            if frame is None and system.camera_service:
+                snapshot = system.camera_service.capture_snapshot(camera_key)
+                if snapshot is not None:
+                    frame = snapshot
+            
+            if frame is None:
+                # Yield a placeholder (black frame with text)
+                import numpy as np
+                blank_image = np.zeros((480, 640, 3), np.uint8)
+                cv2.putText(blank_image, f"Waiting for {camera_key}...", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                frame = blank_image
+            else:
+                # Ensure snapshot is BGR (it comes from cv2 so it should be)
+                pass
         else:
             # Convert PyTorch tensor to numpy if needed
             import torch
@@ -437,8 +616,98 @@ async def perform_homing(arm_id: str):
 
     success = system.calibration_service.perform_homing(arm_id)
     if not success:
-        raise HTTPException(status_code=400, detail="Homing failed")
-    return {"status": "homing_complete"}
+        return {"status": "error", "message": "Homing failed"}
+    return {"status": "success"}
+
+@app.get("/calibration/{arm_id}/files")
+def list_calibration_files(arm_id: str):
+    if not system.calibration_service:
+        return {"files": []}
+    return {"files": system.calibration_service.list_calibration_files(arm_id)}
+
+@app.post("/calibration/{arm_id}/load")
+async def load_calibration_file(arm_id: str, request: Request):
+    data = await request.json()
+    filename = data.get("filename")
+    if not system.calibration_service:
+        raise HTTPException(status_code=503, detail="Service not ready")
+        
+    success = system.calibration_service.load_calibration_file(arm_id, filename)
+    if not success:
+         return {"status": "error", "message": "Failed to load file"}
+    return {"status": "success"}
+
+@app.post("/calibration/{arm_id}/delete")
+async def delete_calibration_file(arm_id: str, request: Request):
+    data = await request.json()
+    filename = data.get("filename")
+    if system.calibration_service:
+        success = system.calibration_service.delete_calibration_file(arm_id, filename)
+        return {"status": "success" if success else "error"}
+    return {"status": "error"}
+
+@app.post("/calibration/{arm_id}/save_named")
+async def save_named_calibration(arm_id: str, request: Request):
+    data = await request.json()
+    name = data.get("name")
+    if not system.robot:
+         raise HTTPException(status_code=503, detail="Robot not connected")
+    
+    if system.calibration_service:
+        system.calibration_service.save_calibration(arm_id, name=name)
+    return {"status": "saved"}
+
+@app.post("/calibration/{arm_id}/discovery/start")
+async def start_discovery(arm_id: str):
+    if system.calibration_service:
+        system.calibration_service.start_discovery(arm_id)
+    return {"status": "started"}
+
+@app.post("/calibration/{arm_id}/discovery/stop")
+async def stop_discovery(arm_id: str):
+    if system.calibration_service:
+        system.calibration_service.stop_discovery(arm_id)
+    return {"status": "stopped"}
+
+# --- Teleoperation Endpoints ---
+from app.core.teleop_service import TeleoperationService
+
+@app.post("/teleop/start")
+async def start_teleop():
+    if not system.robot:
+        raise HTTPException(status_code=503, detail="Robot not connected")
+    
+    # Initialize service if not exists (lazy load or persistent?)
+    # Persistent is better to keep state
+    if not system.teleop_service:
+         system.teleop_service = TeleoperationService(system.robot, system.leader, system.lock)
+         
+    try:
+        system.teleop_service.start()
+        return {"status": "started"}
+    except Exception as e:
+        print(f"Teleop Start Failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/teleop/stop")
+async def stop_teleop():
+    if system.teleop_service:
+        system.teleop_service.stop()
+    return {"status": "stopped"}
+
+@app.get("/teleop/status")
+def get_teleop_status():
+    running = False
+    if system.teleop_service:
+        running = system.teleop_service.is_running
+    return {"running": running}
+
+@app.get("/teleop/data")
+def get_teleop_data():
+    if system.teleop_service:
+        return {"data": system.teleop_service.get_data()}
+    return {"data": []}
+
 
 # --- Camera Endpoints ---
 
@@ -478,7 +747,7 @@ def scan_cameras():
                 active_realsense_serials.add(str(serial))
         
         # 2. Scan for Available Cameras (ignoring errors on busy ones)
-        available = system.camera_service.scan_cameras()
+        available = system.camera_service.scan_cameras(active_ids=list(active_opencv_indices))
         
         # 3. Merge (avoid duplicates)
         final_opencv = active_opencv[:]

@@ -1,23 +1,19 @@
 robot:
   cameras:
-    camera_1:
-      fps: 30
-      height: 480
-      serial_number_or_name: '218622275492'
-      type: intelrealsense
-      width: 640
-    camera_2:
-      fps: 30
-      height: 480
-      index_or_path: /dev/video10
-      type: opencv
-      width: 848
-    camera_3:
-      fps: 30
-      height: 480
-      index_or_path: /dev/video4
-      type: opencv
-      width: 640
+  - fps: 30
+    height: 720
+    id: camera_1
+    video_device_id: '218622275492'
+    width: 1280
+  - fps: 30
+    height: 720
+    id: camera_2
+    width: 1280
+  - fps: 30
+    height: 720
+    id: camera_3
+    video_device_id: /dev/video5
+    width: 1280
   id: umbra_bi_2
   left_arm_port: /dev/ttyUSB3
   right_arm_port: /dev/ttyUSB1

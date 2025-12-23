@@ -12,43 +12,89 @@ class CameraService:
     def __init__(self):
         pass
 
-    def scan_cameras(self) -> Dict[str, List[Dict[str, Any]]]:
+    def scan_cameras(self, active_ids: List[str] = None) -> Dict[str, List[Dict[str, Any]]]:
         """
         Scans for available OpenCV and RealSense cameras.
         Returns a dict with 'opencv' and 'realsense' lists.
+        Filters out devices that cannot be opened or read.
         """
+        if active_ids is None:
+            active_ids = []
+            
         results = {
             "opencv": [],
             "realsense": []
         }
         
         # Scan OpenCV
+        from app.core.camera_discovery import discover_cameras
+        
         try:
-            logger.info("Scanning for OpenCV cameras...")
-            opencv_cams = OpenCVCamera.find_cameras()
-            results["opencv"] = opencv_cams
-        except Exception as e:
-            logger.error(f"Error scanning OpenCV cameras: {e}")
+            logger.info("Scanning for cameras using unified discovery...")
+            discovered = discover_cameras()
             
-        # Scan RealSense
-        try:
-            logger.info("Scanning for RealSense cameras...")
-            # Check if pyrealsense2 is available first to avoid crash if not installed
-            try:
-                import pyrealsense2
-                rs_cams = RealSenseCamera.find_cameras()
-                results["realsense"] = rs_cams
-            except ImportError:
-                logger.warning("pyrealsense2 not installed, skipping RealSense scan.")
+            # Filter out active cameras if needed, but the frontend/main.py logic handles merging.
+            # Here we just return what discover_cameras found.
+            
+            results["opencv"] = discovered.get("opencv", [])
+            results["realsense"] = discovered.get("realsense", [])
+            
         except Exception as e:
-            logger.error(f"Error scanning RealSense cameras: {e}")
+            logger.error(f"Error during unified camera scan: {e}")
             
         return results
+
+    def capture_snapshot(self, camera_key: str):
+        config = self.get_camera_config()
+        if camera_key not in config:
+            logger.warning(f"Snapshot: {camera_key} not in config.")
+            return None
+            
+        cam_cfg = config[camera_key]
+        cam_type = cam_cfg.get("type", "opencv")
+        
+        try:
+            import cv2
+            if cam_type == "opencv":
+                idx = cam_cfg.get("index_or_path")
+                # logger.info(f"Snapshot: Opening {idx} for {camera_key}") # Commented out to reduce spam
+                cap = cv2.VideoCapture(idx)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    cap.release()
+                    if ret:
+                        return frame
+                    else:
+                        logger.warning(f"Snapshot: Read failed for {idx}")
+                else:
+                    logger.warning(f"Snapshot: Failed to open {idx} (is it busy?)")
+            
+        except Exception as e:
+            logger.error(f"Snapshot failed for {camera_key}: {e}")
+        
+        return None
 
     def get_camera_config(self) -> Dict[str, Any]:
         """Returns the current camera configuration from settings.yaml."""
         config = load_config()
-        return config.get("robot", {}).get("cameras", {})
+        raw_cameras = config.get("robot", {}).get("cameras", {})
+        
+        # Normalize List to Dict if needed
+        if isinstance(raw_cameras, list):
+            normalized = {}
+            for c in raw_cameras:
+                c_id = c.get("id", "unknown")
+                vid = c.get("video_device_id")
+                c_type = c.get("type", "opencv" if (str(vid).startswith("/dev/video") or (str(vid).isdigit() and len(str(vid)) < 4)) else "intelrealsense")
+                normalized[c_id] = {
+                    "type": c_type,
+                    "index_or_path": vid,
+                    "serial_number_or_name": vid,
+                    **c
+                }
+            return normalized
+            
+        return raw_cameras
 
     def update_camera_config(self, new_cameras_config: Dict[str, Any]):
         """

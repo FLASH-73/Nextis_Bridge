@@ -1,20 +1,23 @@
 import sys
 import os
-from pathlib import Path
+import logging
 
-# Mimic what run_backend.py does (or should do)
-root_path = Path(__file__).parent
-sys.path.append(str(root_path))
+logging.basicConfig(level=logging.INFO)
 
-# Also add lerobot path if needed, to test if that's the issue
-lerobot_path = root_path / "lerobot" / "src"
-sys.path.append(str(lerobot_path))
-
-print(f"Sys Path: {sys.path}")
+# Mock config loading since we don't haven't set up the full app context
+from unittest.mock import MagicMock
+sys.modules['app.core.config'] = MagicMock()
 
 try:
-    import app.main
-    print("Successfully imported app.main")
+    from app.core.camera_service import CameraService
+    print("SUCCESS: CameraService imported.")
+    
+    cs = CameraService()
+    print("Scanning...")
+    cams = cs.scan_cameras()
+    print(f"Scan Result: {cams}")
+    
+except ImportError as e:
+    print(f"FAIL: ImportError: {e}")
 except Exception as e:
-    import traceback
-    traceback.print_exc()
+    print(f"FAIL: Other error: {e}")
