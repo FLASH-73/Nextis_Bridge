@@ -1,0 +1,51 @@
+{
+    "base": {
+        "id": 1,
+        "drive_mode": 0,
+        "homing_offset": 2036,
+        "range_min": 1023,
+        "range_max": 3161
+    },
+    "link1": {
+        "id": 2,
+        "drive_mode": 0,
+        "homing_offset": 916,
+        "range_min": 0,
+        "range_max": 4058
+    },
+    "link2": {
+        "id": 3,
+        "drive_mode": 0,
+        "homing_offset": 1955,
+        "range_min": 48,
+        "range_max": 4062
+    },
+    "link3": {
+        "id": 4,
+        "drive_mode": 0,
+        "homing_offset": 1307,
+        "range_min": 255,
+        "range_max": 4015
+    },
+    "link4": {
+        "id": 5,
+        "drive_mode": 0,
+        "homing_offset": -1170,
+        "range_min": 912,
+        "range_max": 3276
+    },
+    "link5": {
+        "id": 6,
+        "drive_mode": 0,
+        "homing_offset": 1182,
+        "range_min": 518,
+        "range_max": 3487
+    },
+    "gripper": {
+        "id": 7,
+        "drive_mode": 0,
+        "homing_offset": -1560,
+        "range_min": 1853,
+        "range_max": 2638
+    }
+}

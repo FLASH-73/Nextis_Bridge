@@ -77,10 +77,14 @@ class SystemState:
             from app.core.camera_discovery import discover_cameras
             
             # Discover working cameras
-            print("Scanning for available cameras...")
-            discovered = discover_cameras()
-            working_opencv_ports = [c["index_or_path"] for c in discovered["opencv"]]
-            working_realsense_serials = [c["serial_number_or_name"] for c in discovered["realsense"]]
+            print("Scanning for available cameras... [SKIPPED FOR DEBUG]")
+            # discovered = discover_cameras()
+            discovered = {"opencv": [], "realsense": []}
+            working_opencv_ports = []
+            working_realsense_serials = []
+            
+            # working_opencv_ports = [c["index_or_path"] for c in discovered["opencv"]]
+            # working_realsense_serials = [c["serial_number_or_name"] for c in discovered["realsense"]]
             
             print(f"Discovered OpenCV: {working_opencv_ports}")
             print(f"Discovered RealSense: {working_realsense_serials}")
@@ -379,6 +383,26 @@ class SystemState:
             time.sleep(2)
             self.initialize()
 
+    def restart(self):
+        print("SYSTEM RESTART REQUESTED. RESPRAINING PROCESS...")
+        import sys
+        import time
+        import os
+        
+        # Flush buffers
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # Close hardware connections safely if possible
+        try:
+             self.reload() # Reuse reload to stop threads/connections
+        except:
+             pass
+             
+        # os._exit(42) forces exit without cleanup/exception handling, guaranteeing the return code
+        import os
+        os._exit(42)
+
 system = SystemState()
 
 @app.on_event("startup")
@@ -389,6 +413,25 @@ async def startup_event():
 async def shutdown_event():
     if system.orchestrator:
         system.orchestrator.stop()
+
+
+
+@app.post("/system/restart")
+def restart_system(background_tasks: BackgroundTasks):
+    # Schedule restart slightly in future to allow response to return
+    def _restart():
+        import time
+        time.sleep(1) # Give time for response to flush
+        if system:
+             system.restart()
+        else:
+             # Fallback if system not init
+             import sys
+             import os
+             os._exit(42)
+             
+    background_tasks.add_task(_restart)
+    return {"status": "restarting", "message": "System is restarting. Please wait 10 seconds."}
 
 class ChatRequest(BaseModel):
     message: str
@@ -575,6 +618,34 @@ def get_calibration_state(arm_id: str):
         return {"state": []}
     return {"state": system.calibration_service.get_calibration_state(arm_id)}
 
+@app.post("/teleop/start")
+async def start_teleop(request: Request):
+    try:
+        data = await request.json()
+    except:
+        data = {}
+        
+    force = data.get("force", False)
+    active_arms = data.get("active_arms", None) # List[str] e.g. ["left_leader", "left_follower"]
+    
+    # Lazy Initialize Teleop Service if needed
+    if not system.teleop_service:
+        if system.robot:
+             from app.core.teleop_service import TeleoperationService
+             # Ensure leader is available (BiUmbraLeader or similar)
+             system.teleop_service = TeleoperationService(system.robot, system.leader, system.lock)
+        else:
+             return {"status": "error", "message": "Teleop Service not initialized: Robot not connected"}
+
+    if system.teleop_service:
+        try:
+            system.teleop_service.start(force=force, active_arms=active_arms)
+        except Exception as e:
+            logger.error(f"Teleop Start Failed: {e}")
+            return {"status": "error", "message": str(e)}
+            
+    return {"status": "started"}
+
 @app.post("/calibration/{arm_id}/torque")
 async def set_torque(arm_id: str, request: Request):
     data = await request.json()
@@ -646,6 +717,39 @@ async def delete_calibration_file(arm_id: str, request: Request):
         return {"status": "success" if success else "error"}
     return {"status": "error"}
 
+@app.get("/calibration/{arm_id}/inversions")
+def get_inversions(arm_id: str):
+    if not system.calibration_service:
+        return {"inversions": {}}
+    return {"inversions": system.calibration_service.get_inversions(arm_id)}
+
+@app.post("/calibration/{arm_id}/inversions")
+async def set_inversion(arm_id: str, payload: dict):
+    system.calibration_service.set_inversion(arm_id, payload["motor"], payload["inverted"])
+    return {"status": "success"}
+
+@app.post("/calibration/{arm_id}/set-zero")
+async def set_zero_pose(arm_id: str):
+    """Step 1: Capture Zero Pose"""
+    try:
+        success = system.calibration_service.set_zero_pose(arm_id)
+        if success:
+             return {"status": "success"}
+        else:
+             return {"status": "error", "message": "Arm not found"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/calibration/{arm_id}/auto-align")
+async def auto_align(arm_id: str):
+    """Step 2: Compute Inversions based on movement from Zero"""
+    try:
+        result = system.calibration_service.compute_auto_alignment(arm_id)
+        return result
+    except Exception as e:
+        logger.error(f"Auto-Align failed: {e}")
+        return {"status": "error", "message": str(e)}
+
 @app.post("/calibration/{arm_id}/save_named")
 async def save_named_calibration(arm_id: str, request: Request):
     data = await request.json()
@@ -672,22 +776,9 @@ async def stop_discovery(arm_id: str):
 # --- Teleoperation Endpoints ---
 from app.core.teleop_service import TeleoperationService
 
-@app.post("/teleop/start")
-async def start_teleop():
-    if not system.robot:
-        raise HTTPException(status_code=503, detail="Robot not connected")
-    
-    # Initialize service if not exists (lazy load or persistent?)
-    # Persistent is better to keep state
-    if not system.teleop_service:
-         system.teleop_service = TeleoperationService(system.robot, system.leader, system.lock)
-         
-    try:
-        system.teleop_service.start()
-        return {"status": "started"}
-    except Exception as e:
-        print(f"Teleop Start Failed: {e}")
-        return {"status": "error", "message": str(e)}
+
+
+
 
 @app.post("/teleop/stop")
 async def stop_teleop():
@@ -708,6 +799,17 @@ def get_teleop_data():
         return {"data": system.teleop_service.get_data()}
     return {"data": []}
 
+
+@app.post("/system/reset")
+async def reset_system(background_tasks: BackgroundTasks):
+    """Soft reset attempts to re-initialize hardware without killing the process."""
+    try:
+        # Run reload in background to avoid blocking return
+        background_tasks.add_task(system.reload)
+        return {"status": "success", "message": "System reset initiated..."}
+    except Exception as e:
+        logger.error(f"Failed to reset system: {e}")
+        return {"status": "error", "message": str(e)}
 
 # --- Camera Endpoints ---
 

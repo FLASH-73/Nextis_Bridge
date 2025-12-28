@@ -67,7 +67,8 @@ class CameraService:
                     else:
                         logger.warning(f"Snapshot: Read failed for {idx}")
                 else:
-                    logger.warning(f"Snapshot: Failed to open {idx} (is it busy?)")
+                    # logger.warning(f"Snapshot: Failed to open {idx} (is it busy?)")
+                    pass
             
         except Exception as e:
             logger.error(f"Snapshot failed for {camera_key}: {e}")

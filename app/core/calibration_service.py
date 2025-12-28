@@ -26,7 +26,7 @@ class CalibrationService:
         def add_arm_groups(prefix, robot_inst, include_leader=True):
             # Check Leader Status
             if include_leader:
-                leader_motors = ["link1", "link2"]
+                leader_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
                 leader_calibrated = all(m in robot_inst.calibration for m in leader_motors)
                 arms.append({
                     "id": f"{prefix}_leader",
@@ -59,7 +59,7 @@ class CalibrationService:
             if isinstance(self.leader, BiUmbraLeader):
                 # Check Left Leader
                 l_leader = self.leader.left_arm
-                l_calibrated = all(m in l_leader.calibration for m in ["link1", "link2"])
+                l_calibrated = all(m in l_leader.calibration for m in ["base", "link1", "link2", "link3", "link4", "link5", "gripper"])
                 arms.append({
                     "id": "left_leader",
                     "name": "Left Leader",
@@ -69,7 +69,7 @@ class CalibrationService:
                 
                 # Check Right Leader
                 r_leader = self.leader.right_arm
-                r_calibrated = all(m in r_leader.calibration for m in ["link1", "link2"])
+                r_calibrated = all(m in r_leader.calibration for m in ["base", "link1", "link2", "link3", "link4", "link5", "gripper"])
                 arms.append({
                     "id": "right_leader",
                     "name": "Right Leader",
@@ -117,9 +117,9 @@ class CalibrationService:
 
         target_motors = []
         if group == "leader":
-            target_motors = ["link1", "link2"]
+            target_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
         elif group == "follower":
-            target_motors = ["base", "link1_follower", "link2_follower", "link3", "link4", "link5", "gripper"]
+            target_motors = ["base", "link1", "link1_follower", "link2", "link2_follower", "link3", "link4", "link5", "gripper"]
             
         return robot_inst, target_motors
 
@@ -187,15 +187,30 @@ class CalibrationService:
         # Ensure we have a calibration object to update
         self._ensure_calibration_initialized(arm)
         
+        warnings = []
         if arm and self.session_ranges:
             for motor, ranges in self.session_ranges.items():
                 if motor in arm.calibration:
                     arm.calibration[motor].range_min = ranges["min"]
                     arm.calibration[motor].range_max = ranges["max"]
+                    
+                    # Diagnostic Check
+                    # If Min is near 0 AND Max is near 4096 (Full Turn), it might be uninitialized/wrapped.
+                    # Unless it's a multi-turn motor or truly used 360 deg.
+                    # For link1/link2 on Umbra, this is suspicious if offsets were 0.
+                    if ranges["min"] <= 10 and ranges["max"] >= 4080:
+                         if motor in ["link1", "link2", "link1_follower", "link2_follower"]:
+                             warnings.append(f"{motor} used FULL RANGE (0-4096). Possible Wrap Error.")
                 else:
                     logger.warning(f"stop_discovery: Motor {motor} not found in arm.calibration")
             
             self.save_calibration(arm_id)
+            
+        msg = "Range Discovery Complete."
+        if warnings:
+            msg += f" WARNING: {'; '.join(warnings)}"
+            
+        return {"status": "success", "message": msg, "warnings": warnings}
 
 
     def get_calibration_state(self, arm_id: str) -> List[Dict[str, Any]]:
@@ -457,7 +472,7 @@ class CalibrationService:
         arm, target_motors = self._get_arm_context(arm_id)
         if not arm:
             logger.error(f"perform_homing: Invalid arm_id {arm_id} or arm not found.")
-            return False
+            return {"status": "error", "message": "Arm not found"}
 
         logger.info(f"Performing Homing for {arm_id} using Standard LeRobot logic")
         
@@ -465,33 +480,250 @@ class CalibrationService:
         self._ensure_calibration_initialized(arm)
         
         try:
+            offsets = {}
             if self.robot_lock:
                 with self.robot_lock:
-                     # Filter motors to only target relevant ones (avoiding gripper if needed, or all)
-                     # Usually we home all motors on the bus except Gripper? 
-                     # The UI calls this per 'arm' (leader or follower).
-                     # target_motors contains the list.
+                     # Filter motors to only target relevant ones
                      motors_to_home = [m for m in target_motors if m in arm.bus.motors]
                      
                      # Force Torque Disable first
                      arm.bus.disable_torque(motors_to_home)
                      
                      # Run standard procedure
-                     arm.bus.set_half_turn_homings(motors_to_home)
-                     
-                     # Limits are reset to 0/Max by reset_calibration inside set_half_turn_homings
-                     # We might want to keep them at 0 (Multi-turn) until Range Discovery finishes.
-                     
-                     return True
+                     offsets = arm.bus.set_half_turn_homings(motors_to_home)
             else:
                  motors_to_home = [m for m in target_motors if m in arm.bus.motors]
                  arm.bus.disable_torque(motors_to_home)
-                 arm.bus.set_half_turn_homings(motors_to_home)
-                 return True
+                 offsets = arm.bus.set_half_turn_homings(motors_to_home)
+            
+            # Diagnostic check (similar to terminal script)
+            warnings = []
+            for m, off in offsets.items():
+                if off == 0 and m in ['link1', 'link2', 'link1_follower', 'link2_follower']:
+                    warnings.append(f"{m}=0 (Suspicious)")
+            
+            msg = "Homing Done."
+            if warnings:
+                msg += f" WARNING: Zero offsets for {', '.join(warnings)}. Check Motor Alignment!"
+                
+            return {"status": "success", "offsets": offsets, "message": msg}
 
         except Exception as e:
             import traceback
             traceback.print_exc()
             logger.exception(f"Homing failed with exception: {e}")
-            return False
+            return {"status": "error", "message": str(e)}
         
+    
+    def _get_inversions_file(self, arm_id: str):
+        import pathlib
+        base_dir = pathlib.Path(f"calibration_profiles/{arm_id}")
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return base_dir / "inversions.json"
+
+    def get_inversions(self, arm_id: str) -> Dict[str, bool]:
+        fpath = self._get_inversions_file(arm_id)
+        if not fpath.exists():
+            # Return defaults if file doesn't exist
+            # We can't easily guess defaults here without the robot logic, 
+            # so we return empty which implies "use robot defaults" or "false" depending on implementation.
+            # However, to be "smart", maybe we populate it with current robot state if available?
+            return {}
+            
+        import json
+        try:
+            with open(fpath, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+
+    def set_inversion(self, arm_id: str, motor_name: str, inverted: bool):
+        fpath = self._get_inversions_file(arm_id)
+        current = self.get_inversions(arm_id)
+        current[motor_name] = inverted
+        
+        import json
+        with open(fpath, "w") as f:
+            json.dump(current, f, indent=2)
+            
+        # If robot is active, try to apply immediately?
+        # The robot driver needs to reload this.
+        arm, _ = self._get_arm_context(arm_id)
+        if arm and hasattr(arm, "reload_inversions"):
+            arm.reload_inversions(current)
+
+    def set_zero_pose(self, arm_id: str):
+        """Captures the current position as the baseline 'Zero' for alignment. Also disables torque."""
+        # Infer pair to ensure both are loose for the user to move
+        parts = arm_id.split("_")
+        side = parts[0]
+        leader_id = f"{side}_leader"
+        follower_id = f"{side}_follower"
+        
+        # Disable Torque on both
+        self.disable_torque(leader_id)
+        self.disable_torque(follower_id)
+        
+        # Determine which arm we are setting zero for? 
+        # Actually, we need to capture zero for BOTH if we are doing the wizard.
+        # But the UI calls this set-zero endpoint for *each* arm in a loop (Promise.all).
+        # "Promise.all(pairs.map(id => fetch(... set-zero ...)))"
+        # So this method is called individually.
+        # However, to be safe and redundant (and safe for the user), ensuring torque is off here is good.
+        
+        arm, _ = self._get_arm_context(arm_id)
+        if not arm: return False
+        
+        # Read all raw positions
+        positions = arm.bus.sync_read("Present_Position", normalize=False)
+        
+        # Store in session memory
+        if not hasattr(self, "alignment_zeros"):
+            self.alignment_zeros = {}
+            
+        self.alignment_zeros[arm_id] = positions
+        logger.info(f"Captured Zero Pose for {arm_id} (Torque Disabled): {positions}")
+        return True
+
+    def compute_auto_alignment(self, arm_id: str):
+        """
+        Compares current position to Zero pose.
+        If Leader moves + and Follower moves -, marks as Inverted.
+        Requires:
+        1. set_zero_pose() called previously.
+        2. Leader and Follower to be moved roughly in sync.
+        """
+        # We need BOTH the Leader and the Follower for this arm group
+        # arm_id is roughly "left_follower" or "left_leader".
+        # We need to deduce the pair.
+        
+        parts = arm_id.split("_")
+        side = parts[0] # left or right
+        
+        # Determine IDs
+        leader_id = f"{side}_leader"
+        follower_id = f"{side}_follower"
+        
+        # Get contexts
+        l_arm, _ = self._get_arm_context(leader_id)
+        f_arm, _ = self._get_arm_context(follower_id)
+        
+        if not l_arm or not f_arm:
+             logger.error("AutoAlign: Could not find both Leader and Follower arms.")
+             return {"status": "error", "message": "Leader or Follower missing."}
+             
+        # Check Zeros
+        if not hasattr(self, "alignment_zeros"):
+             return {"status": "error", "message": "Zero Pose not set."}
+             
+        l_zeros = self.alignment_zeros.get(leader_id)
+        f_zeros = self.alignment_zeros.get(follower_id)
+        
+        if not l_zeros or not f_zeros:
+             return {"status": "error", "message": "Zero Pose missing for one or both arms."}
+
+        # Read Current
+        l_current = l_arm.bus.sync_read("Present_Position", normalize=False)
+        f_current = f_arm.bus.sync_read("Present_Position", normalize=False)
+        
+        changes = {}
+        inversions = self.get_inversions(follower_id) # Current inversions for follower
+        
+        # Compare Motors
+        # Maps: Leader Name -> Follower Name
+        # Standard: linkX -> linkX (and linkX_follower if dual)
+        # We primarily check the main link motor. In dual setup, linkX_follower usually follows linkX logic inverted or not.
+        # But for Auto-Align, we just check distinct names.
+        
+        mapping = {
+            "link1": "link1",
+            "link2": "link2",
+            "link3": "link3",
+            "link4": "link4",
+            "link5": "link5",
+            "gripper": "gripper"
+        }
+        
+        THRESHOLD = 50 # Minimum movement to detect direction (approx 4 degrees)
+        
+        inverted_count = 0
+        
+        for l_name, f_name in mapping.items():
+            if l_name not in l_current or f_name not in f_current:
+                continue
+                
+            # Calculate Deltas
+            l_delta = l_current[l_name] - l_zeros[l_name]
+            f_delta = f_current[f_name] - f_zeros[f_name]
+            
+            # Check Threshold
+            if abs(l_delta) < THRESHOLD or abs(f_delta) < THRESHOLD:
+                changes[f_name] = "unchanged (small movement)"
+                continue
+                
+            # Check Signs
+            # If signs differ, they are moving opposite.
+            # In a "Sync Pose" where users move them visually identically,
+            # opposite raw values -> NEeds Inversion.
+            
+            # Note: Current logic in robot driver: goal = -present if inverted.
+            # So if we detect they are opposite, we should SET Inverted = True.
+            # If they are same, Inverted = False.
+            
+            # HOWEVER: There is a "gripper" exception (100 - x).
+            # Gripper Raw: 0 (Open) to 100 (Closed) or vice versa.
+            # If Leader goes 0->50 (+50)
+            # Follower goes 100->50 (-50)
+            # Signs opposite. -> Invert = True. 
+            # Driver: if Invert: goal = 100 - pos.
+            # So if Leader=50, Follower=100-50=50. Correct.
+            
+            # Standard Motor:
+            # L: 0->100 (+100). F: 0->-100 (-100).
+            # Signs opposite. -> Invert = True.
+            # Driver: goal = -pos = -(-100) = 100. Correct.
+            
+            # Conclusion: If signs opposite => Invert=True.
+            
+            # Wait, what if it was ALREADY inverted in the config? 
+            # The calibration service sets the *config*.
+            # The User physically moved the robot. The Raw values are independent of software inversion.
+            # So this logic holds regardless of previous config:
+            # Physical Opposites in Raw Values = Needs Software Inversion.
+            
+            is_inverted = (l_delta * f_delta) < 0
+            
+            if is_inverted != inversions.get(f_name, False):
+                 inversions[f_name] = is_inverted
+                 changes[f_name] = f"SET INVERTED={is_inverted}"
+                 inverted_count += 1
+            else:
+                 changes[f_name] = "ok"
+                 
+            # Also handle dual followers? (link1_follower, link2_follower)
+            # Usually they are physically coupled. If link1 is inverted, link1_follower usually follows suit
+            # or has its own specific physical mounting.
+            # If we want to be thorough:
+            f_dual = f"{f_name}_follower"
+            if f_dual in f_current:
+                 f_delta_dual = f_current[f_dual] - f_zeros.get(f_dual, 0)
+                 if abs(f_delta_dual) > THRESHOLD:
+                      is_inv_dual = (l_delta * f_delta_dual) < 0
+                      if is_inv_dual != inversions.get(f_dual, False):
+                           inversions[f_dual] = is_inv_dual
+                           changes[f_dual] = f"SET INVERTED={is_inv_dual}"
+                           inverted_count += 1
+
+        # Save results
+        if inverted_count > 0:
+             self.set_inversion(follower_id, "batch_update", False) # Just to trigger file path retrieval inside loop? No.
+             # We should use a batch update method or loop.
+             fpath = self._get_inversions_file(follower_id)
+             with open(fpath, "w") as f:
+                 import json
+                 json.dump(inversions, f, indent=2)
+             
+             # Reload robot
+             f_arm.reload_inversions(inversions)
+             
+        return {"status": "success", "inverted_count": inverted_count, "changes": changes}

@@ -5,6 +5,8 @@ import logging
 from collections import deque
 import numpy as np
 
+from app.core.safety_layer import SafetyLayer
+
 logger = logging.getLogger(__name__)
 
 class TeleoperationService:
@@ -12,6 +14,8 @@ class TeleoperationService:
         self.robot = robot
         self.leader = leader
         self.robot_lock = robot_lock
+        
+        self.safety = SafetyLayer(robot_lock) # Initialize Safety Layer
         
         self.is_running = False
         self.thread = None
@@ -26,46 +30,77 @@ class TeleoperationService:
         self.action_history = deque(maxlen=self.max_history)
         
     def check_calibration(self):
-        """Returns True if all connected arms are calibrated."""
-        if not self.robot:
-            return False
-            
-        # Check Follower Arms
-        if not hasattr(self.robot, "calibration"):
-             # If robot doesn't use standard calibration dict, assume uncalibrated or handle differently
-             return False
-             
-        # Ideally we reuse CalibrationService logic or check flags directly
-        # For BiUmbra, check left/right/follower keys
-        # We can implement a simplified check here or rely on the caller to use CalibrationService
-        
-        # Let's assume strict check: all motors in bus must be in calibration dict
-        # EXCEPT Gripper might be optional depending on config?
-        # Safe bet: Check if is_calibrated property is True on the Robot object
-        if hasattr(self.robot, "is_calibrated") and not self.robot.is_calibrated:
-             return False
-             
-        # Check Leader Arms
+        # Check Leader Calibration
         if self.leader:
-             if hasattr(self.leader, "is_calibrated") and not self.leader.is_calibrated:
-                  return False
-                  
+            if not getattr(self.leader, "is_calibrated", False):
+                logger.error(f"Leader {self.leader} is NOT calibrated.")
+                return False
+        
+        # Check Follower Calibration
+        if self.robot:
+            if not getattr(self.robot, "is_calibrated", False):
+                logger.error(f"Robot {self.robot} is NOT calibrated.")
+                return False
+                
         return True
 
-    def start(self):
+    def start(self, force=False, active_arms=None):
         if self.is_running:
             return
             
         if not self.robot:
              raise Exception("Robot not connected")
         
+        # Store active arms (if provided, else None means All)
+        self.active_arms = active_arms
+        logger.info(f"Teleoperation Request: Active Arms = {self.active_arms}")
+        logger.info(f"Robot Type: {type(self.robot)}")
+        if self.leader:
+             logger.info(f"Leader Type: {type(self.leader)}")
+        else:
+             logger.info("Leader: None")
+        
+        # Validate selection if provided
+        if self.active_arms is not None:
+             # Basic check: Need at least 1 leader and 1 follower?
+             leaders = [a for a in self.active_arms if "leader" in a]
+             followers = [a for a in self.active_arms if "follower" in a]
+             if not force and (not leaders or not followers):
+                  logger.error("Selection Validation Failed")
+                  raise Exception("Invalid Selection: Must select at least one Leader and one Follower.")
+        
         if not self.check_calibration():
-             raise Exception("System not fully calibrated. Please calibrate all arms first.")
-             
+             msg = "System not fully calibrated. Leader or Follower is missing calibration."
+             if not force:
+                 logger.warning(f"IGNORING CALIBRATION CHECK: {msg}")
+                 # raise Exception(f"{msg} Use force=True to override (DANGEROUS).")
+             else:
+                 logger.warning(f"FORCE START: {msg} Proceeding with caution.")
+        
+        # Enable Torque for Follower Arms
+        self._enable_torque_for_active_arms()
+                 
         self.is_running = True
         self.thread = threading.Thread(target=self._teleop_loop, daemon=True)
         self.thread.start()
-        logger.info("Teleoperation started.")
+
+    def _enable_torque_for_active_arms(self):
+        """Helper to enable torque on follower arms involved in teleop."""
+        if not self.robot: return
+        
+        try:
+            logger.info("Enabling Torque for Teleoperation...")
+            
+            # Robust Enable: Try to enable everything found
+            if hasattr(self.robot, "left_arm"):
+                 self.robot.left_arm.bus.enable_torque()
+            if hasattr(self.robot, "right_arm"):
+                 self.robot.right_arm.bus.enable_torque()
+            if hasattr(self.robot, "bus"):
+                 self.robot.bus.enable_torque()
+                 
+        except Exception as e:
+            logger.error(f"Failed to enable torque: {e}")
 
     def stop(self):
         if not self.is_running:
@@ -75,98 +110,106 @@ class TeleoperationService:
         if self.thread:
             self.thread.join(timeout=2.0)
         logger.info("Teleoperation stopped.")
+        
+        # Cleanup Debug Handler
+        if hasattr(self, '_debug_handler'):
+             logger.removeHandler(self._debug_handler)
+             self._debug_handler.close()
 
     def _teleop_loop(self):
         logger.info("Teleoperation Control Loop Running")
         
+        first_run = True
+        loop_count = 0
+        
         try:
-            # Enable Torque on Robot (Follower)
-            # Leader usually stays in low-torque or read-only mode depending on hardware
-            # For BiUmbraLeader, motors are usually read-only or low torque.
-            
-            # self.robot.connect() usually enables torque.
-            
             while self.is_running:
                 start_time = time.perf_counter()
                 
-                # 1. Read Leader State (Action)
-                # If no leader (dev mode), maybe generate sine wave or static
+                # --- SAFETY CHECK ---
+                if loop_count % 4 == 0:
+                     if not self.safety.check_limits(self.robot):
+                         logger.critical("Teleoperation Aborted by Safety Layer")
+                         self.is_running = False
+                         break
+                loop_count += 1
+                # ---------------------
+                
+                # 1. Read Leader
                 leader_action = {}
                 if self.leader:
-                    leader_pos = self.leader.get_measured_joint_positions() # Returns dict or array?
-                    # Depending on LeRobot implementation. 
-                    # BiUmbraLeader returns dictionary of joint positions usually.
-                    
-                    # Map Leader -> Follower
-                    # Simple 1:1 mapping for same kinematic structure
-                    # leader "link1" -> follower "link1_follower" etc?
-                    # Or leader "left_shoulder_pan" -> robot "left_shoulder_pan"
-                    
-                    # For BiUmbra, let's assume direct mapping for now or use specific logic
-                    # This is highly robot specific.
-                    # Assuming dictionary output from get_observation() or similar
-                    
-                    # Let's use get_observation() for generic approach
-                    obs = self.leader.get_observation()
-                    # Extract joint positions. 
-                    
-                    # HACK: For MVP, if we don't know the exact mapping, we might just log inputs
-                    # But the user wants it to WORK.
-                    # The BiUmbraFollower.send_action expects a dictionary.
-                    
-                    # If Leader is same structure as Follower (BiUmbra), we can map directly.
-                    # But usually Leader IDs != Follower IDs.
-                    # We might need to rename keys.
-                    
+                    obs = self.leader.get_action()
+                        
                     leader_action = self._map_leader_to_follower(obs)
-                
-                else:
-                    # Dev Mode: Hold Position
-                    pass
-                
+                    
+                    # DEBUG: Print action every 60 frames
+                    if loop_count % 60 == 0:
+                        logger.info(f"Teleop Debug: Action Keys: {list(leader_action.keys())} | Sample Val: {list(leader_action.values())[:3]}")
+
                 # 2. Send to Follower
                 if leader_action and self.robot:
-                     # Lock if shared with Orchestrator
                      if self.robot_lock:
                          with self.robot_lock:
                              self.robot.send_action(leader_action)
                      else:
                          self.robot.send_action(leader_action)
                 
-                # 3. Store Data for Graph
+                # 3. Store Data
                 self._update_history(leader_action)
+                
+                first_run = False
 
                 # 4. Sleep
                 elapsed = time.perf_counter() - start_time
                 sleep_time = max(0, self.dt - elapsed)
                 time.sleep(sleep_time)
                 
+        except OSError as e:
+            if e.errno == 5: 
+                 logger.error(f"CRITICAL: Hardware Disconnected during Teleop: {e}")
+            else:
+                 logger.error(f"Teleop OSError: {e}")
         except Exception as e:
-            logger.error(f"Teleop Loop Failed: {e}")
-            import traceback
-            traceback.print_exc()
+             logger.error(f"Teleop Loop Failed: {e}")
+             import traceback
+             logger.error(traceback.format_exc())
         finally:
             self.is_running = False
 
     def _map_leader_to_follower(self, leader_obs):
         """
         Maps observations from Leader to Actions for Follower.
-        BiUmbra Specific Mapping.
+        Filters based on self.active_arms.
         """
-        # Dictionary comprehension to map keys. 
-        # Needs knowledge of Leader Key names vs Follower Key names.
-        # Assuming they share standard LeRobot naming or we construct it.
-        
-        # Example: leader "left_link1.pos" -> follower "left_link1.pos"?
-        # Or leader has "link1", "link2" fields?
-        
-        # Simple Pass-through for now, filtering for ".pos"
         action = {}
+        
+        def is_active(side, group):
+            if self.active_arms is None: return True
+            id_str = f"{side}_{group}"
+            if id_str not in self.active_arms:
+                 return False
+            return True
+
         for k, v in leader_obs.items():
-            if k.endswith(".pos"):
-                # Clean up key if needed?
-                # If leader returns "left_arm.link1.pos", follower probably needs same.
+            if not k.endswith(".pos"):
+                continue
+                
+            # Parse Key: e.g. "left_link1.pos"
+            side = "default"
+            if k.startswith("left_"): side = "left"
+            elif k.startswith("right_"): side = "right"
+            
+            # Check if this KEY should be processed
+            # Requires Leader Active AND Follower Active
+            
+            leader_active = is_active(side, "leader")
+            follower_active = is_active(side, "follower")
+            
+            if leader_active and follower_active:
                 action[k] = v
+            # else:
+            #    logger.debug(f"Dropping {k}: Leader={leader_active}, Follower={follower_active}")
+            
         return action
 
     def _update_history(self, action_dict):
