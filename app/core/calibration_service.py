@@ -126,6 +126,47 @@ class CalibrationService:
     def _ensure_active_profiles_init(self):
         if not hasattr(self, "active_profiles"):
             self.active_profiles = {}
+            self._load_persistent_active_profiles()
+
+    def _get_persistence_path(self):
+        import pathlib
+        base_dir = pathlib.Path("calibration_profiles")
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return base_dir / "active_profiles.json"
+        
+    def _load_persistent_active_profiles(self):
+        fpath = self._get_persistence_path()
+        if fpath.exists():
+            import json
+            try:
+                with open(fpath, "r") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.active_profiles = data
+                        logger.info(f"Loaded persistent active profiles: {self.active_profiles}")
+            except Exception as e:
+                logger.error(f"Failed to load persistent active profiles: {e}")
+
+    def _save_persistent_active_profiles(self):
+        fpath = self._get_persistence_path()
+        import json
+        try:
+            with open(fpath, "w") as f:
+                json.dump(self.active_profiles, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save persistent active profiles: {e}")
+
+    def restore_active_profiles(self):
+        """Attempts to load the calibration files for the active profiles."""
+        self._ensure_active_profiles_init()
+        logger.info("Restoring active calibration profiles...")
+        
+        for arm_id, filename in self.active_profiles.items():
+            logger.info(f"Restoring {arm_id} -> {filename}")
+            # we use load_calibration_file but need to avoid recursion loop with save?
+            # load_calibration_file calls _save_persistent if we add it there.
+            # That's fine.
+            self.load_calibration_file(arm_id, filename)
 
     def _ensure_calibration_initialized(self, arm):
         """Ensures that arm.calibration is populated with default entries for all motors."""
@@ -339,6 +380,7 @@ class CalibrationService:
             
             # Update Active Profile state
             self.active_profiles[arm_id] = filename
+            self._save_persistent_active_profiles()
             
             logger.info(f"Successfully loaded calibration for {arm_id}")
             return True
@@ -400,6 +442,7 @@ class CalibrationService:
                 
             # Update Active Profile state
             self.active_profiles[arm_id] = safe_name
+            self._save_persistent_active_profiles()
 
 
 

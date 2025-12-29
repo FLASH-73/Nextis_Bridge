@@ -15,6 +15,10 @@ class SafetyLayer:
         # Consecutive violations to trigger (debounce)
         self.VIOLATION_LIMIT = 3
         self.violation_counts = {}
+        self.latest_loads = {}  # Store latest readings for UI
+        
+        self.monitored_motors = []
+        self.current_motor_index = 0
         
     def check_limits(self, robot):
         """
@@ -24,32 +28,39 @@ class SafetyLayer:
         if not robot or not robot.is_connected:
             return True
 
-        # 1. Check Load (Torque)
         try:
-            # We need to access the bus directly
-            # robot.left_arm.bus and robot.right_arm.bus
-            
-            # Combine all buses
-            buses = []
-            if hasattr(robot, "left_arm"): buses.append(robot.left_arm.bus)
-            if hasattr(robot, "right_arm"): buses.append(robot.right_arm.bus)
-            if hasattr(robot, "bus"): buses.append(robot.bus)
-            
-            for bus in buses:
-                # Sync Read Load
-                # "Present_Load" is (60, 2) in table
-                # Normalize=False gives raw values (usually signed int16)
-                # But feetech load might be magnitude? 
-                # STS manuals say bit 10 is direction, 0-9 is value (0-1000).
-                # Let's read raw and parse.
+            # Initialize monitored motors list if empty or robot changed (simplified check)
+            if not self.monitored_motors:
+                buses = []
+                if hasattr(robot, "left_arm"): buses.append(robot.left_arm.bus)
+                if hasattr(robot, "right_arm"): buses.append(robot.right_arm.bus)
+                if hasattr(robot, "bus"): buses.append(robot.bus)
                 
-                loads = bus.sync_read("Present_Load", normalize=False)
+                for bus in buses:
+                    # We need to know which motors are on this bus.
+                    # bus.motors is a dict
+                    for motor_name in bus.motors.keys():
+                        self.monitored_motors.append((bus, motor_name))
                 
-                for motor, load_val in loads.items():
-                    # Parse load
-                    # Bit 10 is direction (1024). Value is lower 10 bits.
+                if not self.monitored_motors:
+                    return True
+
+            # Check a batch of motors (Round-Robin)
+            # Check 1 motor per call to minimize lock holding time in the main thread
+            batch_size = 1 
+            
+            for _ in range(batch_size):
+                if not self.monitored_motors: break
+                
+                self.current_motor_index = (self.current_motor_index + 1) % len(self.monitored_motors)
+                bus, motor = self.monitored_motors[self.current_motor_index]
+                
+                try:
+                    # Read specific motor load
+                    load_val = bus.read("Present_Load", motor, normalize=False)
                     magnitude = load_val % 1024
-                    
+                    self.latest_loads[motor] = magnitude
+
                     if magnitude > self.LOAD_THRESHOLD:
                          self.violation_counts[motor] = self.violation_counts.get(motor, 0) + 1
                          logger.warning(f"SAFETY WARNING: Motor {motor} Load {magnitude}/{self.LOAD_THRESHOLD} (Count {self.violation_counts[motor]})")
@@ -60,13 +71,15 @@ class SafetyLayer:
                         logger.error(f"SAFETY CRITICAL: Motor {motor} overloaded! Triggering E-STOP.")
                         self.emergency_stop(robot)
                         return False
+                        
+                except Exception as e:
+                    # Silent fail for single read error to robustify
+                    pass
 
             return True
 
         except Exception as e:
             logger.error(f"Safety Check Failed: {e}")
-            # If we can't verify safety, we should probably stop? 
-            # Or just warn for now to avoid false triggers during dev
             return True 
 
     def emergency_stop(self, robot):

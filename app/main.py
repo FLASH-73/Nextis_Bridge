@@ -13,8 +13,9 @@ sys.path.insert(0, str(root_path))
 # Add lerobot/src to sys.path
 sys.path.insert(0, str(root_path / "lerobot" / "src"))
 
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, WebSocket, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from app.core.config import load_config
 from app.core.orchestrator import TaskOrchestrator
@@ -37,6 +38,8 @@ app.add_middleware(
 )
 
 import threading
+import time
+import asyncio
 
 from app.core.camera_service import CameraService
 
@@ -50,11 +53,29 @@ class SystemState:
         self.calibration_service = None
         self.camera_service = None
         self.teleop_service = None
+        self.teleop_service = None
         self.lock = threading.Lock()
+        
+        self.is_initializing = False
+        self.init_error = None
 
 
     def initialize(self):
-        print("Initializing System...")
+        self.is_initializing = True
+        self.init_error = None
+        try:
+             self._inner_initialize()
+        except Exception as e:
+             import traceback
+             print(f"CRITICAL INIT ERROR: {e}")
+             traceback.print_exc()
+             self.init_error = str(e)
+        finally:
+             self.is_initializing = False
+             print("System Initialization Complete.")
+
+    def _inner_initialize(self):
+        print("Initializing System (Async Internal)...")
         import lerobot
         # print(f"DEBUG: lerobot path: {lerobot.__file__}")
         
@@ -326,14 +347,13 @@ class SystemState:
             from unittest.mock import MagicMock
             self.robot = MagicMock()
             self.robot.is_connected = False
+            self.robot.is_mock = True # Flag as Mock
             self.robot.capture_observation.return_value = {}
 
         self.orchestrator = TaskOrchestrator(self.robot, self.recorder, robot_lock=self.lock)
         self.orchestrator.start() # Start the orchestrator and intervention engine
         
-        # Initialize Calibration Service
-        if self.robot or self.leader:
-            self.calibration_service = CalibrationService(self.robot, self.leader, robot_lock=self.lock)
+
 
         # Initialize Planner
         try:
@@ -351,9 +371,11 @@ class SystemState:
             print(f"⚠️ Failed to load Planner: {e}")
             self.planner = None
             
-        # Initialize Calibration Service
         if self.robot or self.leader:
             self.calibration_service = CalibrationService(self.robot, self.leader, robot_lock=self.lock)
+            self.calibration_service.restore_active_profiles()
+
+
 
     def reload(self):
         print("Reloading System...")
@@ -383,6 +405,32 @@ class SystemState:
             time.sleep(2)
             self.initialize()
 
+    def shutdown(self):
+        print("Shutting Down System State...")
+        if self.orchestrator:
+            self.orchestrator.stop()
+            
+        with self.lock:
+            # Disconnect Robot
+            if self.robot:
+                try:
+                    if hasattr(self.robot, 'disconnect'):
+                        self.robot.disconnect()
+                except Exception as e:
+                    print(f"Error disconnecting robot: {e}")
+            
+            # Disconnect Leader
+            if self.leader:
+                try:
+                    if hasattr(self.leader, 'disconnect'):
+                        self.leader.disconnect()
+                except Exception as e:
+                    print(f"Error disconnecting leader: {e}")
+        
+        # Brief pause to ensure OS releases handles
+        import time
+        time.sleep(0.5)
+
     def restart(self):
         print("SYSTEM RESTART REQUESTED. RESPRAINING PROCESS...")
         import sys
@@ -395,9 +443,9 @@ class SystemState:
         
         # Close hardware connections safely if possible
         try:
-             self.reload() # Reuse reload to stop threads/connections
-        except:
-             pass
+             self.shutdown() # Clean shutdown (no re-init)
+        except Exception as e:
+             print(f"Error during shutdown: {e}")
              
         # os._exit(42) forces exit without cleanup/exception handling, guaranteeing the return code
         import os
@@ -407,7 +455,10 @@ system = SystemState()
 
 @app.on_event("startup")
 async def startup_event():
-    system.initialize()
+    import threading
+    # Run initialization in background to allow server to start immediately
+    t = threading.Thread(target=system.initialize, daemon=True)
+    t.start()
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -418,20 +469,71 @@ async def shutdown_event():
 
 @app.post("/system/restart")
 def restart_system(background_tasks: BackgroundTasks):
-    # Schedule restart slightly in future to allow response to return
-    def _restart():
-        import time
-        time.sleep(1) # Give time for response to flush
-        if system:
-             system.restart()
-        else:
-             # Fallback if system not init
-             import sys
-             import os
-             os._exit(42)
-             
-    background_tasks.add_task(_restart)
-    return {"status": "restarting", "message": "System is restarting. Please wait 10 seconds."}
+    # Queue restart to allow response to send first
+    background_tasks.add_task(delayed_restart)
+    return {"status": "restarting", "message": "System is restarting..."}
+    
+def delayed_restart():
+    """Waits briefly then forces a system restart."""
+    import time
+    time.sleep(0.5)
+    system.restart()
+
+@app.post("/system/reconnect")
+def reconnect_system(background_tasks: BackgroundTasks):
+    """Attempts to re-initialize hardware without killing the server."""
+    if system.is_initializing:
+        return {"status": "busy", "message": "Already initializing..."}
+        
+    print("Manual Reconnect Requested.")
+    
+    def async_init():
+        max_retries = 3
+        for attempt in range(max_retries):
+            print(f"Reconnect Attempt {attempt+1}/{max_retries}...")
+            
+            # 1. Force Disconnect with Safety
+            with system.lock:
+                # Disconnect Robot
+                if system.robot:
+                    try: 
+                        print("Disconnecting Robot...")
+                        system.robot.disconnect()
+                    except Exception as e: 
+                        print(f"Warning: Robot disconnect failed: {e}")
+                    system.robot = None
+                    
+                # Disconnect Leader
+                if system.leader:
+                    try: 
+                        print("Disconnecting Leader...")
+                        system.leader.disconnect()
+                    except Exception as e: 
+                        print(f"Warning: Leader disconnect failed: {e}")
+                    system.leader = None
+            
+            # 2. Wait for OS to release ports (Critical)
+            import time
+            print("Waiting for ports to release...")
+            time.sleep(2.0)
+            
+            # 3. Try Initialize
+            print("Initializing System...")
+            system.initialize()
+            
+            # 4. Check Success
+            if not system.init_error and system.robot and system.robot.is_connected:
+                print("Reconnect SUCCESS!")
+                return
+            
+            # 5. If failed, wait before retry
+            print(f"Reconnect Failed (Error: {system.init_error}). Retrying in 3s...")
+            time.sleep(3.0)
+            
+        print("All Reconnect Attempts Failed.")
+
+    background_tasks.add_task(async_init)
+    return {"status": "initializing", "message": "Reconnecting hardware..."}
 
 class ChatRequest(BaseModel):
     message: str
@@ -440,20 +542,52 @@ class ChatRequest(BaseModel):
 def read_root():
     return {"status": "online", "service": "nextis-robotics"}
 
+
 @app.get("/status")
 def get_status():
-    status = "IDLE"
+    # 1. Connection State
+    connection = "DISCONNECTED"
+    if system.is_initializing:
+        connection = "INITIALIZING"
+    elif system.init_error:
+        connection = "ERROR"
+    elif system.robot:
+        if getattr(system.robot, 'is_mock', False):
+            connection = "MOCK"
+        elif system.robot.is_connected:
+            connection = "CONNECTED"
+            
+    # 2. Execution State
+    execution = "IDLE"
+    status_text = "READY" # Default text
+    
     if system.orchestrator:
         if system.orchestrator.active_policy:
-            status = f"EXECUTING: {system.orchestrator.task_chain[system.orchestrator.current_task_index]}"
+            execution = "EXECUTING"
+            status_text = f"BUSY: {system.orchestrator.task_chain[system.orchestrator.current_task_index]}"
         elif system.orchestrator.intervention_engine.is_human_controlling:
-            status = "INTERVENTION (RECORDING)"
-    
+            execution = "INTERVENTION"
+            status_text = "RECORDING"
+            
+    # 3. Overall System Status Label (Legacy + UI)
+    if connection == "INITIALIZING":
+        status_text = "STARTING..."
+    elif connection == "ERROR":
+        status_text = "ERROR"
+    elif connection == "DISCONNECTED":
+        status_text = "OFFLINE"
+    elif connection == "MOCK":
+        status_text = "MOCK MODE"
+    # Else if CONNECTED + IDLE -> READY
+            
     return {
-        "system_status": status,
-        "left_arm": "CONNECTED" if system.robot else "MOCK",
-        "right_arm": "CONNECTED" if system.robot else "MOCK",
-        "fps": 30.0
+        "status": status_text,      # Legacy support for frontend simple check
+        "connection": connection,   # CONNECTED, DISCONNECTED, MOCK, INITIALIZING, ERROR
+        "execution": execution,     # IDLE, EXECUTING, INTERVENTION
+        "error": system.init_error,
+        "left_arm": connection,     # Simplification for now
+        "right_arm": connection,
+        "fps": 30.0 if connection == "CONNECTED" else 0.0
     }
 
 @app.get("/config")
