@@ -21,6 +21,8 @@ from app.core.config import load_config
 from app.core.orchestrator import TaskOrchestrator
 from app.core.recorder import DataRecorder
 from app.core.calibration_service import CalibrationService
+from app.core.leader_assist import LeaderAssistService
+from app.core.teleop_service import TeleoperationService
 from lerobot.robots.utils import make_robot_from_config
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
@@ -53,7 +55,7 @@ class SystemState:
         self.calibration_service = None
         self.camera_service = None
         self.teleop_service = None
-        self.teleop_service = None
+        self.leader_assists = {} # {arm_prefix: LeaderAssistService}
         self.lock = threading.Lock()
         
         self.is_initializing = False
@@ -307,6 +309,7 @@ class SystemState:
                         from lerobot.teleoperators.bi_umbra_leader.config_bi_umbra_leader import BiUmbraLeaderConfig
                         
                         l_config = BiUmbraLeaderConfig(
+                            id="bi_umbra_leader_main",  # Explicit ID to avoid 'None.json'
                             left_arm_port=teleop_cfg["left_arm_port"],
                             right_arm_port=teleop_cfg["right_arm_port"],
                             calibration_dir=Path(teleop_cfg.get("calibration_dir", ".cache/calibration"))
@@ -314,6 +317,15 @@ class SystemState:
                         self.leader = BiUmbraLeader(l_config)
                         self.leader.connect(calibrate=False)
                         print("✅ Leader Arms Connected Successfully!")
+                        
+                        # Initialize Leader Assist Services
+                        self.leader_assists = {}
+                        if hasattr(self.leader, "left_arm") and hasattr(self.leader, "right_arm"):
+                             self.leader_assists["left"] = LeaderAssistService(arm_id="left_leader")
+                             self.leader_assists["right"] = LeaderAssistService(arm_id="right_leader")
+                        else:
+                             self.leader_assists["default"] = LeaderAssistService(arm_id="leader")
+                             
                     else:
                         self.leader = None
                         
@@ -374,6 +386,9 @@ class SystemState:
         if self.robot or self.leader:
             self.calibration_service = CalibrationService(self.robot, self.leader, robot_lock=self.lock)
             self.calibration_service.restore_active_profiles()
+            
+            # Initialize Teleoperation
+            self.teleop_service = TeleoperationService(self.robot, self.leader, self.lock, leader_assists=getattr(self, 'leader_assists', {}))
 
 
 
@@ -767,7 +782,7 @@ async def start_teleop(request: Request):
         if system.robot:
              from app.core.teleop_service import TeleoperationService
              # Ensure leader is available (BiUmbraLeader or similar)
-             system.teleop_service = TeleoperationService(system.robot, system.leader, system.lock)
+             system.teleop_service = TeleoperationService(system.robot, system.leader, system.lock, leader_assists=system.leader_assists)
         else:
              return {"status": "error", "message": "Teleop Service not initialized: Robot not connected"}
 
@@ -775,10 +790,85 @@ async def start_teleop(request: Request):
         try:
             system.teleop_service.start(force=force, active_arms=active_arms)
         except Exception as e:
-            logger.error(f"Teleop Start Failed: {e}")
+            print(f"Teleop Start Failed: {e}")
             return {"status": "error", "message": str(e)}
             
     return {"status": "started"}
+
+@app.post("/emergency/stop")
+def emergency_stop():
+    print("🚨 EMERGENCY STOP TRIGGERED 🚨")
+    errors = []
+    
+    # 1. Stop Higher Level Logic
+    try:
+        if system.orchestrator:
+            system.orchestrator.stop()
+    except Exception as e:
+        errors.append(f"Orchestrator: {e}")
+
+    try:
+        if system.teleop_service:
+            system.teleop_service.stop()
+    except Exception as e:
+        errors.append(f"Teleop: {e}")
+
+    def disable_bus_robust(bus, name="Bus"):
+        try:
+             # Try new Broadcast method if available
+             if hasattr(bus, "emergency_stop_broadcast"):
+                 bus.emergency_stop_broadcast()
+             else:
+                 # Fallback
+                 bus.disable_torque(None, num_retry=5)
+        except Exception as e:
+             print(f"Emergency Disable {name} Failed: {e}")
+             errors.append(f"{name}: {e}")
+
+    # 2. Force Disable Torque (Hardware Level) - ROBOT
+    if system.robot:
+        try:
+            if hasattr(system.robot, "left_arm"): # BiUmbra
+                disable_bus_robust(system.robot.left_arm.bus, "Robot_Left")
+                disable_bus_robust(system.robot.right_arm.bus, "Robot_Right")
+            elif hasattr(system.robot, "bus"):
+                disable_bus_robust(system.robot.bus, "Robot")
+        except Exception as e:
+            errors.append(f"Robot_Outer: {e}")
+            
+    # 3. Force Disable Torque (Hardware Level) - LEADER
+    if system.leader:
+        try:
+            if hasattr(system.leader, "left_arm"): # BiUmbra
+                disable_bus_robust(system.leader.left_arm.bus, "Leader_Left")
+                disable_bus_robust(system.leader.right_arm.bus, "Leader_Right")
+            elif hasattr(system.leader, "bus"):
+                disable_bus_robust(system.leader.bus, "Leader")
+        except Exception as e:
+             errors.append(f"Leader_Outer: {e}")
+
+    if errors:
+        return {"status": "partial_success", "errors": errors}
+    return {"status": "success", "message": "EMERGENCY STOP EXECUTED"}
+
+@app.post("/teleop/tune")
+async def tune_teleop(request: Request):
+    data = await request.json()
+    # data: {k_gravity, k_assist, k_haptic, v_threshold}
+    
+    if system.teleop_service and system.teleop_service.leader_assists:
+        count = 0
+        for arm_id, service in system.teleop_service.leader_assists.items():
+            service.update_gains(
+                k_gravity=data.get("k_gravity"), 
+                k_assist=data.get("k_assist"),
+                k_haptic=data.get("k_haptic"),
+                v_threshold=data.get("v_threshold"),
+                k_damping=data.get("k_damping") # New Damping Parameter
+            )
+            count += 1
+        return {"status": "success", "message": f"Updated gains for {count} arms"}
+    return {"status": "error", "message": "Teleop service not active"}
 
 @app.post("/calibration/{arm_id}/torque")
 async def set_torque(arm_id: str, request: Request):
@@ -797,6 +887,161 @@ async def set_limit(arm_id: str, request: Request):
     motor = data.get("motor")
     limit_type = data.get("type") # min or max
     value = data.get("value")
+
+@app.post("/teleop/assist/set")
+async def set_teleop_assist(request: Request):
+    data = await request.json()
+    enabled = data.get("enabled", True)
+    if system.teleop_service:
+        system.teleop_service.set_assist_enabled(enabled)
+        return {"status": "success", "enabled": enabled}
+    return {"status": "error", "message": "Teleop Service not running"}
+
+# --- Gravity Calibration (Wizard) ---
+
+def _get_calibration_target(arm_key: str):
+    """
+    Helper to resolve (Service, ArmObject) from arm_key (e.g. 'left_leader', 'left_follower').
+    Returns (service, arm) or raises Exception.
+    """
+    service = None
+    arm = None
+    
+    # 1. Resolve Service
+    if "follower" in arm_key:
+        # Follower Service
+        side = "left" if "left" in arm_key else "right" if "right" in arm_key else "default"
+        if side in system.teleop_service.follower_gravity_models:
+             service = system.teleop_service.follower_gravity_models[side]
+    else:
+        # Leader Service
+        side = "left" if "left" in arm_key else "right" if "right" in arm_key else "default"
+        # Check system.leader_assists first (populated by TeleopService)
+        if hasattr(system.teleop_service, "leader_assists") and side in system.teleop_service.leader_assists:
+             service = system.teleop_service.leader_assists[side]
+             
+    if not service:
+        raise Exception(f"Calibration Service not found for {arm_key}")
+
+    # 2. Resolve Physical Arm (for sampling)
+    # If we are calibrating a FOLLOWER, we need to read from the ROBOT (follower).
+    # If LEADER, read from LEADER.
+    
+    is_follower = "follower" in arm_key
+    
+    if is_follower:
+        if not system.robot: raise Exception("Follower Robot not connected")
+        # Match side
+        if "left" in arm_key and hasattr(system.robot, "left_arm"): arm = system.robot.left_arm
+        elif "right" in arm_key and hasattr(system.robot, "right_arm"): arm = system.robot.right_arm
+        elif hasattr(system.robot, "bus") and not hasattr(system.robot, "left_arm"): arm = system.robot # Mono robot
+    else:
+        if not system.leader: raise Exception("Leader Arm not connected")
+        if "left" in arm_key and hasattr(system.leader, "left_arm"): arm = system.leader.left_arm
+        elif "right" in arm_key and hasattr(system.leader, "right_arm"): arm = system.leader.right_arm
+        elif hasattr(system.leader, "bus") and not hasattr(system.leader, "left_arm"): arm = system.leader # Mono leader
+        
+    if not arm:
+        raise Exception(f"Physical Arm interface not found for {arm_key}")
+        
+    return service, arm
+
+@app.post("/calibration/{arm_key}/gravity/start")
+def start_gravity_calibration(arm_key: str): # arm_key: left_leader, left_follower, etc.
+    try:
+        service, _ = _get_calibration_target(arm_key)
+        service.start_calibration()
+        return {"status": "success", "message": f"Calibration Started for {arm_key}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/calibration/{arm_key}/gravity/sample")
+def sample_gravity_calibration(arm_key: str):
+    try:
+        service, arm = _get_calibration_target(arm_key)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+    try:
+        # Perform Hold & Measure Routine
+        # 1. Read Pos
+        pos_dict = arm.bus.sync_read("Present_Position")
+        
+        # 2. Hold (Torque ON)
+        # Assuming we need to set Goal to Current to hold
+        # Note: write() is usually single motor, use write_goal_positions for batch or loop
+        # But 'Goal_Position' expects dict for sync_write? No, bus.write checks if motor is list.
+        # Let's simple loop to hold current pos
+        
+        # arm.bus.write("Goal_Position", pos_dict) # This might fail if pos_dict keys aren't handled right in one go if not implemented
+        # Let's use simple loop to be safe and robust
+        for name, pos in pos_dict.items():
+            arm.bus.write("Goal_Position", name, pos)
+            
+        arm.bus.enable_torque()
+        
+        time.sleep(1.0) # Stabilize
+        
+        # 3. Read Load (Avg)
+        loads_list = []
+        for _ in range(10):
+            # sync_read returns dict {name: value}
+            loads_list.append(arm.bus.sync_read("Present_Load"))
+            time.sleep(0.05)
+            
+        # 4. Release
+        arm.bus.disable_torque()
+        
+        # Process Data
+        avg_load = {}
+        # Get list of joints from bus motors
+        names = arm.bus.motors.keys()
+        
+        for name in names:
+            # Filter valid reads
+            vals = [sample[name] for sample in loads_list if name in sample]
+            if vals:
+                 avg_load[name] = sum(vals) / len(vals)
+            else:
+                 avg_load[name] = 0.0
+            
+        # Convert to arrays for Service
+        q_vec = []
+        tau_vec = []
+        
+        # Use template names if possible or sorted names?
+        # LeaderAssistService logic uses internal index based on how they are passed.
+        # It doesn't strictly enforce name order but logic uses "joint_names_template" in teleop.
+        # Ideally we follow the standard order: base, link1...gripper
+        
+        standard_order = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
+        
+        # Filter only existing names
+        target_names = [n for n in standard_order if n in pos_dict]
+        
+        for name in target_names:
+            raw_pos = pos_dict[name]
+            raw_load = avg_load[name]
+            deg = (raw_pos - 2048.0) * (360.0/4096.0)
+            q_vec.append(deg)
+            tau_vec.append(raw_load)
+            
+        service.record_sample(q_vec, tau_vec)
+        
+        return {"status": "success", "samples": len(service.calibration_data)}
+        
+    except Exception as e:
+        print(f"Sample Error: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/calibration/{arm_key}/gravity/compute")
+def compute_gravity_calibration(arm_key: str):
+    try:
+        service, _ = _get_calibration_target(arm_key)
+        service.compute_weights()
+        return {"status": "success", "message": "Calibration Computed and Saved"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     
     if system.calibration_service:
         system.calibration_service.set_calibration_limit(arm_id, motor, limit_type, value)

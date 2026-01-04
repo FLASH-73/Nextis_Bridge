@@ -8,9 +8,15 @@ robot:
   - fps: 30
     height: 720
     id: camera_2
+    video_device_id: /dev/video2
+    width: 1280
+  - fps: 30
+    height: 720
+    id: camera_3
+    video_device_id: /dev/video4
     width: 1280
   id: umbra_bi_2
-  left_arm_port: /dev/ttyUSB3
+  left_arm_port: /dev/ttyUSB4
   right_arm_port: /dev/ttyUSB1
   type: bi_umbra_follower
 teleop:

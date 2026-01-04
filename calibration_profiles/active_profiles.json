@@ -1,5 +1,6 @@
 {
-  "right_leader": "cal_two",
-  "right_follower": "cal_two",
-  "left_follower": "cal two"
+  "right_leader": "cal_three",
+  "right_follower": "cal_four",
+  "left_follower": "cal_three",
+  "left_leader": "cal_two"
 }
