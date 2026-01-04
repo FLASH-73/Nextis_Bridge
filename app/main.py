@@ -100,9 +100,10 @@ class SystemState:
             from app.core.camera_discovery import discover_cameras
             
             # Discover working cameras
-            print("Scanning for available cameras... [SKIPPED FOR DEBUG]")
-            # discovered = discover_cameras()
-            discovered = {"opencv": [], "realsense": []}
+            # Discover working cameras
+            print("Scanning for available cameras...")
+            discovered = discover_cameras()
+            # discovered = {"opencv": [], "realsense": []}
             working_opencv_ports = []
             working_realsense_serials = []
             
@@ -168,7 +169,14 @@ class SystemState:
                         break
                 
                 if not config_name:
-                    print(f"  -> NO MATCH found for device '{cam_id}'. Will use auto-generated name.")
+                    print(f"  -> NO MATCH found for device '{cam_id}'.")
+                    # STRICT MODE: If we have ANY configured cameras, ignore unconfigured ones to preventing polluting the system.
+                    # Unless it's a fresh setup (no config).
+                    if configured_cameras:
+                        print(f"  -> Skipping unconfigured device '{cam_id}' because valid config exists.")
+                        continue
+                    
+                    print(f"  -> Will use auto-generated name for '{cam_id}'.")
 
                 cam_name = config_name if config_name else f"camera_{i+1}_opencv"
                 
@@ -243,7 +251,10 @@ class SystemState:
                     if isinstance(cfg, OpenCVCameraConfig):
                         test_cam = OpenCVCamera(cfg)
                     elif isinstance(cfg, RealSenseCameraConfig):
-                        test_cam = RealSenseCamera(cfg)
+                        # skip verification for RealSense to avoid USB reset/busy issues
+                        print(f"Skipping stress verification for RealSense {name} to avoid USB race conditions.")
+                        verified_cameras[name] = cfg
+                        continue
                     else:
                         print(f"Skipping verification for unknown type {type(cfg)}")
                         verified_cameras[name] = cfg
@@ -676,56 +687,49 @@ import time
 
 def generate_frames(camera_key: str):
     while True:
-        # Get frame from orchestrator -> intervention_engine -> latest_observation
         frame = None
-        if system.orchestrator and system.orchestrator.intervention_engine:
+        
+        # PRIORITY 1: Direct Live Feed from Robot (Low Latency, Always Fresh)
+        if system.robot and system.robot.is_connected and system.robot.cameras and camera_key in system.robot.cameras:
+            cam = system.robot.cameras[camera_key]
+            try:
+                frame = cam.async_read()
+                if frame is None:
+                    # occasional log?
+                    pass
+            except Exception:
+                pass
+
+        # PRIORITY 2: Orchestrator Observation (What the Agent sees) - Fallback
+        if frame is None and system.orchestrator and system.orchestrator.intervention_engine:
             obs = system.orchestrator.intervention_engine.latest_observation
-            
-            # Observation keys are usually "observation.images.camera_1"
-            # But the user config has "camera_1", "camera_2".
-            # LeRobot usually formats keys as f"observation.images.{name}"
-            
             if obs:
-                # Try to find the key
+                # Try explicit key then partial match
                 full_key = f"observation.images.{camera_key}"
                 if full_key in obs:
                     frame = obs[full_key]
-                elif camera_key in obs: # Fallback
+                elif camera_key in obs:
                     frame = obs[camera_key]
                 else:
-                    # Try partial match
                     for k in obs.keys():
                         if camera_key in k:
                             frame = obs[k]
                             break
+                            
+        # PRIORITY 3: Snapshot Fallback
+        if frame is None and system.camera_service:
+            robot_has_cam = (system.robot and system.robot.cameras and camera_key in system.robot.cameras)
+            if not robot_has_cam:
+                 snapshot = system.camera_service.capture_snapshot(camera_key)
+                 if snapshot is not None:
+                     frame = snapshot
         
         if frame is None:
-            # Fallback 1: If Robot is connected, ask IT for the frame (reuses existing connection)
-            if system.robot and system.robot.is_connected and system.robot.cameras and camera_key in system.robot.cameras:
-                cam = system.robot.cameras[camera_key]
-                try:
-                    # Using async_read because Orchestrator might be running background thread
-                    frame = cam.async_read()
-                except Exception as e:
-                    # print(f"Robot cam read failed: {e}")
-                    pass
-
-            # Fallback 2: Try to get a direct snapshot if the robot isn't streaming it
-            # This is useful for the settings preview.
-            if frame is None and system.camera_service:
-                snapshot = system.camera_service.capture_snapshot(camera_key)
-                if snapshot is not None:
-                    frame = snapshot
-            
-            if frame is None:
-                # Yield a placeholder (black frame with text)
-                import numpy as np
-                blank_image = np.zeros((480, 640, 3), np.uint8)
-                cv2.putText(blank_image, f"Waiting for {camera_key}...", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                frame = blank_image
-            else:
-                # Ensure snapshot is BGR (it comes from cv2 so it should be)
-                pass
+            # Yield placeholder
+            import numpy as np
+            blank_image = np.zeros((480, 640, 3), np.uint8)
+            cv2.putText(blank_image, f"Waiting for {camera_key}...", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            frame = blank_image
         else:
             # Convert PyTorch tensor to numpy if needed
             import torch
@@ -1247,19 +1251,39 @@ def scan_cameras():
                 cam["is_active"] = False
                 final_realsense.append(cam)
         
-        return {
-            "opencv": final_opencv,
-            "realsense": final_realsense,
-            "note": "Merged active and available cameras."
-        }
+    # Standaradize keys for Frontend
+    for cam in final_opencv:
+         if "id" not in cam:
+             cam["id"] = cam.get("port") or cam.get("index") or cam.get("index_or_path")
+         if "index_or_path" not in cam:
+             cam["index_or_path"] = cam.get("id")
 
-    return system.camera_service.scan_cameras()
+    for cam in final_realsense:
+         if "id" not in cam:
+             cam["id"] = cam.get("serial_number") or cam.get("serial_number_or_name")
+         if "serial_number_or_name" not in cam:
+             cam["serial_number_or_name"] = cam.get("id")
+    
+    return {
+        "opencv": final_opencv,
+        "realsense": final_realsense,
+        "note": "Merged active and available cameras."
+    }
 
 @app.get("/cameras/config")
 def get_camera_config():
     if not system.camera_service:
-        return {}
-    return system.camera_service.get_camera_config()
+        return []
+    
+    # Return List for Frontend (CameraModal.tsx expects array)
+    config = system.camera_service.get_camera_config()
+    export_list = []
+    for key, val in config.items():
+        # Inject key as 'id'
+        item = val.copy()
+        item["id"] = key # 'camera_1' etc
+        export_list.append(item)
+    return export_list
 
 @app.post("/cameras/config")
 async def update_camera_config(request: Request, background_tasks: BackgroundTasks):
