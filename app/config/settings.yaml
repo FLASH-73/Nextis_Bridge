@@ -16,13 +16,13 @@ robot:
     video_device_id: /dev/video10
     width: 640
   id: umbra_bi_2
-  left_arm_port: /dev/ttyUSB3
+  left_arm_port: /dev/ttyUSB2
   right_arm_port: /dev/ttyUSB1
   type: bi_umbra_follower
 teleop:
   id: leader_bi_3
   left_arm_port: /dev/ttyUSB0
-  right_arm_port: /dev/ttyUSB2
+  right_arm_port: /dev/ttyUSB3
   type: bi_umbra_leader
 training:
   batch_size: 8

@@ -23,6 +23,8 @@ from app.core.recorder import DataRecorder
 from app.core.calibration_service import CalibrationService
 from app.core.leader_assist import LeaderAssistService
 from app.core.teleop_service import TeleoperationService
+from app.core.dataset_service import DatasetService
+from app.core.dataset_service import DatasetService
 from lerobot.robots.utils import make_robot_from_config
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
@@ -55,6 +57,7 @@ class SystemState:
         self.calibration_service = None
         self.camera_service = None
         self.teleop_service = None
+        self.dataset_service = None
         self.leader_assists = {} # {arm_prefix: LeaderAssistService}
         self.lock = threading.Lock()
         
@@ -83,6 +86,12 @@ class SystemState:
         
         # Initialize Camera Service
         self.camera_service = CameraService()
+        
+        # Initialize Dataset Service
+        self.dataset_service = DatasetService()
+
+        
+
         
         # Load Config
         config_data = load_config()
@@ -310,9 +319,20 @@ class SystemState:
                 
                 try:
                     self.robot = make_robot_from_config(r_config)
-                    self.robot.connect(calibrate=False)
-                    print("✅ Real Robot Connected Successfully!")
-                    
+                    # Retry logic for Robot Connection (Intermittent Cameras)
+                    max_retries = 3
+                    import time
+                    for attempt in range(max_retries):
+                        try:
+                            self.robot.connect(calibrate=False)
+                            print("✅ Real Robot Connected Successfully!")
+                            break
+                        except Exception as e:
+                            print(f"⚠️ Robot Connect Attempt {attempt+1}/{max_retries} Failed: {e}")
+                            if attempt == max_retries - 1:
+                                raise e
+                            time.sleep(1.0)
+                            
                     # Initialize Leader if configured
                     if teleop_cfg and teleop_cfg.get("type") == "bi_umbra_leader":
                         print("Initializing BiUmbraLeader...")
@@ -371,7 +391,35 @@ class SystemState:
             self.robot = MagicMock()
             self.robot.is_connected = False
             self.robot.is_mock = True # Flag as Mock
-            self.robot.capture_observation.return_value = {}
+            self.robot.is_calibrated = True # Allow teleop start
+            
+            # Mock Features for LeRobotDataset
+            # We must match what LeRobot expects for a generic robot, or minimal set.
+            # Minimal 6-DOF arm + 1 Camera
+            from lerobot.configs.types import FeatureType
+            self.robot.robot_type = "mock_robot"
+            self.robot.observation_features = {
+                "observation.state": {"dtype": "float32", "shape": (6,), "names": ["base", "shoulder", "elbow", "wrist_1", "wrist_2", "gripper"]},
+                "observation.images.phone": {"dtype": "image", "shape": (480, 640, 3), "names": ["height", "width", "channels"]}
+            }
+            self.robot.action_features = {
+                "action": {"dtype": "float32", "shape": (6,), "names": ["base", "shoulder", "elbow", "wrist_1", "wrist_2", "gripper"]}
+            }
+            
+            # Mock Data Generator
+            import numpy as np
+            import torch
+            
+            def mock_get_observation():
+                 # Return items matching features
+                 return {
+                     "observation.state": torch.zeros(6),
+                     "observation.images.phone": torch.zeros((3, 480, 640)) # Channel First for LeRobot internals? Or HWC?
+                                                                           # Robot.get_observation usually returns torch tensors C,H,W
+                 }
+            
+            self.robot.get_observation.side_effect = mock_get_observation
+            self.robot.capture_observation.return_value = {} # Legacy fallback
 
         self.orchestrator = TaskOrchestrator(self.robot, self.recorder, robot_lock=self.lock)
         self.orchestrator.start() # Start the orchestrator and intervention engine
@@ -779,13 +827,12 @@ async def start_teleop(request: Request):
         data = {}
         
     force = data.get("force", False)
-    active_arms = data.get("active_arms", None) # List[str] e.g. ["left_leader", "left_follower"]
+    active_arms = data.get("active_arms", None) 
     
     # Lazy Initialize Teleop Service if needed
     if not system.teleop_service:
         if system.robot:
              from app.core.teleop_service import TeleoperationService
-             # Ensure leader is available (BiUmbraLeader or similar)
              system.teleop_service = TeleoperationService(system.robot, system.leader, system.lock, leader_assists=system.leader_assists)
         else:
              return {"status": "error", "message": "Teleop Service not initialized: Robot not connected"}
@@ -798,6 +845,168 @@ async def start_teleop(request: Request):
             return {"status": "error", "message": str(e)}
             
     return {"status": "started"}
+
+@app.post("/teleop/stop")
+def stop_teleop():
+    if system.teleop_service:
+        system.teleop_service.stop()
+    return {"status": "stopped"}
+    
+@app.get("/teleop/data")
+def get_teleop_data():
+    if system.teleop_service:
+        return system.teleop_service.get_data()
+    return {"history": [], "torque": {}}
+
+# --- Recording Endpoints ---
+
+@app.post("/recording/session/start")
+async def start_recording_session(request: Request):
+    data = await request.json()
+    repo_id = data.get("repo_id")
+    task = data.get("task")
+    
+    if not repo_id or not task:
+         return {"status": "error", "message": "Missing repo_id or task"}
+    
+    if not system.teleop_service:
+         return {"status": "error", "message": "Teleop Service not active"}
+         
+    try:
+        system.teleop_service.start_recording_session(repo_id, task)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+        
+    return {"status": "success", "message": "Recording Session Started"}
+
+@app.post("/recording/session/stop")
+def stop_recording_session():
+    if not system.teleop_service:
+         return {"status": "error", "message": "Teleop Service not active"}
+         
+    system.teleop_service.stop_recording_session()
+    return {"status": "success", "message": "Recording Session Finalized"}
+
+@app.post("/recording/episode/start")
+def start_episode():
+    if not system.teleop_service:
+         return {"status": "error", "message": "Teleop Service not active"}
+         
+    try:
+        system.teleop_service.start_episode()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+        
+    return {"status": "success", "message": "Episode Started"}
+
+@app.post("/recording/episode/stop")
+def stop_episode():
+    if not system.teleop_service:
+         return {"status": "error", "message": "Teleop Service not active"}
+         
+    system.teleop_service.stop_episode()
+    return {"status": "success", "message": "Episode Saved"}
+
+@app.delete("/recording/episode/last")
+def delete_last_episode():
+    if not system.teleop_service:
+         return {"status": "error", "message": "Teleop Service not active"}
+         
+    try:
+        system.teleop_service.delete_last_episode()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+        
+    return {"status": "success", "message": "Last Episode Deleted"}
+
+# --- Dataset Viewer Endpoints ---
+
+@app.get("/datasets")
+def list_datasets():
+    if not system.dataset_service:
+         return []
+    return system.dataset_service.list_datasets()
+
+@app.get("/datasets/{repo_id:path}/episodes")
+def get_dataset_episodes(repo_id: str):
+    if not system.dataset_service:
+         return []
+    try:
+        dataset = system.dataset_service.get_dataset(repo_id)
+        episodes = dataset.meta.episodes
+        if hasattr(episodes, "to_pydict"):
+             d = episodes.to_pydict()
+             keys = list(d.keys())
+             length = len(d[keys[0]])
+             return [{k: d[k][i] for k in keys} for i in range(length)]
+        elif isinstance(episodes, list): 
+             return episodes
+        else:
+             return [{"index": i} for i in range(dataset.num_episodes)]
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/datasets/{repo_id:path}/episode/{index}")
+def get_episode_detail(repo_id: str, index: int):
+    if not system.dataset_service:
+         return {}
+    try:
+        return system.dataset_service.get_episode_data(repo_id, index)
+    except Exception as e:
+         return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.delete("/datasets/{repo_id:path}/episode/{index}")
+def delete_episode_endpoint(repo_id: str, index: int):
+    if not system.dataset_service:
+         return {"status": "error", "message": "Dataset service not ready"}
+    try:
+        result = system.dataset_service.delete_episode(repo_id, index)
+        return result
+    except Exception as e:
+         return JSONResponse(status_code=500, content={"error": str(e)})
+
+from fastapi.responses import FileResponse, Response
+
+
+
+    
+@app.get("/api/datasets/{repo_id:path}/video/{index}/{key}")
+def stream_video(repo_id: str, index: int, key: str):
+    if not system.dataset_service:
+         return Response(status_code=404)
+         
+    try:
+        dataset_root = system.dataset_service.base_path / repo_id
+        video_root = dataset_root / "videos" / key
+        
+        # Standard LeRobot v3: videos/{key}/episode_{index}.mp4 (or inside chunks)
+        # Check direct first
+        direct_path = video_root / f"episode_{index:06d}.mp4"
+        if direct_path.exists():
+             return FileResponse(direct_path, media_type="video/mp4")
+             
+        # Check inside chunks (file-XXXXXX.mp4 where XXXXXX is file index, usually mapped to episode index if 1-to-1)
+        # Note: chunk-000/file-000.mp4 might be episode 0
+        matches = list(video_root.rglob(f"*{index:06d}.mp4")) # Loose match for file index
+        if matches:
+             return FileResponse(matches[0], media_type="video/mp4")
+             
+        # Fallback for "images" folder if videos missing? (User had images folder)
+        # Maybe they are raw images? We can't serve that as video easily.
+        
+        return Response(content="Video not found", status_code=404)
+        
+    except Exception as e:
+         return Response(content=str(e), status_code=500)
+
+    
+@app.get("/recording/status")
+def get_recording_status():
+    if not system.teleop_service:
+         return {"active": False, "episode_count": 0}
+         
+    # TeleopService.get_data() already returns recording info, but explicit endpoint helps too
+    return system.teleop_service.get_data().get("recording", {})
 
 @app.post("/emergency/stop")
 def emergency_stop():

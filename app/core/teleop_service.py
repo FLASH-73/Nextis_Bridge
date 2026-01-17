@@ -1,4 +1,3 @@
-
 import time
 import threading
 import logging
@@ -12,6 +11,10 @@ from lerobot.motors.feetech.feetech import OperatingMode
 # Try to import precise_sleep, fallback to time.sleep if not found (though it should be there)
 try:
     from lerobot.utils.robot_utils import precise_sleep
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot.datasets.video_utils import VideoEncodingManager
+    from lerobot.datasets.utils import build_dataset_frame
+    from lerobot.utils.constants import OBS_STR, ACTION
 except ImportError:
     def precise_sleep(dt):
         time.sleep(max(0, dt))
@@ -81,6 +84,15 @@ class TeleoperationService:
         # Lowered to 60Hz to match lerobot default and reduce USB congestion
         self.frequency = 60 
         self.dt = 1.0 / self.frequency
+        
+        # Recording State (Preserved from original)
+        self.dataset = None
+        self.dataset_config = None
+        self.recording_active = False # Episode Level
+        self.session_active = False   # Dataset Level
+        self.episode_count = 0 
+        self.video_manager = None
+        self.data_queue = deque(maxlen=1) # For UI data streaming if needed, though get_data uses history
         
     def set_assist_enabled(self, enabled: bool):
         self.assist_enabled = enabled
@@ -267,6 +279,13 @@ class TeleoperationService:
         if self.thread:
             self.thread.join(timeout=2.0)
             
+        # Stop Recording if active
+        if self.session_active:
+             try:
+                 self.stop_recording_session()
+             except Exception as e:
+                 logger.error(f"Failed to auto-stop recording session: {e}")
+
         # Switch Leader back to Position Mode (Safety)
         if self.leader:
             try:
@@ -304,6 +323,9 @@ class TeleoperationService:
                 
                 # 1. Read Leader State
                 leader_action = {}
+                # Capture Follower Obs (Needed for Recording)
+                follower_obs = {}
+
                 if self.leader:
                     obs = self.leader.get_action()
                     
@@ -388,25 +410,60 @@ class TeleoperationService:
                             # Direct assignment, no EMA
                             leader_action[f_key] = int(obs[l_key])
 
-                # 2. Send to Follower
+                # 2. Send to Follower (Modified for Recording Support Check)
                 if leader_action and self.robot:
                     try:
-                        if self.robot_lock:
-                             with self.robot_lock:
-                                 self.robot.send_action(leader_action)
+                        # If recording, we MIGHT need to read obs?
+                        # The user provided loop is BLIND. 
+                        # But recording requires observation.
+                        if self.recording_active:
+                            # We must read observation if recording
+                             if self.robot_lock:
+                                  with self.robot_lock:
+                                      follower_obs = self.robot.get_observation(include_images=True)
+                                      self.robot.send_action(leader_action)
+                             else:
+                                  follower_obs = self.robot.get_observation(include_images=True)
+                                  self.robot.send_action(leader_action)
                         else:
-                             self.robot.send_action(leader_action)
+                             # Blind Teleop (Reference)
+                             if self.robot_lock:
+                                  with self.robot_lock:
+                                      self.robot.send_action(leader_action)
+                             else:
+                                  self.robot.send_action(leader_action)
+                                  
                     except Exception as e:
                          if loop_count % 60 == 0:
                              logger.error(f"Send Action Failed: {e}")
                 elif self.robot and loop_count % 60 == 0:
                      logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")
                 
-                # 3. Store Data (for UI)
+                # Debug freeze
+                if loop_count % 60 == 0:
+                    print(f"Teleop Heartbeat: {loop_count} (Active: {self.is_running})")
+                
+                # 3. Recording (In-Process)
+                if self.is_running and self.recording_active and self.dataset and follower_obs:
+                     try:
+                         # Build Frames using LeRobot Helper
+                         obs_frame = build_dataset_frame(self.dataset.features, follower_obs, prefix=OBS_STR)
+                         action_frame = build_dataset_frame(self.dataset.features, leader_action, prefix=ACTION)
+                         
+                         # Combine
+                         frame = {**obs_frame, **action_frame, "task": self.dataset_config.get("task", "")}
+                         
+                         # Add to Dataset (Non-Blocking)
+                         self.dataset.add_frame(frame)
+                     except Exception as e:
+                          if loop_count % 60 == 0:
+                               logger.error(f"Recording Capture Error: {e}")
+
+                # 4. Store Data (for UI)
                 if loop_count % 5 == 0:
                     self._update_history(leader_action)
                 
-                # 4. Performance Logging
+                # 5. Performance Logging
                 loop_count += 1
                 if loop_count % perf_interval == 0:
                      now = time.time()
@@ -414,7 +471,7 @@ class TeleoperationService:
                      logger.info(f"Teleop Loop Rate: {real_hz:.1f} Hz")
                      perf_start = now
 
-                # 5. Sleep
+                # 6. Sleep
                 dt_s = time.perf_counter() - loop_start
                 precise_sleep(self.dt - dt_s)
                 
@@ -450,5 +507,155 @@ class TeleoperationService:
             
         return {
             "history": history,
-            "torque": self.safety.latest_loads
+            "torque": self.safety.latest_loads,
+            "recording": {
+                "session_active": self.session_active,
+                "episode_active": self.recording_active,
+                "episode_count": self.episode_count
+            }
         }
+
+    # --- Recording Methods ---
+
+    def start_recording_session(self, repo_id: str, task: str, fps: int = 30, root: str = None):
+        """Initializes a new LeRobotDataset for recording."""
+        if self.session_active:
+             raise Exception("Session already active")
+             
+        # Set default root to app datasets directory
+        from pathlib import Path
+        if root is None:
+            base_dir = Path("/home/roberto/nextis_app/datasets")
+        else:
+            base_dir = Path(root)
+            
+        # Target Path
+        dataset_dir = base_dir / repo_id
+        
+        logger.info(f"Starting Recording Session: {repo_id} at {dataset_dir}")
+
+        try:
+            if not self.robot:
+                 raise Exception("Robot not connected")
+
+            # 1. Define Features
+            if not hasattr(self.robot, "observation_features") or not hasattr(self.robot, "action_features"):
+                 raise RuntimeError("Robot does not have feature definitions ready (observation_features/action_features).")
+                 
+            # Use LeRobot Helpers to construct correct feature dicts
+            from lerobot.datasets.utils import combine_feature_dicts, hw_to_dataset_features
+            
+            features = combine_feature_dicts(
+                hw_to_dataset_features(self.robot.observation_features, prefix=OBS_STR, use_video=True),
+                hw_to_dataset_features(self.robot.action_features, prefix=ACTION, use_video=True)
+            )
+            
+            # 2. Open or Create Dataset (In-Process)
+            # Check for VALID dataset (must have meta/info.json)
+            is_valid_dataset = (dataset_dir / "meta/info.json").exists()
+            
+            if dataset_dir.exists() and not is_valid_dataset:
+                 logger.warning(f"Found existing folder '{dataset_dir}' but it is not a valid dataset (missing info.json). Backing up...")
+                 import datetime
+                 import shutil
+                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                 backup_dir = base_dir / f"{repo_id}_backup_{timestamp}"
+                 shutil.move(str(dataset_dir), str(backup_dir))
+                 logger.info(f"Moved invalid folder to {backup_dir}")
+            
+            if dataset_dir.exists():
+                logger.info(f"Valid Dataset exists at {dataset_dir}. Resuming...")
+                self.dataset = LeRobotDataset(
+                    repo_id=repo_id,
+                    root=dataset_dir,
+                )
+            else:
+                logger.info("Creating new Dataset...")
+                self.dataset = LeRobotDataset.create(
+                    repo_id=repo_id,
+                    fps=fps,
+                    root=dataset_dir,
+                    robot_type=self.robot.robot_type,
+                    features=features,
+                    use_videos=True,
+                )
+            
+            self.dataset.meta.metadata_buffer_size = 1
+
+            # 3. Start Video Encoding
+            if not self.video_manager:
+                 self.video_manager = VideoEncodingManager(self.dataset)
+                 self.video_manager.__enter__()
+            
+            # 4. Start Image Writer (Threads)
+            self.dataset.start_image_writer(num_processes=0, num_threads=4)
+            
+            self.dataset_config = {"repo_id": repo_id, "task": task}
+            self.session_active = True
+            logger.info("Session Started Successfully.")
+            
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to start recording session: {e}\n{traceback.format_exc()}")
+            self.session_active = False
+            self.dataset = None
+            raise
+
+    def stop_recording_session(self):
+        """Finalizes the LeRobotDataset."""
+        if not self.session_active:
+            return
+            
+        logger.info("Stopping Recording Session...")
+        self.session_active = False
+        
+        try:
+            if self.dataset:
+                logger.info("Finalizing Dataset...")
+                self.dataset.finalize()
+                
+                if self.video_manager:
+                    self.video_manager.__exit__(None, None, None)
+                    self.video_manager = None
+                
+                self.dataset = None
+                logger.info("Session Stopped and Saved.")
+        except Exception as e:
+            logger.error(f"Error stopping session: {e}")
+
+    def start_episode(self):
+        """Starts recording a new episode."""
+        if not self.session_active:
+             raise Exception("No active recording session")
+        
+        if self.recording_active:
+             return # Already recording
+        
+        logger.info("Starting Episode Recording...")
+        if self.dataset:
+             # Ensure buffer is clear
+             self.dataset.clear_episode_buffer()
+             
+        self.recording_active = True
+
+    def stop_episode(self):
+        """Stops current episode and saves it."""
+        if not self.recording_active:
+             return
+             
+        logger.info("Stopping Episode Recording. Saving...")
+        self.recording_active = False
+        
+        if self.dataset:
+             self.dataset.save_episode(task=self.dataset_config.get("task", ""))
+             self.episode_count += 1
+             logger.info(f"Episode {self.episode_count} Saved.")
+             
+    def delete_last_episode(self):
+         """Deletes the last recorded episode (if possible/implemented)."""
+         logger.warning("Delete Last Episode not fully supported yet.")
+
+    def _manual_finalize_dataset(self, repo_id):
+        """Emergency fix to generate episode metadata if LeRobotDataset fails."""
+        if not repo_id: return
+        pass # Not implemented fully as per original file

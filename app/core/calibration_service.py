@@ -593,7 +593,7 @@ class CalibrationService:
         # The robot driver needs to reload this.
         arm, _ = self._get_arm_context(arm_id)
         if arm and hasattr(arm, "reload_inversions"):
-            arm.reload_inversions(current)
+            arm.reload_inversions()
 
     def set_zero_pose(self, arm_id: str):
         """Captures the current position as the baseline 'Zero' for alignment. Also disables torque."""
