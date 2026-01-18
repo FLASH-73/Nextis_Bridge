@@ -4,8 +4,25 @@ from dotenv import load_dotenv
 from pathlib import Path
 import json
 
+# DIAGNOSTIC: Print immediately on import to verify stdout works
+print("\n" + "="*60)
+print("MAIN.PY LOADED - If you see this, stdout is working!")
+print("="*60 + "\n")
+sys.stdout.flush()
+
 # Load environment variables from .env file
 load_dotenv()
+
+# DIAGNOSTIC: Set up file logging for recording debug
+import logging
+_log_file = Path(__file__).parent.parent / "recording_debug.log"
+_file_handler = logging.FileHandler(_log_file, mode='a')
+_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+_recording_logger = logging.getLogger("recording_debug")
+_recording_logger.setLevel(logging.DEBUG)
+_recording_logger.addHandler(_file_handler)
+_recording_logger.info("=== Backend Started ===")
+print(f"Recording debug log: {_log_file}")
 
 # Add the project root to sys.path so we can import 'app'
 root_path = Path(__file__).parent.parent
@@ -239,14 +256,21 @@ class SystemState:
                         break
                 
                 cam_name = config_name if config_name else f"camera_{i+1}_realsense"
-                
+
+                # Get use_depth setting from config (defaults to False)
+                use_depth = False
+                if config_name and config_name in configured_cameras:
+                    use_depth = configured_cameras[config_name].get("use_depth", False)
+                    print(f"  -> use_depth setting: {use_depth}")
+
                 cameras[cam_name] = RealSenseCameraConfig(
                     fps=cam.get("fps", 30),
                     width=cam.get("width", 848),
                     height=cam.get("height", 480),
-                    serial_number_or_name=serial
+                    serial_number_or_name=serial,
+                    use_depth=use_depth
                 )
-                print(f"Added {cam_name} (RealSense {serial})")
+                print(f"Added {cam_name} (RealSense {serial}, depth={'ON' if use_depth else 'OFF'})")
             
             if not cameras:
                 print("⚠️ No cameras found! Robot might fail to initialize if it requires cameras.")
@@ -616,6 +640,14 @@ class ChatRequest(BaseModel):
 def read_root():
     return {"status": "online", "service": "nextis-robotics"}
 
+@app.get("/test/ping")
+def test_ping():
+    """Simple test endpoint to verify API connection."""
+    print(">>> /test/ping called - API is working!")
+    _recording_logger.info("PING received - API connection verified")
+    sys.stdout.flush()
+    return {"status": "pong", "message": "API connection verified"}
+
 
 @app.get("/status")
 def get_status():
@@ -862,50 +894,105 @@ def get_teleop_data():
 
 @app.post("/recording/session/start")
 async def start_recording_session(request: Request):
+    print("\n>>> API: /recording/session/start called")
+    _recording_logger.info("API: /recording/session/start called")
+    sys.stdout.flush()
+
     data = await request.json()
     repo_id = data.get("repo_id")
     task = data.get("task")
-    
+    print(f"    repo_id={repo_id}, task={task}")
+    _recording_logger.info(f"  repo_id={repo_id}, task={task}")
+
     if not repo_id or not task:
-         return {"status": "error", "message": "Missing repo_id or task"}
-    
+        print("    ERROR: Missing repo_id or task")
+        _recording_logger.error("Missing repo_id or task")
+        return {"status": "error", "message": "Missing repo_id or task"}
+
     if not system.teleop_service:
-         return {"status": "error", "message": "Teleop Service not active"}
-         
+        print("    ERROR: Teleop Service not active")
+        _recording_logger.error("Teleop Service not active")
+        return {"status": "error", "message": "Teleop Service not active"}
+
     try:
+        _recording_logger.info("Calling teleop_service.start_recording_session...")
         system.teleop_service.start_recording_session(repo_id, task)
+        episode_count = system.teleop_service.episode_count
+        print(f"    SUCCESS: Session started (episode_count={episode_count})")
+        _recording_logger.info(f"SUCCESS: Session started (episode_count={episode_count})")
     except Exception as e:
+        import traceback
+        print(f"    ERROR: {e}")
+        _recording_logger.error(f"ERROR: {e}\n{traceback.format_exc()}")
         return {"status": "error", "message": str(e)}
-        
-    return {"status": "success", "message": "Recording Session Started"}
+
+    return {"status": "success", "message": "Recording Session Started", "episode_count": episode_count}
 
 @app.post("/recording/session/stop")
 def stop_recording_session():
+    print("\n>>> API: /recording/session/stop called")
+    _recording_logger.info("API: /recording/session/stop called")
+    sys.stdout.flush()
+
     if not system.teleop_service:
-         return {"status": "error", "message": "Teleop Service not active"}
-         
-    system.teleop_service.stop_recording_session()
+        print("    ERROR: Teleop Service not active")
+        _recording_logger.error("Teleop Service not active")
+        return {"status": "error", "message": "Teleop Service not active"}
+
+    try:
+        system.teleop_service.stop_recording_session()
+        print("    SUCCESS: Session stopped")
+        _recording_logger.info("SUCCESS: Session stopped")
+    except Exception as e:
+        import traceback
+        _recording_logger.error(f"ERROR: {e}\n{traceback.format_exc()}")
+
     return {"status": "success", "message": "Recording Session Finalized"}
 
 @app.post("/recording/episode/start")
 def start_episode():
+    print("\n>>> API: /recording/episode/start called")
+    _recording_logger.info("API: /recording/episode/start called")
+    sys.stdout.flush()
+
     if not system.teleop_service:
-         return {"status": "error", "message": "Teleop Service not active"}
-         
+        print("    ERROR: Teleop Service not active")
+        _recording_logger.error("Teleop Service not active")
+        return {"status": "error", "message": "Teleop Service not active"}
+
     try:
         system.teleop_service.start_episode()
+        print("    SUCCESS: Episode started")
+        _recording_logger.info("SUCCESS: Episode started")
     except Exception as e:
+        import traceback
+        print(f"    ERROR: {e}")
+        _recording_logger.error(f"ERROR: {e}\n{traceback.format_exc()}")
         return {"status": "error", "message": str(e)}
-        
+
     return {"status": "success", "message": "Episode Started"}
 
 @app.post("/recording/episode/stop")
 def stop_episode():
+    print("\n>>> API: /recording/episode/stop called")
+    _recording_logger.info("API: /recording/episode/stop called")
+    sys.stdout.flush()
+
     if not system.teleop_service:
-         return {"status": "error", "message": "Teleop Service not active"}
-         
-    system.teleop_service.stop_episode()
-    return {"status": "success", "message": "Episode Saved"}
+        print("    ERROR: Teleop Service not active")
+        _recording_logger.error("Teleop Service not active")
+        return {"status": "error", "message": "Teleop Service not active"}
+
+    try:
+        system.teleop_service.stop_episode()
+        episode_count = system.teleop_service.episode_count
+        print(f"    SUCCESS: Episode stopped (total: {episode_count})")
+        _recording_logger.info(f"SUCCESS: Episode stopped (total: {episode_count})")
+        return {"status": "success", "message": "Episode Saved", "episode_count": episode_count}
+    except Exception as e:
+        import traceback
+        _recording_logger.error(f"ERROR: {e}\n{traceback.format_exc()}")
+        return {"status": "error", "message": str(e)}
 
 @app.delete("/recording/episode/last")
 def delete_last_episode():
@@ -965,6 +1052,19 @@ def delete_episode_endpoint(repo_id: str, index: int):
     except Exception as e:
          return JSONResponse(status_code=500, content={"error": str(e)})
 
+@app.delete("/datasets/{repo_id:path}")
+def delete_dataset_endpoint(repo_id: str):
+    """Delete an entire dataset repository."""
+    if not system.dataset_service:
+         return {"status": "error", "message": "Dataset service not ready"}
+    try:
+        result = system.dataset_service.delete_dataset(repo_id)
+        return result
+    except FileNotFoundError as e:
+         return JSONResponse(status_code=404, content={"error": str(e)})
+    except Exception as e:
+         return JSONResponse(status_code=500, content={"error": str(e)})
+
 from fastapi.responses import FileResponse, Response
 
 
@@ -974,28 +1074,37 @@ from fastapi.responses import FileResponse, Response
 def stream_video(repo_id: str, index: int, key: str):
     if not system.dataset_service:
          return Response(status_code=404)
-         
+
     try:
         dataset_root = system.dataset_service.base_path / repo_id
         video_root = dataset_root / "videos" / key
-        
+
         # Standard LeRobot v3: videos/{key}/episode_{index}.mp4 (or inside chunks)
         # Check direct first
         direct_path = video_root / f"episode_{index:06d}.mp4"
         if direct_path.exists():
              return FileResponse(direct_path, media_type="video/mp4")
-             
-        # Check inside chunks (file-XXXXXX.mp4 where XXXXXX is file index, usually mapped to episode index if 1-to-1)
-        # Note: chunk-000/file-000.mp4 might be episode 0
-        matches = list(video_root.rglob(f"*{index:06d}.mp4")) # Loose match for file index
+
+        # LeRobot v3 chunked format: chunk-XXX/file-YYY.mp4
+        # For single-chunk datasets, episode N is usually in chunk-000/file-{N:03d}.mp4
+        chunk_path = video_root / "chunk-000" / f"file-{index:03d}.mp4"
+        if chunk_path.exists():
+             return FileResponse(chunk_path, media_type="video/mp4")
+
+        # Try with 6-digit file index too
+        chunk_path_6 = video_root / "chunk-000" / f"file-{index:06d}.mp4"
+        if chunk_path_6.exists():
+             return FileResponse(chunk_path_6, media_type="video/mp4")
+
+        # Fallback: glob for any matching file
+        matches = list(video_root.rglob(f"*file-{index:03d}.mp4"))
+        if not matches:
+            matches = list(video_root.rglob(f"*{index:06d}.mp4"))
         if matches:
              return FileResponse(matches[0], media_type="video/mp4")
-             
-        # Fallback for "images" folder if videos missing? (User had images folder)
-        # Maybe they are raw images? We can't serve that as video easily.
-        
-        return Response(content="Video not found", status_code=404)
-        
+
+        return Response(content=f"Video not found for episode {index} in {video_root}", status_code=404)
+
     except Exception as e:
          return Response(content=str(e), status_code=500)
 
@@ -1498,14 +1607,59 @@ def get_camera_config():
 async def update_camera_config(request: Request, background_tasks: BackgroundTasks):
     if not system.camera_service:
         raise HTTPException(status_code=503, detail="Camera service not initialized")
-    
+
     data = await request.json()
+
+    # Get existing config to compare
+    existing_config = system.camera_service.get_camera_config()
+
+    # Convert array format from frontend to dict format for storage
+    # Frontend sends: [{id: "cam1", video_device_id: ..., type: ..., use_depth: ...}, ...]
+    # Backend expects: {"cam1": {video_device_id: ..., type: ..., use_depth: ...}, ...}
+    if isinstance(data, list):
+        config_dict = {}
+        for item in data:
+            cam_id = item.get("id", "unknown")
+            # Remove 'id' from the stored config (it's the key)
+            config_entry = {k: v for k, v in item.items() if k != "id"}
+            # Ensure type is set based on video_device_id if not provided
+            if "type" not in config_entry:
+                vid = config_entry.get("video_device_id", "")
+                if str(vid).startswith("/dev/video") or (str(vid).isdigit() and len(str(vid)) < 4):
+                    config_entry["type"] = "opencv"
+                else:
+                    config_entry["type"] = "intelrealsense"
+            config_dict[cam_id] = config_entry
+        data = config_dict
+
+    # Check if only use_depth changed (no need to reload for depth-only changes)
+    # Compare camera assignments (video_device_id, type) - ignore use_depth
+    needs_reload = False
+
+    # Check for new/removed cameras or changed assignments
+    if set(data.keys()) != set(existing_config.keys()):
+        needs_reload = True
+    else:
+        for cam_id, new_cfg in data.items():
+            old_cfg = existing_config.get(cam_id, {})
+            # Compare assignment-critical fields (not use_depth)
+            if (new_cfg.get("video_device_id") != old_cfg.get("video_device_id") or
+                new_cfg.get("type") != old_cfg.get("type") or
+                new_cfg.get("width") != old_cfg.get("width") or
+                new_cfg.get("height") != old_cfg.get("height") or
+                new_cfg.get("fps") != old_cfg.get("fps")):
+                needs_reload = True
+                break
+
     system.camera_service.update_camera_config(data)
-    
-    # Trigger System Reload in Background
-    background_tasks.add_task(system.reload)
-    
-    return {"status": "success", "message": "Camera config updated. System reloading..."}
+
+    if needs_reload:
+        # Trigger System Reload in Background (only for camera assignment changes)
+        background_tasks.add_task(system.reload)
+        return {"status": "success", "message": "Camera config updated. System reloading..."}
+    else:
+        # Just a depth toggle or other non-critical change - no reload needed
+        return {"status": "success", "message": "Camera config updated (no reload needed)."}
 
 @app.get("/debug/observation")
 def debug_observation():

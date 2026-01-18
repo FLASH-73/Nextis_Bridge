@@ -7,8 +7,14 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 logger = logging.getLogger(__name__)
 
+# Compute project root relative to this file (app/core/dataset_service.py -> project root)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_DATASETS_PATH = _PROJECT_ROOT / "datasets"
+
 class DatasetService:
-    def __init__(self, base_path: str = "/home/roberto/nextis_app/datasets"):
+    def __init__(self, base_path: str = None):
+        if base_path is None:
+            base_path = _DEFAULT_DATASETS_PATH
         self.base_path = Path(base_path).expanduser()
         
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -78,55 +84,122 @@ class DatasetService:
     def get_episode_data(self, repo_id: str, episode_index: int):
         """
         Returns cached data for visualization.
+        Reads directly from disk to avoid HuggingFace Hub lookups.
         """
-        dataset = self.get_dataset(repo_id)
-        
-        # 1. Get Episode Info from Metadata
-        # dataset.meta.episodes is usually a PyArrow Table or Pydict?
-        # Let's inspect type or assume similar to HF dataset or dict
-        episodes_table = dataset.meta.episodes
-        
-        # Check if it has 'length' column
-        if "length" not in episodes_table:
-             # Try converting to dict if it's a Table
-             try:
-                 episodes_table = episodes_table.to_pydict()
-             except:
-                 pass
-        
-        if episode_index >= len(episodes_table["index"]):
-             pass # Allow fallback
-             
-        # Optimziation:
+        import pandas as pd
         import numpy as np
-        lengths = np.array(episodes_table["length"])
-        
+
+        # Security: Prevent traversing up
+        if ".." in repo_id:
+            raise ValueError("Invalid repo_id")
+
+        dataset_root = self.base_path / repo_id
+        if not dataset_root.exists():
+            raise FileNotFoundError(f"Dataset {repo_id} not found at {dataset_root}")
+
+        # 1. Load info.json directly
+        info_path = dataset_root / "meta" / "info.json"
+        if not info_path.exists():
+            raise FileNotFoundError(f"Dataset info not found at {info_path}")
+
+        with open(info_path, "r") as f:
+            info = json.load(f)
+
+        fps = info.get("fps", 30)
+        features = info.get("features", {})
+        total_episodes = info.get("total_episodes", 0)
+
+        # Handle empty datasets (session started but no episodes saved)
+        if total_episodes == 0:
+            video_keys = [k for k in features.keys() if k.startswith("observation.images")]
+            return {
+                "index": episode_index,
+                "length": 0,
+                "actions": [],
+                "timestamps": [],
+                "videos": {},
+                "fps": fps,
+                "error": "Dataset has no episodes yet"
+            }
+
+        # 2. Load episodes metadata directly from parquet
+        episodes_dir = dataset_root / "meta" / "episodes"
+        episodes_df = None
+
+        # Try directory first (pandas can read all parquet files in a directory)
+        if episodes_dir.exists():
+            try:
+                episodes_df = pd.read_parquet(episodes_dir)
+            except Exception as e:
+                logger.warning(f"Failed to load episodes from directory: {e}")
+
+        # Try single file fallback
+        if episodes_df is None:
+            single_file = episodes_dir / "chunk-000" / "file-000.parquet"
+            if single_file.exists():
+                try:
+                    episodes_df = pd.read_parquet(single_file)
+                except Exception as e:
+                    logger.warning(f"Failed to load single episodes file: {e}")
+
+        # If still no episodes data, return empty
+        if episodes_df is None or len(episodes_df) == 0:
+            return {
+                "index": episode_index,
+                "length": 0,
+                "actions": [],
+                "timestamps": [],
+                "videos": {},
+                "fps": fps,
+                "error": "No episode metadata found"
+            }
+
+        # Determine index column
+        if "episode_index" in episodes_df.columns:
+            index_col = "episode_index"
+        elif "index" in episodes_df.columns:
+            index_col = "index"
+        else:
+            raise ValueError(f"No episode index column found. Columns: {list(episodes_df.columns)}")
+
+        # Get episode length
+        lengths = episodes_df["length"].values
         if episode_index < len(lengths):
             start_frame = int(np.sum(lengths[:episode_index]))
             length = int(lengths[episode_index])
         else:
             start_frame = 0
             length = 0
-            
+
         end_frame = start_frame + length
-        
+
+        # 3. Load action data directly from parquet
         actions = []
         timestamps = []
-        
+
         try:
-             if length > 0:
-                 chunk = dataset.hf_dataset[start_frame:end_frame]
-                 actions = [x.tolist() for x in chunk.get("action", [])]
-                 timestamps = chunk.get("timestamp", [])
+            if length > 0:
+                data_dir = dataset_root / "data"
+                # Load all parquet files in data directory
+                data_df = pd.read_parquet(data_dir)
+
+                # Extract the relevant slice
+                if len(data_df) > start_frame:
+                    chunk_df = data_df.iloc[start_frame:end_frame]
+
+                    # Get action columns
+                    if "action" in chunk_df.columns:
+                        actions = [x.tolist() if hasattr(x, 'tolist') else list(x) for x in chunk_df["action"].values]
+
+                    # Get timestamps
+                    if "timestamp" in chunk_df.columns:
+                        timestamps = chunk_df["timestamp"].tolist()
         except Exception as e:
-             logger.warning(f"Failed to load action data for episode {episode_index}: {e}")
-        
-        # 3. Construct Video Paths
-        # LeRobot convention: videos/observation.images.key/chunk-XXX/file-YYY.mp4
-        
-        # We need to list the cameras (video keys)
-        video_keys = [k for k in dataset.features if k.startswith("observation.images")]
-        
+            logger.warning(f"Failed to load action data for episode {episode_index}: {e}")
+
+        # 4. Construct Video URLs from features
+        video_keys = [k for k in features.keys() if k.startswith("observation.images")]
+
         video_urls = {}
         for key in video_keys:
             video_urls[key] = f"/api/datasets/{repo_id}/video/{episode_index}/{key}"
@@ -136,7 +209,8 @@ class DatasetService:
             "length": length,
             "actions": actions,
             "timestamps": timestamps,
-            "videos": video_urls
+            "videos": video_urls,
+            "fps": fps
         }
     def delete_episode(self, repo_id: str, episode_index: int):
         """
@@ -256,5 +330,29 @@ class DatasetService:
             
         with open(info_path, "w") as f:
             json.dump(info, f, indent=4)
-            
+
         return {"status": "success", "new_count": len(df)}
+
+    def delete_dataset(self, repo_id: str):
+        """
+        Deletes an entire dataset repository.
+        """
+        import shutil
+
+        # Security: Prevent traversing up
+        if ".." in repo_id:
+            raise ValueError("Invalid repo_id")
+
+        dataset_root = self.base_path / repo_id
+        if not dataset_root.exists():
+            raise FileNotFoundError(f"Dataset {repo_id} not found")
+
+        # Verify it's actually a dataset (has meta/info.json)
+        info_path = dataset_root / "meta" / "info.json"
+        if not info_path.exists():
+            raise ValueError(f"{repo_id} does not appear to be a valid dataset")
+
+        # Delete the entire directory tree
+        shutil.rmtree(dataset_root)
+
+        return {"status": "success", "message": f"Dataset {repo_id} deleted"}

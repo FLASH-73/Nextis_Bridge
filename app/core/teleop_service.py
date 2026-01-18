@@ -2,11 +2,16 @@ import time
 import threading
 import logging
 from collections import deque
+from pathlib import Path
 import numpy as np
 
 from app.core.safety_layer import SafetyLayer
 from app.core.leader_assist import LeaderAssistService
 from lerobot.motors.feetech.feetech import OperatingMode
+
+# Compute project root relative to this file (app/core/teleop_service.py -> project root)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_DATASETS_PATH = _PROJECT_ROOT / "datasets"
 
 # Try to import precise_sleep, fallback to time.sleep if not found (though it should be there)
 try:
@@ -82,18 +87,340 @@ class TeleoperationService:
 
         # Teleop Configuration
         # Lowered to 60Hz to match lerobot default and reduce USB congestion
-        self.frequency = 60 
+        self.frequency = 60
         self.dt = 1.0 / self.frequency
-        
+
         # Recording State (Preserved from original)
         self.dataset = None
         self.dataset_config = None
         self.recording_active = False # Episode Level
         self.session_active = False   # Dataset Level
-        self.episode_count = 0 
+        self.episode_count = 0
         self.video_manager = None
         self.data_queue = deque(maxlen=1) # For UI data streaming if needed, though get_data uses history
-        
+
+        # Recording frame rate control
+        # Record at 30fps to match dataset fps, not teleop rate (60Hz)
+        self.recording_fps = 30
+        self._recording_frame_counter = 0
+        self._recording_skip_frames = max(1, self.frequency // self.recording_fps)  # Skip every 2nd frame
+
+        # Async frame writing queue
+        self._frame_queue = deque(maxlen=100)
+        self._frame_writer_thread = None
+        self._frame_writer_stop = threading.Event()
+
+        # Shared action state for recording thread
+        self._latest_leader_action = {}
+        self._action_lock = threading.Lock()
+
+        # Recording capture thread (separate from teleop loop)
+        self._recording_capture_thread = None
+        self._recording_stop_event = threading.Event()
+
+        # Lock to prevent race between stop_episode and stop_session
+        # Ensures save_episode() completes before finalize() is called
+        self._episode_save_lock = threading.Lock()
+        self._episode_saving = False  # Flag to track if save is in progress
+
+        # Observation capture thread (for recording without teleop)
+        self._obs_thread = None
+        self._obs_stop_event = threading.Event()
+        self._latest_obs = None
+        self._latest_obs_lock = threading.Lock()
+        self._obs_ready_event = threading.Event()
+
+    def _obs_capture_loop(self):
+        """Background thread for continuous observation capture during recording.
+
+        This decouples observation reading from the control loop, ensuring
+        motor commands are sent immediately without waiting for camera capture.
+        Uses Zero-Order Hold (ZOH) pattern - always provides latest available observation.
+        """
+        print("[OBS CAPTURE] Thread Started!")
+        capture_count = 0
+        lock_fail_count = 0
+
+        while not self._obs_stop_event.is_set():
+            try:
+                if self.robot and self.recording_active:
+                    # Try to acquire robot lock with short timeout to avoid USB serial conflicts
+                    lock_acquired = False
+                    if self.robot_lock:
+                        lock_acquired = self.robot_lock.acquire(timeout=0.005)
+
+                    try:
+                        if lock_acquired or not self.robot_lock:
+                            # Capture observation
+                            obs = self.robot.get_observation(include_images=True)
+
+                            if obs:
+                                camera_keys = [k for k in obs.keys() if 'camera' in k.lower()]
+                                motor_keys = [k for k in obs.keys() if '.pos' in k]
+
+                                if capture_count == 0:
+                                    print(f"[OBS CAPTURE] FIRST observation: {len(obs)} keys")
+                                    print(f"  motors={len(motor_keys)}, cameras={len(camera_keys)}")
+                                    print(f"  Keys: {list(obs.keys())[:10]}...")
+
+                                with self._latest_obs_lock:
+                                    self._latest_obs = obs
+                                self._obs_ready_event.set()
+
+                                capture_count += 1
+                                if capture_count % 60 == 0:
+                                    print(f"[OBS CAPTURE] Running: {capture_count} frames")
+                            else:
+                                print("[OBS CAPTURE] WARNING: Empty observation!")
+                        else:
+                            lock_fail_count += 1
+                            if lock_fail_count % 100 == 0:
+                                print(f"[OBS CAPTURE] Lock failed {lock_fail_count} times")
+                    finally:
+                        if lock_acquired and self.robot_lock:
+                            self.robot_lock.release()
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                import traceback
+                print(f"[OBS CAPTURE] ERROR: {e}")
+                print(traceback.format_exc())
+                time.sleep(0.01)
+
+        print(f"[OBS CAPTURE] Thread Stopped (captured={capture_count}, lock_fails={lock_fail_count})")
+
+    def _start_obs_thread(self):
+        """Starts the background observation capture thread."""
+        if self._obs_thread is not None and self._obs_thread.is_alive():
+            return  # Already running
+
+        self._obs_stop_event.clear()
+        self._latest_obs = None
+        self._obs_ready_event.clear()
+        self._obs_thread = threading.Thread(target=self._obs_capture_loop, daemon=True, name="ObsCapture")
+        self._obs_thread.start()
+        logger.info("Observation Capture Thread Initialized")
+
+    def _stop_obs_thread(self):
+        """Stops the background observation capture thread (legacy, kept for compatibility)."""
+        if hasattr(self, '_obs_stop_event') and self._obs_stop_event:
+            self._obs_stop_event.set()
+        if hasattr(self, '_obs_thread') and self._obs_thread is not None:
+            self._obs_thread.join(timeout=1.0)
+            self._obs_thread = None
+        if hasattr(self, '_latest_obs'):
+            self._latest_obs = None
+        logger.info("Observation Capture Thread Terminated")
+
+    def _frame_writer_loop(self):
+        """Background thread for writing frames to dataset without blocking teleop loop."""
+        print("[FRAME WRITER] Thread Started!")
+        written_count = 0
+
+        while not self._frame_writer_stop.is_set():
+            try:
+                if self._frame_queue and self.dataset is not None:
+                    try:
+                        frame = self._frame_queue.popleft()
+                        self.dataset.add_frame(frame)
+                        written_count += 1
+                        if written_count == 1:
+                            print(f"[FRAME WRITER] FIRST FRAME added to dataset buffer!")
+                            # Log buffer size to confirm it's working
+                            if hasattr(self.dataset, 'episode_buffer'):
+                                buf_size = self.dataset.episode_buffer.get('size', 0)
+                                print(f"[FRAME WRITER] Episode buffer size: {buf_size}")
+                        elif written_count % 30 == 0:
+                            print(f"[FRAME WRITER] Written {written_count} frames")
+                    except IndexError:
+                        time.sleep(0.005)  # Queue empty, short sleep
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                import traceback
+                print(f"[FRAME WRITER] ERROR adding frame: {e}")
+                print(traceback.format_exc())
+                time.sleep(0.01)
+
+        # Drain remaining frames before stopping
+        while self._frame_queue and self.dataset is not None:
+            try:
+                frame = self._frame_queue.popleft()
+                self.dataset.add_frame(frame)
+                written_count += 1
+            except IndexError:
+                break
+
+        print(f"[FRAME WRITER] Thread Stopped (written={written_count})")
+
+    def _start_frame_writer(self):
+        """Starts the background frame writer thread."""
+        if self._frame_writer_thread is not None and self._frame_writer_thread.is_alive():
+            return
+        self._frame_writer_stop.clear()
+        self._frame_writer_thread = threading.Thread(target=self._frame_writer_loop, daemon=True, name="FrameWriter")
+        self._frame_writer_thread.start()
+        logger.info("Frame Writer Thread Started")
+
+    def _stop_frame_writer(self):
+        """Stops the background frame writer thread."""
+        self._frame_writer_stop.set()
+        if self._frame_writer_thread is not None:
+            self._frame_writer_thread.join(timeout=2.0)
+            self._frame_writer_thread = None
+        logger.info("Frame Writer Thread Stopped")
+
+    def _recording_capture_loop(self):
+        """Background thread that captures observations at recording fps.
+
+        OPTIMIZED: Uses cached teleop data for motors (no slow hardware reads).
+        Only cameras use async_read which is fast (Zero-Order Hold pattern).
+        This allows reliable 30fps capture without blocking.
+        """
+        print(f"[REC CAPTURE] Thread started at {self.recording_fps}fps")
+        target_dt = 1.0 / self.recording_fps
+
+        # Wall-clock tracking for actual fps measurement
+        episode_start_time = None
+
+        while not self._recording_stop_event.is_set():
+            if self.recording_active and self.robot and self.dataset is not None:
+                start = time.perf_counter()
+
+                # Track when recording actually starts
+                if episode_start_time is None:
+                    episode_start_time = time.perf_counter()
+                    print(f"[REC CAPTURE] Episode recording started at wall-clock t=0")
+                    print(f"[REC CAPTURE] Target: {self.recording_fps}fps ({target_dt*1000:.1f}ms per frame)")
+
+                try:
+                    # FAST STRATEGY: Use cached data from teleop loop (no hardware reads!)
+                    # The teleop loop runs at 60Hz and caches motor positions in _latest_leader_action
+                    action = {}
+                    obs = {}
+
+                    # SOURCE 1: Get motor positions from teleop cache (FAST - no hardware read)
+                    with self._action_lock:
+                        if self._latest_leader_action:
+                            action = self._latest_leader_action.copy()
+                            # Use same positions for observation.state (follower = action target)
+                            for key, val in action.items():
+                                obs[key] = val
+
+                    # SOURCE 2: Capture camera images with async_read (FAST - ZOH pattern)
+                    if hasattr(self.robot, 'cameras') and self.robot.cameras:
+                        for cam_key, cam in self.robot.cameras.items():
+                            try:
+                                # async_read(blocking=False) returns last cached frame instantly
+                                if hasattr(cam, 'async_read'):
+                                    frame = cam.async_read(blocking=False)
+                                    if frame is not None:
+                                        obs[cam_key] = frame
+                                        if self._recording_frame_counter == 0:
+                                            print(f"[REC CAPTURE] Camera {cam_key}: shape={frame.shape}")
+                            except Exception as cam_err:
+                                if self._recording_frame_counter == 0:
+                                    print(f"[REC CAPTURE] Camera {cam_key} error: {cam_err}")
+
+                    # Check data availability
+                    has_motor_data = any('.pos' in k for k in obs.keys())
+                    has_camera_data = any(hasattr(obs.get(k), 'shape') for k in obs.keys())
+
+                    if self._recording_frame_counter == 0:
+                        print(f"[REC CAPTURE] Data: motors={has_motor_data}, cameras={has_camera_data}")
+                        print(f"[REC CAPTURE] obs keys: {list(obs.keys())}")
+                        print(f"[REC CAPTURE] action keys: {list(action.keys())}")
+
+                    # Need at least motor data OR camera data
+                    if not has_motor_data and not has_camera_data:
+                        if self._recording_frame_counter == 0:
+                            print(f"[REC CAPTURE] WARNING: No data! Teleop running: {self.is_running}")
+                        time.sleep(0.005)
+                        continue
+
+                    # Build frame using LeRobot helpers
+                    try:
+                        obs_frame = build_dataset_frame(self.dataset.features, obs, prefix=OBS_STR)
+                        action_frame = build_dataset_frame(self.dataset.features, action, prefix=ACTION)
+
+                        frame = {
+                            **obs_frame,
+                            **action_frame,
+                            "task": self.dataset_config.get("task", ""),
+                        }
+
+                        if self._recording_frame_counter == 0:
+                            print(f"[REC CAPTURE] Built frame with keys: {list(frame.keys())}")
+
+                        # Queue for async writing
+                        self._frame_queue.append(frame)
+                        self._recording_frame_counter += 1
+
+                        if self._recording_frame_counter == 1:
+                            print(f"[REC CAPTURE] FIRST FRAME captured and queued!")
+                        elif self._recording_frame_counter % 30 == 0:
+                            wall_elapsed = time.perf_counter() - episode_start_time
+                            actual_fps = self._recording_frame_counter / wall_elapsed if wall_elapsed > 0 else 0
+                            queue_size = len(self._frame_queue)
+                            print(f"[REC CAPTURE] {self._recording_frame_counter} frames ({actual_fps:.1f}fps), queue: {queue_size}")
+
+                    except Exception as frame_err:
+                        if self._recording_frame_counter == 0:
+                            import traceback
+                            print(f"[REC CAPTURE] Frame build error: {frame_err}")
+                            print(traceback.format_exc())
+
+                except Exception as e:
+                    import traceback
+                    if self._recording_frame_counter == 0 or self._recording_frame_counter % 30 == 0:
+                        print(f"[REC CAPTURE] Error: {e}")
+                        print(traceback.format_exc())
+
+                # Maintain target fps with precise timing
+                elapsed = time.perf_counter() - start
+                sleep_time = target_dt - elapsed
+                if sleep_time > 0:
+                    precise_sleep(sleep_time)
+            else:
+                # Not recording - log why (only once per state change)
+                if not hasattr(self, '_last_idle_reason') or self._last_idle_reason != (self.recording_active, self.robot is not None, self.dataset is not None):
+                    self._last_idle_reason = (self.recording_active, self.robot is not None, self.dataset is not None)
+                    if not self.recording_active:
+                        pass  # Normal idle state, don't spam logs
+                    else:
+                        print(f"[REC CAPTURE] IDLE - recording_active:{self.recording_active}, robot:{self.robot is not None}, dataset:{self.dataset is not None}")
+
+                # Reset episode timing when not actively recording
+                if episode_start_time is not None:
+                    wall_elapsed = time.perf_counter() - episode_start_time
+                    actual_fps = self._recording_frame_counter / wall_elapsed if wall_elapsed > 0 else 0
+                    print(f"[REC CAPTURE] Episode ended: {self._recording_frame_counter} frames in {wall_elapsed:.1f}s = {actual_fps:.1f}fps")
+                    episode_start_time = None
+                time.sleep(0.01)  # Idle when not recording
+
+        print(f"[REC CAPTURE] Thread stopped ({self._recording_frame_counter} total frames)")
+
+    def _start_recording_capture(self):
+        """Starts the recording capture thread."""
+        if self._recording_capture_thread is not None and self._recording_capture_thread.is_alive():
+            return
+        self._recording_stop_event.clear()
+        self._recording_capture_thread = threading.Thread(
+            target=self._recording_capture_loop,
+            daemon=True,
+            name="RecCapture"
+        )
+        self._recording_capture_thread.start()
+        logger.info("Recording Capture Thread Started")
+
+    def _stop_recording_capture(self):
+        """Stops the recording capture thread."""
+        self._recording_stop_event.set()
+        if self._recording_capture_thread is not None:
+            self._recording_capture_thread.join(timeout=2.0)
+            self._recording_capture_thread = None
+        logger.info("Recording Capture Thread Stopped")
+
     def set_assist_enabled(self, enabled: bool):
         self.assist_enabled = enabled
         logger.info(f"Leader Assist Enabled: {self.assist_enabled}")
@@ -278,13 +605,16 @@ class TeleoperationService:
         self.is_running = False
         if self.thread:
             self.thread.join(timeout=2.0)
-            
+
+        # Stop observation capture thread if running
+        self._stop_obs_thread()
+
         # Stop Recording if active
         if self.session_active:
-             try:
-                 self.stop_recording_session()
-             except Exception as e:
-                 logger.error(f"Failed to auto-stop recording session: {e}")
+            try:
+                self.stop_recording_session()
+            except Exception as e:
+                logger.error(f"Failed to auto-stop recording session: {e}")
 
         # Switch Leader back to Position Mode (Safety)
         if self.leader:
@@ -410,54 +740,29 @@ class TeleoperationService:
                             # Direct assignment, no EMA
                             leader_action[f_key] = int(obs[l_key])
 
-                # 2. Send to Follower (Modified for Recording Support Check)
+                # 2. Send Action IMMEDIATELY (Low Latency Control)
+                # Key insight from LeRobot: send_action and get_observation are independent.
+                # Motor writes use sync_write (no response wait), cameras have background threads.
+                # NO LOCK NEEDED - LeRobot's architecture handles thread safety at bus level.
                 if leader_action and self.robot:
                     try:
-                        # If recording, we MIGHT need to read obs?
-                        # The user provided loop is BLIND. 
-                        # But recording requires observation.
-                        if self.recording_active:
-                            # We must read observation if recording
-                             if self.robot_lock:
-                                  with self.robot_lock:
-                                      follower_obs = self.robot.get_observation(include_images=True)
-                                      self.robot.send_action(leader_action)
-                             else:
-                                  follower_obs = self.robot.get_observation(include_images=True)
-                                  self.robot.send_action(leader_action)
-                        else:
-                             # Blind Teleop (Reference)
-                             if self.robot_lock:
-                                  with self.robot_lock:
-                                      self.robot.send_action(leader_action)
-                             else:
-                                  self.robot.send_action(leader_action)
-                                  
+                        self.robot.send_action(leader_action)
                     except Exception as e:
-                         if loop_count % 60 == 0:
-                             logger.error(f"Send Action Failed: {e}")
+                        if loop_count % 60 == 0:
+                            logger.error(f"Send Action Failed: {e}")
                 elif self.robot and loop_count % 60 == 0:
-                     logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")
-                
-                # Debug freeze
+                    logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")
+
+                # 2b. Share action with recording thread
+                # Recording happens in a separate thread (_recording_capture_loop) at 30fps
+                # This keeps the main teleop loop clean and fast at 60Hz
+                if leader_action:
+                    with self._action_lock:
+                        self._latest_leader_action = leader_action.copy()
+
+                # Debug heartbeat
                 if loop_count % 60 == 0:
-                    print(f"Teleop Heartbeat: {loop_count} (Active: {self.is_running})")
-                
-                # 3. Recording (In-Process)
-                if self.is_running and self.recording_active and self.dataset and follower_obs:
-                     try:
-                         # Build Frames using LeRobot Helper
-                         obs_frame = build_dataset_frame(self.dataset.features, follower_obs, prefix=OBS_STR)
-                         action_frame = build_dataset_frame(self.dataset.features, leader_action, prefix=ACTION)
-                         
-                         # Combine
-                         frame = {**obs_frame, **action_frame, "task": self.dataset_config.get("task", "")}
-                         
-                         # Add to Dataset (Non-Blocking)
-                         self.dataset.add_frame(frame)
-                     except Exception as e:
-                          if loop_count % 60 == 0:
-                               logger.error(f"Recording Capture Error: {e}")
+                    print(f"Teleop Heartbeat: {loop_count} (Active: {self.is_running}, Recording: {self.recording_active})")
 
                 # 4. Store Data (for UI)
                 if loop_count % 5 == 0:
@@ -519,20 +824,26 @@ class TeleoperationService:
 
     def start_recording_session(self, repo_id: str, task: str, fps: int = 30, root: str = None):
         """Initializes a new LeRobotDataset for recording."""
+        print("=" * 60)
+        print(f"[START_SESSION] Called with repo_id='{repo_id}', task='{task}'")
+        print(f"  session_active: {self.session_active}")
+        print(f"  robot: {self.robot is not None}")
+        print("=" * 60)
+
         if self.session_active:
-             raise Exception("Session already active")
-             
+            print("[START_SESSION] ERROR: Session already active!")
+            raise Exception("Session already active")
+
         # Set default root to app datasets directory
-        from pathlib import Path
         if root is None:
-            base_dir = Path("/home/roberto/nextis_app/datasets")
+            base_dir = _DEFAULT_DATASETS_PATH
         else:
             base_dir = Path(root)
-            
+
         # Target Path
         dataset_dir = base_dir / repo_id
-        
-        logger.info(f"Starting Recording Session: {repo_id} at {dataset_dir}")
+
+        print(f"[START_SESSION] Dataset dir: {dataset_dir}")
 
         try:
             if not self.robot:
@@ -581,75 +892,249 @@ class TeleoperationService:
                 )
             
             self.dataset.meta.metadata_buffer_size = 1
+            print(f"[START_SESSION] Dataset created/loaded successfully")
+
+            # CRITICAL: Set episode_count from actual dataset state
+            # For new dataset: total_episodes = 0
+            # For existing dataset: total_episodes = actual count
+            self.episode_count = self.dataset.meta.total_episodes
+            print(f"[START_SESSION] Episode count set to {self.episode_count} (from dataset)")
 
             # 3. Start Video Encoding
             if not self.video_manager:
-                 self.video_manager = VideoEncodingManager(self.dataset)
-                 self.video_manager.__enter__()
-            
+                self.video_manager = VideoEncodingManager(self.dataset)
+                self.video_manager.__enter__()
+            print("[START_SESSION] Video manager started")
+
             # 4. Start Image Writer (Threads)
             self.dataset.start_image_writer(num_processes=0, num_threads=4)
-            
+            print("[START_SESSION] Image writer started")
+
             self.dataset_config = {"repo_id": repo_id, "task": task}
             self.session_active = True
-            logger.info("Session Started Successfully.")
-            
+
+            # Update recording fps to match dataset
+            self.recording_fps = fps
+            self._recording_frame_counter = 0
+            print(f"[START_SESSION] Recording at {self.recording_fps}fps (teleop={self.frequency}Hz)")
+
+            # Start async frame writer thread
+            self._start_frame_writer()
+
+            # Start recording capture thread (separate from teleop loop for smooth control)
+            self._start_recording_capture()
+
+            print("[START_SESSION] SUCCESS! Session is now active")
+            print("=" * 60)
+
         except Exception as e:
             import traceback
-            logger.error(f"Failed to start recording session: {e}\n{traceback.format_exc()}")
+            print(f"[START_SESSION] ERROR: {e}")
+            print(traceback.format_exc())
             self.session_active = False
             self.dataset = None
             raise
 
     def stop_recording_session(self):
         """Finalizes the LeRobotDataset."""
+        print("=" * 60)
+        print(f"[STOP_SESSION] Called!")
+        print(f"  session_active: {self.session_active}")
+        print(f"  dataset: {self.dataset is not None}")
+        print(f"  episode_saving: {self._episode_saving}")
+        print("=" * 60)
+
         if not self.session_active:
+            print("[STOP_SESSION] Not active, returning")
             return
-            
-        logger.info("Stopping Recording Session...")
+
+        # AUTO-SAVE: If an episode is actively recording, save it first
+        if self.recording_active:
+            print("[STOP_SESSION] Episode still recording - auto-saving before finalize...")
+            try:
+                self.stop_episode()
+                print("[STOP_SESSION] Auto-save completed successfully")
+            except Exception as e:
+                print(f"[STOP_SESSION] WARNING: Auto-save failed: {e}")
+
+        print("[STOP_SESSION] Stopping Recording Session...")
         self.session_active = False
-        
-        try:
-            if self.dataset:
-                logger.info("Finalizing Dataset...")
-                self.dataset.finalize()
-                
-                if self.video_manager:
-                    self.video_manager.__exit__(None, None, None)
-                    self.video_manager = None
-                
+
+        # Stop recording capture thread first (it produces frames)
+        print("[STOP_SESSION] Stopping recording capture thread...")
+        self._stop_recording_capture()
+
+        # Stop async frame writer (drains remaining frames)
+        print(f"[STOP_SESSION] Stopping frame writer (queue size: {len(self._frame_queue)})")
+        self._stop_frame_writer()
+
+        # CRITICAL: Wait for any pending episode save to complete
+        # This prevents finalize() from closing writers while save_episode() is still writing
+        print("[STOP_SESSION] Acquiring episode save lock (waiting for pending save)...")
+        with self._episode_save_lock:
+            print("[STOP_SESSION] Episode save lock acquired, safe to finalize")
+
+            try:
+                if self.dataset:
+                    print("[STOP_SESSION] Finalizing Dataset...")
+
+                    # Check if writer exists before finalize
+                    has_writer = hasattr(self.dataset, 'writer') and self.dataset.writer is not None
+                    has_meta_writer = (hasattr(self.dataset, 'meta') and
+                                       hasattr(self.dataset.meta, 'writer') and
+                                       self.dataset.meta.writer is not None)
+                    print(f"[STOP_SESSION] Before finalize - data writer: {has_writer}, meta writer: {has_meta_writer}")
+
+                    # Call finalize to close parquet writers
+                    self.dataset.finalize()
+
+                    # Verify writers are closed
+                    has_writer_after = hasattr(self.dataset, 'writer') and self.dataset.writer is not None
+                    has_meta_writer_after = (hasattr(self.dataset, 'meta') and
+                                             hasattr(self.dataset.meta, 'writer') and
+                                             self.dataset.meta.writer is not None)
+                    print(f"[STOP_SESSION] After finalize - data writer: {has_writer_after}, meta writer: {has_meta_writer_after}")
+
+                    if has_writer_after or has_meta_writer_after:
+                        print("[STOP_SESSION] WARNING: Writers not fully closed, forcing close...")
+                        # Force close if still open
+                        if hasattr(self.dataset, '_close_writer'):
+                            self.dataset._close_writer()
+                        if hasattr(self.dataset, 'meta') and hasattr(self.dataset.meta, '_close_writer'):
+                            self.dataset.meta._close_writer()
+
+                    print("[STOP_SESSION] Dataset finalized")
+
+                    if self.video_manager:
+                        self.video_manager.__exit__(None, None, None)
+                        self.video_manager = None
+                        print("[STOP_SESSION] Video manager closed")
+
+                    self.dataset = None
+                    print("[STOP_SESSION] SUCCESS! Session Stopped and Saved!")
+            except Exception as e:
+                import traceback
+                print(f"[STOP_SESSION] ERROR: {e}")
+                print(traceback.format_exc())
+                # Ensure cleanup even on error
                 self.dataset = None
-                logger.info("Session Stopped and Saved.")
-        except Exception as e:
-            logger.error(f"Error stopping session: {e}")
 
     def start_episode(self):
         """Starts recording a new episode."""
+        print("=" * 60)
+        print("[START_EPISODE] Called!")
+        print(f"  session_active: {self.session_active}")
+        print(f"  recording_active: {self.recording_active}")
+        print(f"  dataset: {self.dataset is not None}")
+        print("=" * 60)
+
         if not self.session_active:
-             raise Exception("No active recording session")
-        
+            print("[START_EPISODE] ERROR: No active session!")
+            raise Exception("No active recording session")
+
         if self.recording_active:
-             return # Already recording
-        
-        logger.info("Starting Episode Recording...")
+            print("[START_EPISODE] Already recording, skipping")
+            return
+
+        # Warn if teleop isn't running - recording needs teleop for actions
+        if not self.is_running:
+            print("[START_EPISODE] WARNING: Teleop is NOT running!")
+            print("[START_EPISODE] Recording requires teleop to be active for action/state data.")
+            print("[START_EPISODE] Will use robot state fallback if available.")
+
+        print("[START_EPISODE] Starting Episode Recording...")
+
         if self.dataset:
-             # Ensure buffer is clear
-             self.dataset.clear_episode_buffer()
-             
+            self.dataset.clear_episode_buffer()
+            print("[START_EPISODE] Episode buffer cleared")
+            print(f"[START_EPISODE] Dataset features: {list(self.dataset.features.keys())[:5]}...")
+
+        # Reset frame counter for new episode
+        self._recording_frame_counter = 0
+
         self.recording_active = True
+        print("[START_EPISODE] recording_active = True, ready to capture frames!")
 
     def stop_episode(self):
         """Stops current episode and saves it."""
-        if not self.recording_active:
-             return
-             
-        logger.info("Stopping Episode Recording. Saving...")
-        self.recording_active = False
-        
+        print("=" * 60)
+        print("[STOP_EPISODE] Called!")
+        print(f"  recording_active: {self.recording_active}")
+        print(f"  session_active: {self.session_active}")
+        print(f"  dataset: {self.dataset is not None}")
         if self.dataset:
-             self.dataset.save_episode(task=self.dataset_config.get("task", ""))
-             self.episode_count += 1
-             logger.info(f"Episode {self.episode_count} Saved.")
+            print(f"  dataset type: {type(self.dataset)}")
+        print("=" * 60)
+
+        if not self.recording_active:
+            print("[STOP_EPISODE] WARNING: recording_active is False, returning")
+            return
+
+        # Acquire lock to prevent race with stop_session
+        # This ensures save_episode() completes before finalize() can be called
+        print("[STOP_EPISODE] Acquiring episode save lock...")
+        with self._episode_save_lock:
+            self._episode_saving = True
+            print("[STOP_EPISODE] Lock acquired, proceeding with save")
+
+            # Capture dataset reference BEFORE changing state
+            # This prevents race conditions where dataset could be set to None
+            current_dataset = self.dataset
+
+            print("[STOP_EPISODE] Stopping Episode Recording...")
+            self.recording_active = False
+
+            # Wait for frame queue to drain before saving episode
+            print(f"[STOP_EPISODE] Waiting for frame queue to drain ({len(self._frame_queue)} frames)...")
+            drain_timeout = 5.0  # seconds
+            drain_start = time.time()
+            while len(self._frame_queue) > 0 and (time.time() - drain_start) < drain_timeout:
+                time.sleep(0.05)
+            if len(self._frame_queue) > 0:
+                print(f"[STOP_EPISODE] WARNING: Queue not fully drained ({len(self._frame_queue)} remaining)")
+            else:
+                print(f"[STOP_EPISODE] Queue drained successfully")
+
+            # Reset first frame logging flag for next episode
+            if hasattr(self, '_first_frame_logged'):
+                delattr(self, '_first_frame_logged')
+            if hasattr(self, '_last_rec_error'):
+                delattr(self, '_last_rec_error')
+
+            if current_dataset is not None:
+                try:
+                    # Check episode buffer before saving
+                    if hasattr(current_dataset, 'episode_buffer') and current_dataset.episode_buffer:
+                        buffer_size = current_dataset.episode_buffer.get('size', 0)
+                        print(f"[STOP_EPISODE] Episode buffer has {buffer_size} frames (captured {self._recording_frame_counter})")
+
+                        if buffer_size == 0:
+                            print("[STOP_EPISODE] WARNING: Buffer size is 0, no frames were recorded!")
+                            print("[STOP_EPISODE] This means observations weren't captured during recording.")
+                            self._episode_saving = False
+                            return
+                    else:
+                        print("[STOP_EPISODE] WARNING: Episode buffer is empty or missing!")
+                        print(f"  has episode_buffer attr: {hasattr(current_dataset, 'episode_buffer')}")
+                        if hasattr(current_dataset, 'episode_buffer'):
+                            print(f"  episode_buffer value: {current_dataset.episode_buffer}")
+                        self._episode_saving = False
+                        return
+
+                    print(f"[STOP_EPISODE] Calling save_episode()")
+                    # Note: task is already included in each frame, no need to pass to save_episode
+                    current_dataset.save_episode()
+                    self.episode_count += 1
+                    print(f"[STOP_EPISODE] SUCCESS! Episode {self.episode_count} Saved! ({self._recording_frame_counter} frames)")
+                except Exception as e:
+                    import traceback
+                    print(f"[STOP_EPISODE] ERROR saving episode: {e}")
+                    print(traceback.format_exc())
+            else:
+                print("[STOP_EPISODE] WARNING: No dataset available (current_dataset is None)!")
+
+            self._episode_saving = False
+            print("[STOP_EPISODE] Episode save lock released")
              
     def delete_last_episode(self):
          """Deletes the last recorded episode (if possible/implemented)."""
