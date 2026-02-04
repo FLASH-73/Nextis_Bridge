@@ -149,3 +149,5 @@ __pycache__/
 training/outputs/
 frontend/node_modules/
 manual.pdf
+CLAUDE.md
+big_plan.md
