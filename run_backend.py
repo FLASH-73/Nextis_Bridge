@@ -19,7 +19,7 @@ if __name__ == "__main__":
         print("\n🚀 Starting Backend Server...")
         # We invoke uvicorn via subprocess to verify clean process state on restart
         # We must use sys.executable to ensure we use the same python env
-        cmd = [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+        cmd = [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"]
         
         try:
             # Run and wait

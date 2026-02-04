@@ -4,15 +4,24 @@ from lerobot.robots.bi_umbra_follower.bi_umbra_follower import BiUmbraFollower
 from lerobot.robots.umbra_follower.umbra_follower import UmbraFollowerRobot
 from lerobot.motors.feetech import OperatingMode
 
+# Try to import Damiao robot (may not be available on all systems)
+try:
+    from lerobot.robots.damiao_follower import DamiaoFollowerRobot
+    DAMIAO_AVAILABLE = True
+except ImportError:
+    DamiaoFollowerRobot = None
+    DAMIAO_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 class CalibrationService:
-    def __init__(self, robot, leader=None, robot_lock=None):
+    def __init__(self, robot, leader=None, robot_lock=None, arm_registry=None):
         self.robot = robot
         self.leader = leader
         self.robot_lock = robot_lock
+        self.arm_registry = arm_registry  # For new arm management system
         self.active_arm = None
-        
+
         # Range Discovery State
         self.is_discovering = False
         self.session_ranges = {} # {motor_name: {"min": val, "max": val}}
@@ -52,7 +61,32 @@ class CalibrationService:
             add_arm_groups("right", self.robot.right_arm, include_leader=False)
         elif isinstance(self.robot, UmbraFollowerRobot):
             add_arm_groups("default", self.robot, include_leader=True)
-            
+
+        # Add Damiao arm if connected
+        if DAMIAO_AVAILABLE and DamiaoFollowerRobot is not None:
+            if isinstance(self.robot, DamiaoFollowerRobot):
+                # Damiao uses absolute encoders, always "calibrated"
+                damiao_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
+                damiao_calibrated = self.robot.is_calibrated
+                arms.append({
+                    "id": "damiao_follower",
+                    "name": "Damiao Follower",
+                    "calibrated": damiao_calibrated,
+                    "type": "follower",
+                    "motor_type": "damiao"  # Special flag for UI
+                })
+
+        # Check for Damiao robot passed separately (e.g., as damiao_robot attribute)
+        if hasattr(self, 'damiao_robot') and self.damiao_robot is not None:
+            damiao_calibrated = self.damiao_robot.is_calibrated if hasattr(self.damiao_robot, 'is_calibrated') else True
+            arms.append({
+                "id": "damiao_follower",
+                "name": "Damiao Follower",
+                "calibrated": damiao_calibrated,
+                "type": "follower",
+                "motor_type": "damiao"
+            })
+
         # Add Leader Arms if present
         if self.leader:
             from lerobot.teleoperators.bi_umbra_leader.bi_umbra_leader import BiUmbraLeader
@@ -66,7 +100,7 @@ class CalibrationService:
                     "calibrated": l_calibrated,
                     "type": "leader"
                 })
-                
+
                 # Check Right Leader
                 r_leader = self.leader.right_arm
                 r_calibrated = all(m in r_leader.calibration for m in ["base", "link1", "link2", "link3", "link4", "link5", "gripper"])
@@ -76,52 +110,90 @@ class CalibrationService:
                     "calibrated": r_calibrated,
                     "type": "leader"
                 })
-            
+
+        # Add arms from arm registry (covers Dynamixel leaders and other registered arms)
+        if self.arm_registry:
+            existing_ids = {a["id"] for a in arms}
+            from app.core.arm_registry import ConnectionStatus
+            for arm_id, arm_def in self.arm_registry.arms.items():
+                if arm_id in existing_ids:
+                    continue
+                # Only include connected arms
+                if self.arm_registry.arm_status.get(arm_id) != ConnectionStatus.CONNECTED:
+                    continue
+                instance = self.arm_registry.arm_instances.get(arm_id)
+                calibrated = False
+                if instance and hasattr(instance, 'is_calibrated'):
+                    calibrated = instance.is_calibrated
+                arms.append({
+                    "id": arm_id,
+                    "name": arm_def.name,
+                    "calibrated": calibrated,
+                    "type": arm_def.role.value,
+                    "motor_type": arm_def.motor_type.value,
+                })
+
         return arms
 
     def _get_arm_context(self, arm_id: str):
         """Returns (robot_instance, motor_list_filter)"""
         parts = arm_id.split("_")
-        
-        if len(parts) < 2:
-            return None, []
-            
-        side = parts[0] # left, right, default
-        group = parts[1] # leader, follower
-        
+
         robot_inst = None
-        
-        # Handle Followers
-        if group == "follower":
-            if isinstance(self.robot, BiUmbraFollower):
-                if side == "left":
-                    robot_inst = self.robot.left_arm
-                elif side == "right":
-                    robot_inst = self.robot.right_arm
-            elif isinstance(self.robot, UmbraFollowerRobot):
-                robot_inst = self.robot
 
-        # Handle Leaders
-        elif group == "leader":
-            if self.leader:
-                if side == "left":
-                    robot_inst = self.leader.left_arm
-                elif side == "right":
-                    robot_inst = self.leader.right_arm
-            elif isinstance(self.robot, UmbraFollowerRobot):
-                 robot_inst = self.robot
-            
-        if not robot_inst:
-            logger.warning(f"_get_arm_context: No robot instance found for {arm_id} (Side={side}, Group={group})")
-            return None, []
+        if len(parts) >= 2:
+            side = parts[0] # left, right, default
+            group = parts[1] # leader, follower
 
-        target_motors = []
-        if group == "leader":
-            target_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
-        elif group == "follower":
-            target_motors = ["base", "link1", "link1_follower", "link2", "link2_follower", "link3", "link4", "link5", "gripper"]
-            
-        return robot_inst, target_motors
+            # Handle Followers
+            if group == "follower":
+                # Check for Damiao follower first
+                if side == "damiao":
+                    if DAMIAO_AVAILABLE and DamiaoFollowerRobot is not None:
+                        if isinstance(self.robot, DamiaoFollowerRobot):
+                            robot_inst = self.robot
+                        elif hasattr(self, 'damiao_robot') and self.damiao_robot is not None:
+                            robot_inst = self.damiao_robot
+                elif isinstance(self.robot, BiUmbraFollower):
+                    if side == "left":
+                        robot_inst = self.robot.left_arm
+                    elif side == "right":
+                        robot_inst = self.robot.right_arm
+                elif isinstance(self.robot, UmbraFollowerRobot):
+                    robot_inst = self.robot
+
+            # Handle Leaders
+            elif group == "leader":
+                if self.leader:
+                    if side == "left":
+                        robot_inst = self.leader.left_arm
+                    elif side == "right":
+                        robot_inst = self.leader.right_arm
+                elif isinstance(self.robot, UmbraFollowerRobot):
+                     robot_inst = self.robot
+
+            if robot_inst:
+                target_motors = []
+                if group == "leader":
+                    target_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
+                elif group == "follower":
+                    # Damiao has simple 7-DOF (no dual followers)
+                    if side == "damiao":
+                        target_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
+                    else:
+                        # Umbra/BiUmbra has dual link1/link2 followers
+                        target_motors = ["base", "link1", "link1_follower", "link2", "link2_follower", "link3", "link4", "link5", "gripper"]
+                return robot_inst, target_motors
+
+        # Fallback: check arm registry for arms not matching legacy patterns
+        if self.arm_registry:
+            instance = self.arm_registry.arm_instances.get(arm_id)
+            if instance and hasattr(instance, 'bus'):
+                target_motors = list(instance.bus.motors.keys())
+                return instance, target_motors
+
+        logger.warning(f"_get_arm_context: No robot instance found for {arm_id}")
+        return None, []
 
     def _ensure_active_profiles_init(self):
         if not hasattr(self, "active_profiles"):
@@ -172,14 +244,19 @@ class CalibrationService:
         """Ensures that arm.calibration is populated with default entries for all motors."""
         if not arm.calibration:
             from lerobot.motors import MotorCalibration
-            logger.info(f"Initializing empty calibration for {arm}")
+            from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+            is_damiao = isinstance(arm.bus, DamiaoMotorsBus)
+            # Damiao: radians (±π). Feetech/Dynamixel: 12-bit ticks (0-4095).
+            default_min = -3.15 if is_damiao else 0
+            default_max = 3.15 if is_damiao else 4096
+            logger.info(f"Initializing empty calibration for {arm} (damiao={is_damiao})")
             for name, motor in arm.bus.motors.items():
                 arm.calibration[name] = MotorCalibration(
-                    id=motor.id,
+                    id=getattr(motor, 'id', getattr(motor, 'can_id', 0)),
                     drive_mode=0,
                     homing_offset=0,
-                    range_min=0,
-                    range_max=4096 # Default open range
+                    range_min=default_min,
+                    range_max=default_max,
                 )
 
     def start_discovery(self, arm_id: str):
@@ -195,15 +272,34 @@ class CalibrationService:
         
         self.is_discovering = True
         self.session_ranges = {}
-        
-        # Enable Multi-turn for discovery (Limits=0)
+
+        # Damiao: block writes + disable torque so user can freely move joints
+        if self._is_damiao_arm(arm_id):
+            logger.info(f"[{arm_id}] Damiao — discovery mode: disabling motors, blocking writes")
+            arm.bus._discovery_mode = True
+            if self.robot_lock:
+                with self.robot_lock:
+                    for motor_name in target_motors:
+                        if motor_name in arm.bus.motors:
+                            try:
+                                arm.bus._control.disable(arm.bus._motors[motor_name])
+                            except Exception as e:
+                                logger.warning(f"Failed to disable {motor_name}: {e}")
+            else:
+                for motor_name in target_motors:
+                    if motor_name in arm.bus.motors:
+                        try:
+                            arm.bus._control.disable(arm.bus._motors[motor_name])
+                        except Exception as e:
+                            logger.warning(f"Failed to disable {motor_name}: {e}")
+            return
+
+        # Feetech/Dynamixel: Enable Multi-turn for discovery (Limits=0)
         # This prevents the motor from stopping at 0/4095
         if self.robot_lock:
              with self.robot_lock:
                  for motor in target_motors:
                      if motor in arm.bus.motors:
-                         # Disable Torque to write limits? Ideally user moves it manually with torque off.
-                         # But we need to write limits.
                          try:
                              arm.bus.write("Min_Position_Limit", motor, 0)
                              arm.bus.write("Max_Position_Limit", motor, 0)
@@ -221,13 +317,38 @@ class CalibrationService:
     def stop_discovery(self, arm_id: str):
         logger.info(f"Stopping Range Discovery for {arm_id}")
         self.is_discovering = False
-        
+
         # Automatically update the robot's calibration with the discovered ranges
         arm, _ = self._get_arm_context(arm_id)
-        
+
+        if not arm:
+            return {"status": "error", "message": f"Arm '{arm_id}' not found", "warnings": []}
+
         # Ensure we have a calibration object to update
         self._ensure_calibration_initialized(arm)
         
+        # Damiao: clear discovery mode + re-enable motors
+        if self._is_damiao_arm(arm_id):
+            logger.info(f"[{arm_id}] Damiao — ending discovery: re-enabling motors, unblocking writes")
+            arm.bus._discovery_mode = False
+            _, target_motors = self._get_arm_context(arm_id)
+            if target_motors:
+                if self.robot_lock:
+                    with self.robot_lock:
+                        for motor_name in target_motors:
+                            if motor_name in arm.bus.motors:
+                                try:
+                                    arm.bus._control.enable(arm.bus._motors[motor_name])
+                                except Exception as e:
+                                    logger.warning(f"Failed to re-enable {motor_name}: {e}")
+                else:
+                    for motor_name in target_motors:
+                        if motor_name in arm.bus.motors:
+                            try:
+                                arm.bus._control.enable(arm.bus._motors[motor_name])
+                            except Exception as e:
+                                logger.warning(f"Failed to re-enable {motor_name}: {e}")
+
         warnings = []
         if arm and self.session_ranges:
             for motor, ranges in self.session_ranges.items():
@@ -235,13 +356,12 @@ class CalibrationService:
                     arm.calibration[motor].range_min = ranges["min"]
                     arm.calibration[motor].range_max = ranges["max"]
                     
-                    # Diagnostic Check
-                    # If Min is near 0 AND Max is near 4096 (Full Turn), it might be uninitialized/wrapped.
-                    # Unless it's a multi-turn motor or truly used 360 deg.
-                    # For link1/link2 on Umbra, this is suspicious if offsets were 0.
-                    if ranges["min"] <= 10 and ranges["max"] >= 4080:
-                         if motor in ["link1", "link2", "link1_follower", "link2_follower"]:
-                             warnings.append(f"{motor} used FULL RANGE (0-4096). Possible Wrap Error.")
+                    # Diagnostic Check (Feetech/Dynamixel tick-based only)
+                    # Damiao uses radians — this tick-range check doesn't apply
+                    if not self._is_damiao_arm(arm_id):
+                        if ranges["min"] <= 10 and ranges["max"] >= 4080:
+                             if motor in ["link1", "link2", "link1_follower", "link2_follower"]:
+                                 warnings.append(f"{motor} used FULL RANGE (0-4096). Possible Wrap Error.")
                 else:
                     logger.warning(f"stop_discovery: Motor {motor} not found in arm.calibration")
             
@@ -296,17 +416,17 @@ class CalibrationService:
 
             state.append({
                 "name": motor_name,
-                "min": range_min,
-                "max": range_max,
-                "visited_min": visited_min, 
-                "visited_max": visited_max,
-                "pos": pos,
-                "id": arm.bus.motors[motor_name].id
+                "min": round(range_min, 2),
+                "max": round(range_max, 2),
+                "visited_min": round(visited_min, 2),
+                "visited_max": round(visited_max, 2),
+                "pos": round(pos, 2),
+                "id": getattr(arm.bus.motors[motor_name], 'id', getattr(arm.bus.motors[motor_name], 'can_id', 0))
             })
         
         return state
 
-    def set_calibration_limit(self, arm_id: str, motor_name: str, limit_type: str, value: int):
+    def set_calibration_limit(self, arm_id: str, motor_name: str, limit_type: str, value):
         arm, _ = self._get_arm_context(arm_id)
         if not arm:
             return
@@ -314,10 +434,13 @@ class CalibrationService:
         if motor_name not in arm.calibration:
             return
 
+        # Damiao uses float radians, Feetech/Dynamixel use integer ticks
+        converted = float(value) if self._is_damiao_arm(arm_id) else int(value)
+
         if limit_type == "min":
-            arm.calibration[motor_name].range_min = int(value)
+            arm.calibration[motor_name].range_min = converted
         elif limit_type == "max":
-            arm.calibration[motor_name].range_max = int(value)
+            arm.calibration[motor_name].range_max = converted
 
     def list_calibration_files(self, arm_id: str) -> List[Dict[str, Any]]:
         arm, _ = self._get_arm_context(arm_id)
@@ -402,12 +525,14 @@ class CalibrationService:
         if not arm:
             return
 
-        # First, ensure we have the latest from the bus
-        if self.robot_lock:
-            with self.robot_lock:
+        # Write calibration to motor hardware (Feetech/Dynamixel only)
+        # Damiao uses absolute encoders — calibration is host-side JSON only
+        if not self._is_damiao_arm(arm_id):
+            if self.robot_lock:
+                with self.robot_lock:
+                    arm.bus.write_calibration(arm.calibration)
+            else:
                 arm.bus.write_calibration(arm.calibration)
-        else:
-            arm.bus.write_calibration(arm.calibration)
 
         # Usage of internal save for default file
         if hasattr(arm, "_save_calibration"):
@@ -446,109 +571,136 @@ class CalibrationService:
 
 
 
+    def _is_dynamixel_arm(self, arm_id: str) -> bool:
+        """Check if arm uses Dynamixel motors (no Lock register, different OperatingMode)."""
+        if self.arm_registry:
+            arm_def = self.arm_registry.arms.get(arm_id)
+            if arm_def and 'dynamixel' in arm_def.motor_type.value:
+                return True
+        return False
+
+    def _is_damiao_arm(self, arm_id: str) -> bool:
+        """Check if arm uses Damiao CAN motors (completely different protocol)."""
+        if self.arm_registry:
+            arm_def = self.arm_registry.arms.get(arm_id)
+            if arm_def and arm_def.motor_type.value == 'damiao':
+                return True
+        # Legacy pattern
+        if arm_id.startswith('damiao'):
+            return True
+        return False
+
     def disable_torque(self, arm_id: str):
         arm, _ = self._get_arm_context(arm_id)
         if arm:
             logger.info(f"Disabling torque for COMPONENT {arm_id} (All motors on bus)")
-            RETRY_COUNT = 5
-            
-            if self.robot_lock:
-                with self.robot_lock:
+            is_damiao = self._is_damiao_arm(arm_id)
+            is_dynamixel = self._is_dynamixel_arm(arm_id)
+
+            def _do_disable():
+                if is_damiao:
+                    # Damiao: use CAN disable command directly
+                    arm.bus.disable_torque()
+                else:
+                    RETRY_COUNT = 5
                     try:
                         arm.bus.disable_torque(None, num_retry=RETRY_COUNT)
                     except TypeError:
                         arm.bus.disable_torque(None)
-                        
-                    for motor in arm.bus.motors:
-                        try:
-                            # Also reset Lock/Torque just in case
-                            arm.bus.write("Lock", motor, 0, num_retry=RETRY_COUNT)
-                            arm.bus.write("Torque_Enable", motor, 0, num_retry=RETRY_COUNT)
-                            arm.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value, num_retry=RETRY_COUNT)
-                            # CLEAR Min/Max limits to allow full rotation during calibration?
-                            # Feetech doc: Min/Max Position Limit.
-                            # arm.bus.write("Min_Position_Limit", motor, 0)
-                            # arm.bus.write("Max_Position_Limit", motor, 0) 
-                        except Exception as e:
-                            logger.warning(f"Failed to set Operating_Mode/Limits for {motor}: {e}")
+
+                    if not is_dynamixel:
+                        # Feetech-specific: reset Lock, Torque, OperatingMode
+                        for motor in arm.bus.motors:
+                            try:
+                                arm.bus.write("Lock", motor, 0, num_retry=RETRY_COUNT)
+                                arm.bus.write("Torque_Enable", motor, 0, num_retry=RETRY_COUNT)
+                                arm.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value, num_retry=RETRY_COUNT)
+                            except Exception as e:
+                                logger.warning(f"Failed to set Operating_Mode/Limits for {motor}: {e}")
+
+            if self.robot_lock:
+                with self.robot_lock:
+                    _do_disable()
             else:
-                 try:
-                    arm.bus.disable_torque(None, num_retry=RETRY_COUNT)
-                 except TypeError:
-                    arm.bus.disable_torque(None)
-                 for motor in arm.bus.motors:
-                    try:
-                        arm.bus.write("Lock", motor, 0, num_retry=RETRY_COUNT)
-                        arm.bus.write("Torque_Enable", motor, 0, num_retry=RETRY_COUNT)
-                        arm.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value, num_retry=RETRY_COUNT)
-                    except Exception as e:
-                        logger.warning(f"Failed to set configs for {motor}: {e}")
+                _do_disable()
 
     def enable_torque(self, arm_id: str):
         arm, _ = self._get_arm_context(arm_id)
         if arm:
             logger.info(f"Enabling torque for {arm_id} (All motors on bus)")
-            RETRY_COUNT = 5
+            is_damiao = self._is_damiao_arm(arm_id)
+
+            def _do_enable():
+                if is_damiao:
+                    arm.bus.enable_torque()
+                else:
+                    RETRY_COUNT = 5
+                    try:
+                        arm.bus.enable_torque(None, num_retry=RETRY_COUNT)
+                    except TypeError:
+                        arm.bus.enable_torque(None)
+
             if self.robot_lock:
                 with self.robot_lock:
-                    try:
-                         arm.bus.enable_torque(None, num_retry=RETRY_COUNT)
-                    except TypeError:
-                         arm.bus.enable_torque(None)
+                    _do_enable()
             else:
-                try:
-                     arm.bus.enable_torque(None, num_retry=RETRY_COUNT)
-                except TypeError:
-                     arm.bus.enable_torque(None)
+                _do_enable()
 
-    def move_motor(self, arm_id: str, motor_name: str, value: int):
+    def move_motor(self, arm_id: str, motor_name: str, value):
         arm, _ = self._get_arm_context(arm_id)
         if arm:
-            if self.robot_lock:
-                with self.robot_lock:
-                    arm.bus.write("Goal_Position", motor_name, value, normalize=False)
+            if self._is_damiao_arm(arm_id):
+                # Damiao: use sync_write (CAN protocol, no single-motor write())
+                if self.robot_lock:
+                    with self.robot_lock:
+                        arm.bus.sync_write("Goal_Position", {motor_name: value})
+                else:
+                    arm.bus.sync_write("Goal_Position", {motor_name: value})
             else:
-                arm.bus.write("Goal_Position", motor_name, value, normalize=False)
+                if self.robot_lock:
+                    with self.robot_lock:
+                        arm.bus.write("Goal_Position", motor_name, value, normalize=False)
+                else:
+                    arm.bus.write("Goal_Position", motor_name, value, normalize=False)
 
     def perform_homing(self, arm_id: str):
-        # Use LeRobot's Standard Homing Procedure
         arm, target_motors = self._get_arm_context(arm_id)
         if not arm:
             logger.error(f"perform_homing: Invalid arm_id {arm_id} or arm not found.")
             return {"status": "error", "message": "Arm not found"}
 
-        logger.info(f"Performing Homing for {arm_id} using Standard LeRobot logic")
-        
+        logger.info(f"Performing Homing for {arm_id}")
+
         # Ensure we have a calibration object to update offsets into
         self._ensure_calibration_initialized(arm)
-        
+
         try:
+            # Damiao: use CAN set_zero_position command (0xFE) — absolute encoders, no offset register
+            if self._is_damiao_arm(arm_id):
+                return self._perform_damiao_homing(arm, arm_id, target_motors)
+
+            # Feetech/Dynamixel: use standard LeRobot homing (half-turn offset)
             offsets = {}
             if self.robot_lock:
                 with self.robot_lock:
-                     # Filter motors to only target relevant ones
                      motors_to_home = [m for m in target_motors if m in arm.bus.motors]
-                     
-                     # Force Torque Disable first
                      arm.bus.disable_torque(motors_to_home)
-                     
-                     # Run standard procedure
                      offsets = arm.bus.set_half_turn_homings(motors_to_home)
             else:
                  motors_to_home = [m for m in target_motors if m in arm.bus.motors]
                  arm.bus.disable_torque(motors_to_home)
                  offsets = arm.bus.set_half_turn_homings(motors_to_home)
-            
-            # Diagnostic check (similar to terminal script)
+
+            # Diagnostic check
             warnings = []
             for m, off in offsets.items():
                 if off == 0 and m in ['link1', 'link2', 'link1_follower', 'link2_follower']:
                     warnings.append(f"{m}=0 (Suspicious)")
-            
+
             msg = "Homing Done."
             if warnings:
                 msg += f" WARNING: Zero offsets for {', '.join(warnings)}. Check Motor Alignment!"
-                
+
             return {"status": "success", "offsets": offsets, "message": msg}
 
         except Exception as e:
@@ -556,6 +708,31 @@ class CalibrationService:
             traceback.print_exc()
             logger.exception(f"Homing failed with exception: {e}")
             return {"status": "error", "message": str(e)}
+
+    def _perform_damiao_homing(self, arm, arm_id: str, target_motors: list) -> dict:
+        """Damiao-specific homing: set current position as zero using CAN 0xFE command.
+
+        Damiao motors use absolute encoders — no Homing_Offset register.
+        The 0xFE CAN command permanently sets current physical position as 0 radians.
+        User must have positioned the arm to the desired zero pose before calling this.
+        """
+        motors_to_home = [m for m in target_motors if m in arm.bus.motors]
+
+        if self.robot_lock:
+            with self.robot_lock:
+                previous = arm.bus.set_zero_positions(motors_to_home)
+        else:
+            previous = arm.bus.set_zero_positions(motors_to_home)
+
+        msg = f"Damiao zero-set complete. {len(previous)} motors zeroed at current position."
+        logger.info(f"[{arm_id}] {msg} Previous positions: {previous}")
+
+        return {
+            "status": "success",
+            "offsets": {m: 0.0 for m in previous},
+            "previous_positions": {m: round(v, 3) for m, v in previous.items()},
+            "message": msg
+        }
         
     
     def _get_inversions_file(self, arm_id: str):
@@ -597,15 +774,17 @@ class CalibrationService:
 
     def set_zero_pose(self, arm_id: str):
         """Captures the current position as the baseline 'Zero' for alignment. Also disables torque."""
-        # Infer pair to ensure both are loose for the user to move
-        parts = arm_id.split("_")
-        side = parts[0]
-        leader_id = f"{side}_leader"
-        follower_id = f"{side}_follower"
-        
-        # Disable Torque on both
-        self.disable_torque(leader_id)
-        self.disable_torque(follower_id)
+        # For arm registry arms, just disable torque on this arm directly
+        if self.arm_registry and arm_id in self.arm_registry.arms:
+            self.disable_torque(arm_id)
+        else:
+            # Legacy: infer pair to ensure both are loose for the user to move
+            parts = arm_id.split("_")
+            side = parts[0]
+            leader_id = f"{side}_leader"
+            follower_id = f"{side}_follower"
+            self.disable_torque(leader_id)
+            self.disable_torque(follower_id)
         
         # Determine which arm we are setting zero for? 
         # Actually, we need to capture zero for BOTH if we are doing the wizard.

@@ -88,21 +88,33 @@ def is_camera_available(port):
     
     return ret
 
-def discover_cameras():
+def discover_cameras(skip_devices: list = None):
     """
     Scans for available cameras and returns a list of working camera configurations.
     Returns a dictionary with 'opencv' and 'realsense' lists.
+
+    Args:
+        skip_devices: List of device paths to skip (e.g., ['/dev/video12']).
+                      Used to avoid opening cameras that are already in use.
     """
+    if skip_devices is None:
+        skip_devices = []
+
     available_cameras = {
         "opencv": [],
         "realsense": []
     }
-    
+
     # 1. Scan OpenCV Cameras (USB Webcams)
     ports = get_available_video_ports()
     print(f"Scanning video ports: {ports}")
-    
+
     for port in ports:
+        # Skip devices that are already in use by the robot
+        if port in skip_devices:
+            print(f"Skipping {port} (already in use)")
+            continue
+
         if is_camera_available(port):
             print(f"Camera found at {port}")
             available_cameras["opencv"].append({

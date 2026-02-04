@@ -37,9 +37,54 @@ class TaskOrchestrator:
         if task_name not in self.models:
             print(f"Loading model for task: {task_name}...")
             # self.models[task_name] = DiffusionPolicy.load(task_name)
-            self.models[task_name] = "dummy_model_object" 
+            self.models[task_name] = "dummy_model_object"
             time.sleep(0.1) # Simulate load time (minimal to not block too much)
         return self.models[task_name]
+
+    def deploy_policy(self, checkpoint_path: str):
+        """
+        Load a trained policy from a checkpoint for autonomous execution.
+
+        Args:
+            checkpoint_path: Path to the pretrained_model directory containing
+                            config.json and model.safetensors
+        """
+        print(f"Deploying policy from: {checkpoint_path}")
+
+        from pathlib import Path
+        import json
+
+        checkpoint = Path(checkpoint_path)
+        if not checkpoint.exists():
+            raise ValueError(f"Checkpoint not found: {checkpoint_path}")
+
+        # Read config.json to get policy type
+        config_path = checkpoint / "config.json"
+        if not config_path.exists():
+            raise ValueError(f"config.json not found in checkpoint: {checkpoint_path}")
+
+        with open(config_path) as f:
+            config = json.load(f)
+        policy_type = config.get("type", "diffusion")
+        print(f"  Policy type: {policy_type}")
+
+        # Import LeRobot and get policy class
+        import sys
+        lerobot_path = Path(__file__).parent.parent.parent / "lerobot" / "src"
+        if str(lerobot_path) not in sys.path:
+            sys.path.insert(0, str(lerobot_path))
+
+        from lerobot.policies.factory import get_policy_class
+        policy_cls = get_policy_class(policy_type)
+
+        # Load pretrained policy using the correct API
+        # from_pretrained() loads config automatically and returns policy in eval mode
+        print(f"  Loading {policy_cls.__name__} from {checkpoint}...")
+        self.deployed_policy = policy_cls.from_pretrained(str(checkpoint))
+        self.deployed_policy_path = checkpoint_path
+        print(f"  ✅ Policy loaded successfully (device: {self.deployed_policy.config.device})")
+
+        return True
 
     def start(self):
         self.is_running = True

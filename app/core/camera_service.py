@@ -31,7 +31,7 @@ class CameraService:
         
         try:
             logger.info("Scanning for cameras using unified discovery...")
-            discovered = discover_cameras()
+            discovered = discover_cameras(skip_devices=active_ids)
             
             # Filter out active cameras if needed, but the frontend/main.py logic handles merging.
             # Here we just return what discover_cameras found.
@@ -94,7 +94,21 @@ class CameraService:
                     **c
                 }
             return normalized
-            
+
+        # Normalize dict format too (ensure index_or_path/serial_number_or_name exist)
+        if isinstance(raw_cameras, dict):
+            for cam_id, cam_cfg in raw_cameras.items():
+                vid = cam_cfg.get("video_device_id")
+                cam_type = cam_cfg.get("type", "opencv")
+
+                # For opencv cameras: ensure index_or_path exists
+                if cam_type == "opencv" and "index_or_path" not in cam_cfg:
+                    cam_cfg["index_or_path"] = vid
+
+                # For realsense cameras: ensure serial_number_or_name exists
+                if cam_type == "intelrealsense" and "serial_number_or_name" not in cam_cfg:
+                    cam_cfg["serial_number_or_name"] = vid
+
         return raw_cameras
 
     def update_camera_config(self, new_cameras_config: Dict[str, Any]):

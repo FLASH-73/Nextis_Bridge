@@ -62,9 +62,11 @@ class InterventionEngine:
 
         except Exception as e:
             msg = str(e)
+            # Suppress known spam errors that occur during normal operation
             if "has no calibration registered" in msg:
-                # Suppress spam for uncalibrated robot
-                pass
+                pass  # Robot not calibrated
+            elif "Failed to sync read" in msg:
+                pass  # Motor communication issue (common when robot idle)
             else:
                 print(f"Error reading velocity: {e}")
             return 0.0

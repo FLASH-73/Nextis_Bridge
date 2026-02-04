@@ -1,6 +1,8 @@
 {
   "right_leader": "cal_three",
-  "right_follower": "cal_four",
+  "right_follower": "cal_five",
   "left_follower": "cal_three",
-  "left_leader": "cal_two"
+  "left_leader": "cal_two",
+  "aira_lead": "test_cal1",
+  "aira_zero": "cal1_test"
 }

@@ -20,6 +20,7 @@ sleep 1
 # Start Backend (show output in terminal, also log to file)
 echo "Starting Backend on http://localhost:8000 (using 'umbra' env)..."
 export PYTHONPATH=$(pwd)/lerobot/src:$PYTHONPATH
+export PYTHONUNBUFFERED=1
 /home/roberto/miniconda3/bin/python run_backend.py 2>&1 | tee app.log &
 BACKEND_PID=$!
 

@@ -27,11 +27,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class TeleoperationService:
-    def __init__(self, robot, leader, robot_lock, leader_assists=None):
+    def __init__(self, robot, leader, robot_lock, leader_assists=None, arm_registry=None):
         self.robot = robot
         self.leader = leader
         self.robot_lock = robot_lock
-        
+        self.arm_registry = arm_registry  # For pairing-based mapping
+
         self.safety = SafetyLayer(robot_lock) # Initialize Safety Layer
         
         # Initialize Leader Assist (Leader Only)
@@ -98,6 +99,10 @@ class TeleoperationService:
         self.episode_count = 0
         self.video_manager = None
         self.data_queue = deque(maxlen=1) # For UI data streaming if needed, though get_data uses history
+
+        # Recording selections (which cameras/arms to record)
+        self._selected_cameras = None  # None = all cameras
+        self._selected_arms = None     # None = all arms
 
         # Recording frame rate control
         # Record at 30fps to match dataset fps, not teleop rate (60Hz)
@@ -300,16 +305,35 @@ class TeleoperationService:
                     obs = {}
 
                     # SOURCE 1: Get motor positions from teleop cache (FAST - no hardware read)
+                    # Filter based on selected arms
                     with self._action_lock:
                         if self._latest_leader_action:
-                            action = self._latest_leader_action.copy()
-                            # Use same positions for observation.state (follower = action target)
-                            for key, val in action.items():
-                                obs[key] = val
+                            for key, val in self._latest_leader_action.items():
+                                # Filter by selected arms
+                                if self._selected_arms is None:
+                                    action[key] = val
+                                    obs[key] = val
+                                elif key.startswith("left_") and "left" in self._selected_arms:
+                                    action[key] = val
+                                    obs[key] = val
+                                elif key.startswith("right_") and "right" in self._selected_arms:
+                                    action[key] = val
+                                    obs[key] = val
+                                elif not key.startswith("left_") and not key.startswith("right_"):
+                                    # Non-arm-specific features - always include
+                                    action[key] = val
+                                    obs[key] = val
 
                     # SOURCE 2: Capture camera images with async_read (FAST - ZOH pattern)
+                    # Only capture selected cameras
                     if hasattr(self.robot, 'cameras') and self.robot.cameras:
-                        for cam_key, cam in self.robot.cameras.items():
+                        # Determine which cameras to capture
+                        cameras_to_capture = self._selected_cameras if self._selected_cameras else list(self.robot.cameras.keys())
+
+                        for cam_key in cameras_to_capture:
+                            if cam_key not in self.robot.cameras:
+                                continue
+                            cam = self.robot.cameras[cam_key]
                             try:
                                 # async_read(blocking=False) returns last cached frame instantly
                                 if hasattr(cam, 'async_read'):
@@ -318,6 +342,16 @@ class TeleoperationService:
                                         obs[cam_key] = frame
                                         if self._recording_frame_counter == 0:
                                             print(f"[REC CAPTURE] Camera {cam_key}: shape={frame.shape}")
+                                # Also capture depth if enabled
+                                if hasattr(cam, 'async_read_depth') and hasattr(cam.config, 'use_depth') and cam.config.use_depth:
+                                    depth_frame = cam.async_read_depth(blocking=False)
+                                    if depth_frame is not None:
+                                        # Expand depth from (H, W) to (H, W, 1) for dataset compatibility
+                                        if depth_frame.ndim == 2:
+                                            depth_frame = depth_frame[..., np.newaxis]
+                                        obs[f"{cam_key}_depth"] = depth_frame
+                                        if self._recording_frame_counter == 0:
+                                            print(f"[REC CAPTURE] Depth {cam_key}_depth: shape={depth_frame.shape}")
                             except Exception as cam_err:
                                 if self._recording_frame_counter == 0:
                                     print(f"[REC CAPTURE] Camera {cam_key} error: {cam_err}")
@@ -468,10 +502,111 @@ class TeleoperationService:
         """Pre-computes active joint mappings to avoid string ops in the loop."""
         self.joint_mapping = {}
         self.assist_groups = {}
-        
-        if not self.leader:
+
+        # Detect if any follower arm is Damiao (uses float radians, not int ticks)
+        self._has_damiao_follower = False
+        if self.robot:
+            try:
+                from lerobot.robots.damiao_follower.damiao_follower import DamiaoFollowerRobot as DamiaoFollower
+                if isinstance(self.robot, DamiaoFollower):
+                    self._has_damiao_follower = True
+                elif hasattr(self.robot, 'left_arm') and isinstance(self.robot.left_arm, DamiaoFollower):
+                    self._has_damiao_follower = True
+                elif hasattr(self.robot, 'right_arm') and isinstance(self.robot.right_arm, DamiaoFollower):
+                    self._has_damiao_follower = True
+            except ImportError:
+                pass
+
+        # Check arm_registry for Damiao follower arms
+        if not self._has_damiao_follower and self.arm_registry and self.active_arms:
+            for arm_id in self.active_arms:
+                arm = self.arm_registry.arms.get(arm_id)
+                if arm and arm.motor_type == 'damiao' and arm.role.value == 'follower':
+                    self._has_damiao_follower = True
+                    break
+
+        if not self.leader and not self.arm_registry:
              return
 
+        # Try pairing-based mapping first (new arm registry system)
+        if self.arm_registry:
+            self._precompute_mappings_from_pairings()
+        else:
+            # Fallback to legacy side-based mapping
+            self._precompute_mappings_legacy()
+
+    # Dynamixel leader uses joint_N names, Damiao follower uses base/linkN names
+    DYNAMIXEL_TO_DAMIAO_JOINT_MAP = {
+        "joint_1": "base",
+        "joint_2": "link1",
+        "joint_3": "link2",
+        "joint_4": "link3",
+        "joint_5": "link4",
+        "joint_6": "link5",
+        "gripper": "gripper",
+    }
+
+    def _precompute_mappings_from_pairings(self):
+        """Use explicit pairings from arm registry for joint mapping."""
+        pairings = self.arm_registry.get_active_pairings(self.active_arms)
+
+        for pairing in pairings:
+            leader_id = pairing['leader_id']
+            follower_id = pairing['follower_id']
+
+            # Only map if both are in active selection (or no selection = all active)
+            if self.active_arms is not None:
+                if leader_id not in self.active_arms or follower_id not in self.active_arms:
+                    continue
+
+            # Check if this is a Dynamixel→Damiao pairing (different joint naming)
+            # Use .arms dict directly to get ArmDefinition objects (not .get_arm() which returns dicts)
+            leader_arm = self.arm_registry.arms.get(leader_id) if self.arm_registry else None
+            follower_arm = self.arm_registry.arms.get(follower_id) if self.arm_registry else None
+
+            is_dynamixel_leader = leader_arm and leader_arm.motor_type in ('dynamixel_xl330', 'dynamixel_xl430')
+            is_damiao_follower = follower_arm and follower_arm.motor_type == 'damiao'
+
+            if is_dynamixel_leader and is_damiao_follower:
+                # Direct mapping: Dynamixel joint_N.pos → Damiao base/linkN.pos (no prefixes)
+                for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
+                    leader_key = f"{dyn_name}.pos"
+                    follower_key = f"{dam_name}.pos"
+                    self.joint_mapping[leader_key] = follower_key
+            else:
+                # Legacy prefix-based mapping for Feetech/same-type arms
+                leader_prefix = self._get_arm_prefix(leader_id)
+                follower_prefix = self._get_arm_prefix(follower_id)
+                for name in self.joint_names_template:
+                    leader_key = f"{leader_prefix}{name}.pos"
+                    follower_key = f"{follower_prefix}{name}.pos"
+                    self.joint_mapping[leader_key] = follower_key
+
+        logger.info(f"Pairing-based Mapping: {len(self.joint_mapping)} joints mapped from {len(pairings)} pairings.")
+        if self.joint_mapping:
+            for lk, fk in self.joint_mapping.items():
+                logger.info(f"  {lk} → {fk}")
+
+    def _get_arm_prefix(self, arm_id: str) -> str:
+        """Get the joint name prefix for an arm ID."""
+        # For legacy IDs like "left_follower", "right_leader" -> extract side
+        if arm_id.startswith("left_"):
+            return "left_"
+        elif arm_id.startswith("right_"):
+            return "right_"
+        elif arm_id == "damiao_follower" or arm_id == "damiao_leader":
+            return ""  # Damiao uses unprefixed joint names
+        else:
+            # For custom arm IDs, check the arm registry
+            if self.arm_registry:
+                arm = self.arm_registry.get_arm(arm_id)
+                if arm:
+                    # Use the arm ID as prefix for custom arms
+                    return f"{arm_id}_"
+            return ""  # Default to no prefix
+
+    def _precompute_mappings_legacy(self):
+        """Legacy side-based mapping (left_leader -> left_follower, etc.)"""
         # Helper to check if active
         def is_active(side, group):
             if self.active_arms is None: return True
@@ -485,18 +620,18 @@ class TeleoperationService:
                  prefix = ""
             else:
                  prefix = f"{side}_"
-            
+
             # Check if this side is active for BOTH leader and follower
             leader_active = is_active(side, "leader")
             follower_active = is_active(side, "follower")
-            
+
             if leader_active and follower_active:
                 for name in self.joint_names_template:
                     leader_key = f"{prefix}{name}.pos"
                     follower_key = f"{prefix}{name}.pos" # Robot action key (must end in .pos for Umbra)
                     self.joint_mapping[leader_key] = follower_key
-        
-        logger.info(f"Teleop Mapping Optimized: {len(self.joint_mapping)} joints mapped.")
+
+        logger.info(f"Legacy Teleop Mapping: {len(self.joint_mapping)} joints mapped.")
 
         # 2. Assist Groups (Leader Keys for Assist Calculation)
         if self.leader_assists:
@@ -513,10 +648,11 @@ class TeleoperationService:
 
     def start(self, force=False, active_arms=None):
         if self.is_running:
-            return
+            logger.info("Teleop already running, stopping first before restart...")
+            self.stop()
             
-        if not self.robot:
-             raise Exception("Robot not connected")
+        if not self.robot and not (self.arm_registry and active_arms):
+             raise Exception("Robot not connected and no arm registry arms selected")
         
         # Store active arms (if provided, else None means All)
         self.active_arms = active_arms
@@ -524,10 +660,21 @@ class TeleoperationService:
         
         # Validate selection if provided
         if self.active_arms is not None:
-             leaders = [a for a in self.active_arms if "leader" in a]
-             followers = [a for a in self.active_arms if "follower" in a]
+             leaders = []
+             followers = []
+             for a in self.active_arms:
+                 if "leader" in a:
+                     leaders.append(a)
+                 elif "follower" in a:
+                     followers.append(a)
+                 elif self.arm_registry:
+                     arm_info = self.arm_registry.get_arm(a)
+                     if arm_info and arm_info.get("role") == "leader":
+                         leaders.append(a)
+                     elif arm_info and arm_info.get("role") == "follower":
+                         followers.append(a)
              if not force and (not leaders or not followers):
-                  logger.error("Selection Validation Failed")
+                  logger.error(f"Selection Validation Failed: leaders={leaders}, followers={followers}, active_arms={self.active_arms}")
                   raise Exception("Invalid Selection: Must select at least one Leader and one Follower.")
         
         if not self.check_calibration():
@@ -539,9 +686,65 @@ class TeleoperationService:
         
         # Optimize Mappings
         self._precompute_mappings()
-        
+
+        # Resolve active robot/leader from arm registry pairings
+        # This allows different arm types (Damiao, Dynamixel, etc.) to be used
+        # without changing the legacy robot/leader references.
+        self._active_robot = self.robot  # default to legacy
+        self._active_leader = self.leader  # default to legacy
+        print(f"[TELEOP] arm_registry={self.arm_registry is not None}, active_arms={self.active_arms}", flush=True)
+
+        if self.arm_registry and self.active_arms:
+            pairings = self.arm_registry.get_active_pairings(self.active_arms)
+            print(f"[TELEOP] Found {len(pairings)} pairings for active_arms={self.active_arms}", flush=True)
+            if pairings:
+                pairing = pairings[0]  # Use first active pairing
+                leader_id = pairing['leader_id']
+                follower_id = pairing['follower_id']
+                print(f"[TELEOP] Resolving arm instances for pairing: {leader_id} → {follower_id}", flush=True)
+
+                # Auto-connect if not already connected
+                if leader_id not in self.arm_registry.arm_instances:
+                    print(f"[TELEOP] Auto-connecting leader: {leader_id}", flush=True)
+                    try:
+                        result = self.arm_registry.connect_arm(leader_id)
+                        print(f"[TELEOP] Leader connect result: {result}", flush=True)
+                    except Exception as e:
+                        import traceback
+                        print(f"[TELEOP] Leader connect EXCEPTION: {e}", flush=True)
+                        traceback.print_exc()
+                else:
+                    print(f"[TELEOP] Leader {leader_id} already connected", flush=True)
+                if follower_id not in self.arm_registry.arm_instances:
+                    print(f"[TELEOP] Auto-connecting follower: {follower_id}", flush=True)
+                    try:
+                        result = self.arm_registry.connect_arm(follower_id)
+                        print(f"[TELEOP] Follower connect result: {result}", flush=True)
+                    except Exception as e:
+                        import traceback
+                        print(f"[TELEOP] Follower connect EXCEPTION: {e}", flush=True)
+                        traceback.print_exc()
+                else:
+                    print(f"[TELEOP] Follower {follower_id} already connected", flush=True)
+
+                leader_inst = self.arm_registry.arm_instances.get(leader_id)
+                follower_inst = self.arm_registry.arm_instances.get(follower_id)
+
+                if leader_inst:
+                    self._active_leader = leader_inst
+                    print(f"[TELEOP] Using arm-registry leader: {leader_id} ({type(leader_inst).__name__})", flush=True)
+                else:
+                    print(f"[TELEOP] WARNING: No instance for leader {leader_id}, using legacy leader ({type(self.leader).__name__ if self.leader else 'None'})", flush=True)
+                if follower_inst:
+                    self._active_robot = follower_inst
+                    print(f"[TELEOP] Using arm-registry follower: {follower_id} ({type(follower_inst).__name__})", flush=True)
+                else:
+                    print(f"[TELEOP] WARNING: No instance for follower {follower_id}, using legacy robot ({type(self.robot).__name__ if self.robot else 'None'})", flush=True)
+        else:
+            print(f"[TELEOP] No arm_registry or no active_arms — using legacy robot/leader", flush=True)
+
         # Reload Inversions (Ensure latest config from disk is applied)
-        if hasattr(self.robot, "reload_inversions"):
+        if hasattr(self._active_robot, "reload_inversions"):
             try:
                  self.robot.reload_inversions()
             except Exception as e:
@@ -574,28 +777,58 @@ class TeleoperationService:
             except Exception as e:
                 logger.error(f"Failed to switch Leader Mode: {e}")
                  
+        # Startup blend: gradually ramp from follower's current position to leader commands
+        self._blend_start_time = time.time()
+        self._blend_duration = 5.0  # seconds — safe ramp for heavy Damiao arm
+        self._follower_start_pos = {}  # Captured on first teleop frame
+
         self.is_running = True
-        
+
         # Start Control Loop Thread
         self.thread = threading.Thread(target=self._teleop_loop, daemon=True)
         self.thread.start()
 
     def _enable_torque_for_active_arms(self):
         """Helper to enable torque on follower arms involved in teleop."""
-        if not self.robot: return
-        
+        # Use arm-registry active robot if available, otherwise legacy
+        active_robot = getattr(self, '_active_robot', None) or self.robot
+        if not active_robot:
+            print("[TELEOP] WARNING: No active robot for torque enable", flush=True)
+            return
+
+        # Skip MagicMock (fallback mock robot)
+        from unittest.mock import MagicMock
+        if isinstance(active_robot, MagicMock):
+            print("[TELEOP] Skipping torque enable on MagicMock robot", flush=True)
+            return
+
         try:
-            logger.info("Enabling Torque for Teleoperation...")
-            
-            # Robust Enable: Try to enable everything found
-            if hasattr(self.robot, "left_arm"):
-                 self.robot.left_arm.bus.enable_torque()
-            if hasattr(self.robot, "right_arm"):
-                 self.robot.right_arm.bus.enable_torque()
-            if hasattr(self.robot, "bus"):
-                 self.robot.bus.enable_torque()
-                 
+            print(f"[TELEOP] Enabling torque on {type(active_robot).__name__}...", flush=True)
+
+            # For Damiao arms: full re-configure (mode + gains + enable)
+            # Just enable_torque() is insufficient — motors may have lost their
+            # POS_VEL mode setting between connect() and teleop start.
+            from lerobot.robots.damiao_follower.damiao_follower import DamiaoFollowerRobot
+            if isinstance(active_robot, DamiaoFollowerRobot):
+                print("[TELEOP] Damiao detected — running full configure() (POS_VEL + PID + enable)...", flush=True)
+                active_robot.bus.configure()
+                print("[TELEOP] Damiao configure() complete", flush=True)
+            else:
+                # Single-arm robot
+                if hasattr(active_robot, "bus"):
+                     active_robot.bus.enable_torque()
+                # Dual-arm robot (e.g. BiUmbraFollower)
+                if hasattr(active_robot, "left_arm"):
+                     active_robot.left_arm.bus.enable_torque()
+                if hasattr(active_robot, "right_arm"):
+                     active_robot.right_arm.bus.enable_torque()
+
+            print("[TELEOP] Torque enabled successfully", flush=True)
+
         except Exception as e:
+            import traceback
+            print(f"[TELEOP] Failed to enable torque: {e}", flush=True)
+            traceback.print_exc()
             logger.error(f"Failed to enable torque: {e}")
 
     def stop(self):
@@ -603,7 +836,8 @@ class TeleoperationService:
             return
         logger.info("Stopping teleoperation...")
         self.is_running = False
-        if self.thread:
+        # Only join if we're not being called from within the thread itself
+        if self.thread and self.thread != threading.current_thread():
             self.thread.join(timeout=2.0)
 
         # Stop observation capture thread if running
@@ -630,6 +864,23 @@ class TeleoperationService:
                      self.leader.bus.disable_torque()
             except Exception as e:
                 logger.error(f"Failed to restore Leader Mode: {e}")
+
+        # Disable Damiao follower torque on stop (safety: arm goes limp)
+        active_robot = getattr(self, '_active_robot', self.robot)
+        if active_robot:
+            try:
+                from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+                bus = getattr(active_robot, 'bus', None)
+                if bus and isinstance(bus, DamiaoMotorsBus):
+                    logger.info("Disabling Damiao follower torque...")
+                    for motor in bus._motors.values():
+                        bus._control.disable(motor)
+            except Exception as e:
+                logger.warning(f"Failed to disable Damiao follower torque: {e}")
+
+        # Reset active instances
+        self._active_robot = self.robot
+        self._active_leader = self.leader
             
         logger.info("Teleoperation stopped.")
         
@@ -639,7 +890,8 @@ class TeleoperationService:
 
     def _teleop_loop(self):
         logger.info(f"Teleoperation Control Loop Running at {self.frequency}Hz (Optimization Enabled)")
-        
+        print(f"[TELEOP] Control loop started at {self.frequency}Hz", flush=True)
+
         loop_count = 0
         self.last_loop_time = time.perf_counter()
         
@@ -656,9 +908,31 @@ class TeleoperationService:
                 # Capture Follower Obs (Needed for Recording)
                 follower_obs = {}
 
-                if self.leader:
-                    obs = self.leader.get_action()
-                    
+                if self._active_leader:
+                    obs = None
+
+                    # Retry loop for transient serial communication errors on leader
+                    for attempt in range(3):
+                        try:
+                            obs = self._active_leader.get_action()
+                            break  # Success
+                        except (OSError, ConnectionError) as e:
+                            error_str = str(e)
+                            if "Incorrect status packet" in error_str or "Port is in use" in error_str:
+                                if attempt < 2:
+                                    time.sleep(0.005)  # 5ms backoff
+                                    continue
+                                else:
+                                    if loop_count % 60 == 0:
+                                        logger.warning(f"Leader read failed after 3 attempts: {e}")
+                            else:
+                                logger.error(f"Leader read error: {e}")
+                                break
+
+                    if not obs:
+                        # Skip this loop iteration if leader read completely failed
+                        continue
+
                     # 1a. Leader Assist (Gravity/Transparency)
                     if self.leader_assists and self.assist_enabled:
                          # Iterate pre-computed groups
@@ -733,36 +1007,114 @@ class TeleoperationService:
                                  except Exception as e:
                                      logger.error(f"Assist Error: {e}") # Enable logging for debug
 
+                    # Debug: log on first frame to diagnose mapping issues
+                    if loop_count == 0:
+                        print(f"[TELEOP DEBUG] _active_leader type: {type(self._active_leader).__name__}", flush=True)
+                        print(f"[TELEOP DEBUG] _active_robot type: {type(self._active_robot).__name__}", flush=True)
+                        print(f"[TELEOP DEBUG] joint_mapping ({len(self.joint_mapping)} entries): {self.joint_mapping}", flush=True)
+                        print(f"[TELEOP DEBUG] obs keys from leader: {list(obs.keys()) if obs else 'None'}", flush=True)
+
                     # 1b. Map to Follower Action (Optimized)
                     # Use pre-computed mapping
                     for l_key, f_key in self.joint_mapping.items():
                         if l_key in obs:
-                            # Direct assignment, no EMA
-                            leader_action[f_key] = int(obs[l_key])
+                            val = obs[l_key]
+                            # Keep float for Damiao (radians), int for Feetech (ticks)
+                            leader_action[f_key] = val if self._has_damiao_follower else int(val)
+
+                    if loop_count == 0:
+                        print(f"[TELEOP DEBUG] leader_action after mapping ({len(leader_action)} entries): {leader_action}", flush=True)
+
+                    # 1c. Startup blend: ramp from follower's current position
+                    if hasattr(self, '_blend_start_time') and leader_action:
+                        # First frame: capture follower's actual position
+                        if not self._follower_start_pos and self._active_robot:
+                            try:
+                                fobs = self._active_robot.get_observation()
+                                self._follower_start_pos = {
+                                    k: v for k, v in fobs.items() if k.endswith('.pos')
+                                }
+                                logger.info(f"[Teleop] Startup blend: captured follower position ({len(self._follower_start_pos)} joints), blending over {self._blend_duration}s")
+                            except Exception as e:
+                                logger.warning(f"[Teleop] Could not capture follower start pos: {e}")
+
+                        elapsed = time.time() - self._blend_start_time
+                        alpha = min(1.0, elapsed / self._blend_duration)
+
+                        if alpha < 1.0 and self._follower_start_pos:
+                            for key in list(leader_action.keys()):
+                                if key in self._follower_start_pos:
+                                    start = self._follower_start_pos[key]
+                                    target = leader_action[key]
+                                    leader_action[key] = start + alpha * (target - start)
 
                 # 2. Send Action IMMEDIATELY (Low Latency Control)
                 # Key insight from LeRobot: send_action and get_observation are independent.
                 # Motor writes use sync_write (no response wait), cameras have background threads.
                 # NO LOCK NEEDED - LeRobot's architecture handles thread safety at bus level.
-                if leader_action and self.robot:
+                if leader_action and self._active_robot:
                     try:
-                        self.robot.send_action(leader_action)
+                        self._active_robot.send_action(leader_action)
+                        if loop_count == 0:
+                            print(f"[TELEOP DEBUG] send_action SUCCESS, sent {len(leader_action)} values to {type(self._active_robot).__name__}", flush=True)
                     except Exception as e:
                         if loop_count % 60 == 0:
+                            print(f"[TELEOP] Send Action Failed: {e}", flush=True)
                             logger.error(f"Send Action Failed: {e}")
-                elif self.robot and loop_count % 60 == 0:
+                elif self._active_robot and loop_count % 60 == 0:
                     logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")
 
-                # 2b. Share action with recording thread
-                # Recording happens in a separate thread (_recording_capture_loop) at 30fps
-                # This keeps the main teleop loop clean and fast at 60Hz
-                if leader_action:
-                    with self._action_lock:
-                        self._latest_leader_action = leader_action.copy()
+                # 2b. Share motor positions with recording thread
+                # IMPORTANT: Use FOLLOWER robot positions, not leader positions!
+                # This ensures recorded data matches what HIL reads at inference time.
+                # Leader and follower may have different calibrations, so same physical
+                # position can give different encoder values.
+                if self._active_robot:
+                    if self.recording_active:
+                        # Only read follower positions when recording — needed for
+                        # accurate dataset frames. For Damiao (CAN), this costs ~14ms
+                        # per loop (7 motors × 2ms each), so skip when not recording.
+                        follower_obs = None
 
-                # Debug heartbeat
-                if loop_count % 60 == 0:
-                    print(f"Teleop Heartbeat: {loop_count} (Active: {self.is_running}, Recording: {self.recording_active})")
+                        # Retry loop for transient serial communication errors
+                        for attempt in range(3):  # Up to 3 attempts
+                            try:
+                                follower_obs = self._active_robot.get_observation()
+                                break  # Success, exit retry loop
+                            except (OSError, ConnectionError) as e:
+                                error_str = str(e)
+                                if "Incorrect status packet" in error_str or "Port is in use" in error_str:
+                                    if attempt < 2:  # Not the last attempt
+                                        time.sleep(0.005)  # 5ms backoff
+                                        continue
+                                    else:
+                                        # Log only on final failure (rate-limited)
+                                        if loop_count % 60 == 0:
+                                            logger.warning(f"Motor read failed after 3 attempts: {e}")
+                                else:
+                                    # Non-transient error, don't retry
+                                    logger.error(f"Motor read error: {e}")
+                                    break
+
+                        # Process observation (whether from retry success or previous cache)
+                        if follower_obs:
+                            follower_motors = {k: v for k, v in follower_obs.items() if '.pos' in k}
+                            if follower_motors:
+                                with self._action_lock:
+                                    self._latest_leader_action = follower_motors.copy()
+                        elif leader_action:
+                            # Fallback to leader action if all retries failed
+                            with self._action_lock:
+                                self._latest_leader_action = leader_action.copy()
+                    elif leader_action:
+                        # Not recording: use leader action directly as cached action
+                        # (no need to read follower positions over CAN)
+                        with self._action_lock:
+                            self._latest_leader_action = leader_action.copy()
+
+                # Debug heartbeat (disabled - too spammy)
+                # if loop_count % 60 == 0:
+                #     print(f"Teleop Heartbeat: {loop_count} (Active: {self.is_running}, Recording: {self.recording_active})")
 
                 # 4. Store Data (for UI)
                 if loop_count % 5 == 0:
@@ -779,16 +1131,27 @@ class TeleoperationService:
                 # 6. Sleep
                 dt_s = time.perf_counter() - loop_start
                 precise_sleep(self.dt - dt_s)
-                
+
+            # Normal exit - log why we stopped
+            logger.info("Teleop loop exited normally (is_running=False)")
+            print("[TELEOP] Loop exited normally")
+
         except OSError as e:
-            if e.errno == 5: 
-                 logger.error(f"Hardware Disconnected: {e}")
+            if e.errno == 5:
+                logger.error(f"TELEOP STOPPED: Hardware Disconnected: {e}")
+                print(f"[TELEOP ERROR] Hardware Disconnected: {e}")
+            else:
+                logger.error(f"TELEOP STOPPED: OSError {e.errno}: {e}")
+                print(f"[TELEOP ERROR] OSError: {e}")
         except Exception as e:
-             logger.error(f"Teleop Loop Failed: {e}")
-             import traceback
-             traceback.print_exc()
+            logger.error(f"TELEOP STOPPED: {e}")
+            print(f"[TELEOP ERROR] Loop Failed: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
-            self.stop() # Ensure Cleanup
+            logger.info("TELEOP CLEANUP: Calling stop()")
+            print("[TELEOP] Cleanup - calling stop()")
+            self.stop()
 
     def _update_history(self, action_dict):
         # Convert dictionary to simple list of values for graph
@@ -822,10 +1185,98 @@ class TeleoperationService:
 
     # --- Recording Methods ---
 
-    def start_recording_session(self, repo_id: str, task: str, fps: int = 30, root: str = None):
-        """Initializes a new LeRobotDataset for recording."""
+    def _filter_observation_features(
+        self,
+        obs_features: dict,
+        selected_cameras: list = None,
+        selected_arms: list = None
+    ) -> dict:
+        """Filter observation features based on camera and arm selections.
+
+        Args:
+            obs_features: Full robot observation features dict
+            selected_cameras: List of camera IDs to include (None = all)
+            selected_arms: List of arm IDs ("left", "right") to include (None = all)
+
+        Returns:
+            Filtered observation features dict
+        """
+        filtered = {}
+
+        for key, feat in obs_features.items():
+            # Check if this is a camera feature (tuple shape like (H, W, 3))
+            is_camera = isinstance(feat, tuple) and len(feat) == 3
+
+            if is_camera:
+                # Camera filtering: key is the camera name (e.g., "camera_1")
+                if selected_cameras is None or key in selected_cameras:
+                    filtered[key] = feat
+            else:
+                # Motor position feature: key like "left_base.pos", "right_link1.pos"
+                if selected_arms is None:
+                    filtered[key] = feat
+                elif key.startswith("left_") and "left" in selected_arms:
+                    filtered[key] = feat
+                elif key.startswith("right_") and "right" in selected_arms:
+                    filtered[key] = feat
+                elif not key.startswith("left_") and not key.startswith("right_"):
+                    # Non-arm-specific features (e.g., single-arm robot) - always include
+                    filtered[key] = feat
+
+        return filtered
+
+    def _filter_action_features(
+        self,
+        action_features: dict,
+        selected_arms: list = None
+    ) -> dict:
+        """Filter action features based on arm selections.
+
+        Args:
+            action_features: Full robot action features dict
+            selected_arms: List of arm IDs ("left", "right") to include (None = all)
+
+        Returns:
+            Filtered action features dict
+        """
+        filtered = {}
+
+        for key, feat in action_features.items():
+            if selected_arms is None:
+                filtered[key] = feat
+            elif key.startswith("left_") and "left" in selected_arms:
+                filtered[key] = feat
+            elif key.startswith("right_") and "right" in selected_arms:
+                filtered[key] = feat
+            elif not key.startswith("left_") and not key.startswith("right_"):
+                # Non-arm-specific features - always include
+                filtered[key] = feat
+
+        return filtered
+
+    def start_recording_session(
+        self,
+        repo_id: str,
+        task: str,
+        fps: int = 30,
+        root: str = None,
+        selected_cameras: list = None,
+        selected_arms: list = None
+    ):
+        """Initializes a new LeRobotDataset for recording.
+
+        Args:
+            repo_id: Dataset repository ID
+            task: Task description
+            fps: Recording frames per second
+            root: Custom dataset root path
+            selected_cameras: List of camera IDs to record (None = all cameras)
+            selected_arms: List of arm IDs ("left", "right") to record (None = all arms)
+        """
         print("=" * 60)
         print(f"[START_SESSION] Called with repo_id='{repo_id}', task='{task}'")
+        print(f"  selected_cameras: {selected_cameras}")
+        print(f"  selected_arms: {selected_arms}")
         print(f"  session_active: {self.session_active}")
         print(f"  robot: {self.robot is not None}")
         print("=" * 60)
@@ -833,6 +1284,10 @@ class TeleoperationService:
         if self.session_active:
             print("[START_SESSION] ERROR: Session already active!")
             raise Exception("Session already active")
+
+        # Store selections for use during recording
+        self._selected_cameras = selected_cameras  # None means all cameras
+        self._selected_arms = selected_arms        # None means all arms
 
         # Set default root to app datasets directory
         if root is None:
@@ -852,13 +1307,29 @@ class TeleoperationService:
             # 1. Define Features
             if not hasattr(self.robot, "observation_features") or not hasattr(self.robot, "action_features"):
                  raise RuntimeError("Robot does not have feature definitions ready (observation_features/action_features).")
-                 
+
             # Use LeRobot Helpers to construct correct feature dicts
             from lerobot.datasets.utils import combine_feature_dicts, hw_to_dataset_features
-            
+
+            # Filter observation features based on selections
+            filtered_obs_features = self._filter_observation_features(
+                self.robot.observation_features,
+                selected_cameras,
+                selected_arms
+            )
+
+            # Filter action features based on arm selections
+            filtered_action_features = self._filter_action_features(
+                self.robot.action_features,
+                selected_arms
+            )
+
+            print(f"[START_SESSION] Filtered obs features: {list(filtered_obs_features.keys())}")
+            print(f"[START_SESSION] Filtered action features: {list(filtered_action_features.keys())}")
+
             features = combine_feature_dicts(
-                hw_to_dataset_features(self.robot.observation_features, prefix=OBS_STR, use_video=True),
-                hw_to_dataset_features(self.robot.action_features, prefix=ACTION, use_video=True)
+                hw_to_dataset_features(filtered_obs_features, prefix=OBS_STR, use_video=True),
+                hw_to_dataset_features(filtered_action_features, prefix=ACTION, use_video=True)
             )
             
             # 2. Open or Create Dataset (In-Process)
@@ -879,6 +1350,7 @@ class TeleoperationService:
                 self.dataset = LeRobotDataset(
                     repo_id=repo_id,
                     root=dataset_dir,
+                    local_files_only=True,
                 )
             else:
                 logger.info("Creating new Dataset...")
@@ -1019,12 +1491,138 @@ class TeleoperationService:
                 # Ensure cleanup even on error
                 self.dataset = None
 
+    def sync_to_disk(self):
+        """
+        Flush all pending episode data to disk and close writers.
+        MUST be called BEFORE any external deletion operation.
+
+        This ensures:
+        1. Metadata buffer is flushed to parquet (episodes saved to disk)
+        2. Parquet writers are closed (prevents appending to wrong files)
+        3. Disk state is consistent for external modifications
+
+        Without this, the metadata_buffer may contain episode data that hasn't
+        been written to disk yet. If deletion runs, it won't find the episode
+        on disk, but the buffer still has it. When recording resumes, both
+        the old buffered episode and new episode get saved = 2 episodes!
+        """
+        if not self.dataset or not self.session_active:
+            print("[SYNC_TO_DISK] Skipped (no dataset or session not active)")
+            return
+
+        print(f"[SYNC_TO_DISK] BEFORE: meta.total_episodes={self.dataset.meta.total_episodes}, episode_count={self.episode_count}")
+
+        try:
+            # 1. Flush and close metadata writer (this flushes metadata_buffer to disk)
+            if hasattr(self.dataset, 'meta') and hasattr(self.dataset.meta, '_close_writer'):
+                self.dataset.meta._close_writer()
+                print("[SYNC_TO_DISK] Flushed metadata buffer and closed metadata writer")
+
+            # 2. Close data parquet writer
+            if hasattr(self.dataset, '_close_writer'):
+                self.dataset._close_writer()
+                print("[SYNC_TO_DISK] Closed data writer")
+
+        except Exception as e:
+            import traceback
+            print(f"[SYNC_TO_DISK] Error: {e}")
+            print(traceback.format_exc())
+
+    def refresh_metadata_from_disk(self):
+        """
+        Re-read episode metadata from disk to sync after external modifications.
+        Called AFTER external operations like delete_episode().
+
+        Assumes sync_to_disk() was called BEFORE the external operation.
+
+        Resets ALL stale state:
+        - latest_episode: Used by _save_episode_metadata() to compute frame indices
+        - _current_file_start_frame: Tracks current parquet file position
+        - episodes DataFrame: Cached episode metadata
+        - metadata_buffer: Cleared to prevent ghost episodes
+        """
+        if not self.dataset or not self.session_active:
+            print("[REFRESH] Skipped (no dataset or session not active)")
+            return
+
+        import json
+
+        info_path = self.dataset.meta.root / "meta" / "info.json"
+        print(f"[REFRESH] Reading from: {info_path}")
+
+        if info_path.exists():
+            try:
+                with open(info_path, "r") as f:
+                    disk_info = json.load(f)
+
+                old_memory_count = self.dataset.meta.info.get("total_episodes", 0)
+                disk_count = disk_info.get("total_episodes", 0)
+
+                print(f"[REFRESH] Disk: {disk_count}, Memory: {old_memory_count}")
+
+                # 1. Update info dict
+                self.dataset.meta.info["total_episodes"] = disk_count
+                self.dataset.meta.info["total_frames"] = disk_info.get("total_frames", 0)
+
+                # Verify the update worked
+                verify_count = self.dataset.meta.total_episodes
+                print(f"[REFRESH] After update: meta.total_episodes = {verify_count}")
+                if verify_count != disk_count:
+                    print(f"[REFRESH] ERROR: Update failed! Expected {disk_count}, got {verify_count}")
+
+                # 2. Reset latest_episode to force fresh index calculation
+                if hasattr(self.dataset, 'meta'):
+                    self.dataset.meta.latest_episode = None
+                    # Clear metadata buffer (should be empty after sync_to_disk, but ensure it)
+                    if hasattr(self.dataset.meta, 'metadata_buffer'):
+                        self.dataset.meta.metadata_buffer = []
+                if hasattr(self.dataset, 'latest_episode'):
+                    self.dataset.latest_episode = None
+
+                # 3. Reset current file tracking
+                if hasattr(self.dataset, '_current_file_start_frame'):
+                    self.dataset._current_file_start_frame = None
+
+                # 4. Reset episodes to None - DON'T reload from parquet
+                # LeRobot expects episodes to be a specific internal structure (not a raw DataFrame)
+                # Setting to None forces LeRobot to start fresh when latest_episode is also None
+                self.dataset.meta.episodes = None
+
+                # 5. CRITICAL: Clear episode_buffer to force fresh creation on next start_episode()
+                # Without this, stale buffer with old episode_index causes validation failure
+                if hasattr(self.dataset, 'episode_buffer') and self.dataset.episode_buffer is not None:
+                    self.dataset.episode_buffer = None
+                    print("[REFRESH] Cleared stale episode_buffer")
+
+                # 6. Close and reset data writer to prevent stale frame counting
+                if hasattr(self.dataset, '_close_writer'):
+                    try:
+                        self.dataset._close_writer()
+                        print("[REFRESH] Closed data writer")
+                    except:
+                        pass
+                if hasattr(self.dataset, 'writer'):
+                    self.dataset.writer = None
+
+                # 7. Sync local episode counter
+                self.episode_count = disk_count
+
+                print(f"[REFRESH] Complete: episode_count={self.episode_count}, meta.total_episodes={self.dataset.meta.total_episodes}")
+
+            except Exception as e:
+                import traceback
+                print(f"[REFRESH] Error: {e}")
+                print(traceback.format_exc())
+        else:
+            print(f"[REFRESH] ERROR: info.json not found at {info_path}")
+
     def start_episode(self):
         """Starts recording a new episode."""
         print("=" * 60)
         print("[START_EPISODE] Called!")
         print(f"  session_active: {self.session_active}")
         print(f"  recording_active: {self.recording_active}")
+        print(f"  _episode_saving: {self._episode_saving}")
         print(f"  dataset: {self.dataset is not None}")
         print("=" * 60)
 
@@ -1036,6 +1634,17 @@ class TeleoperationService:
             print("[START_EPISODE] Already recording, skipping")
             return
 
+        # Wait for any ongoing episode save to complete before starting new episode
+        if self._episode_saving:
+            print("[START_EPISODE] Waiting for previous episode to finish saving...")
+            wait_start = time.time()
+            max_wait = 10.0  # Maximum 10 seconds wait
+            while self._episode_saving and (time.time() - wait_start) < max_wait:
+                time.sleep(0.1)
+            if self._episode_saving:
+                raise Exception("Previous episode save timed out. Please try again.")
+            print(f"[START_EPISODE] Previous save completed after {time.time() - wait_start:.1f}s")
+
         # Warn if teleop isn't running - recording needs teleop for actions
         if not self.is_running:
             print("[START_EPISODE] WARNING: Teleop is NOT running!")
@@ -1045,8 +1654,31 @@ class TeleoperationService:
         print("[START_EPISODE] Starting Episode Recording...")
 
         if self.dataset:
-            self.dataset.clear_episode_buffer()
-            print("[START_EPISODE] Episode buffer cleared")
+            # Log current state BEFORE buffer creation (critical for debugging)
+            meta_total = self.dataset.meta.total_episodes
+            print(f"[START_EPISODE] BEFORE buffer: meta.total_episodes={meta_total}, episode_count={self.episode_count}")
+
+            # Check for count mismatch and warn
+            if self.episode_count != meta_total:
+                print(f"[START_EPISODE] WARNING: Count mismatch detected!")
+                print(f"[START_EPISODE]   episode_count={self.episode_count} != meta.total_episodes={meta_total}")
+                # Don't auto-sync here - the mismatch indicates a bug we need to find
+
+            # Initialize episode buffer - handle case where buffer is None on first use
+            try:
+                if self.dataset.episode_buffer is None:
+                    print("[START_EPISODE] Creating new episode buffer (first episode)")
+                    self.dataset.episode_buffer = self.dataset.create_episode_buffer()
+                else:
+                    print("[START_EPISODE] Clearing existing episode buffer")
+                    self.dataset.clear_episode_buffer()
+            except Exception as e:
+                print(f"[START_EPISODE] Error with buffer, recreating: {e}")
+                self.dataset.episode_buffer = self.dataset.create_episode_buffer()
+
+            # Log the episode index that will be used
+            buffer_ep_idx = self.dataset.episode_buffer.get("episode_index", "N/A")
+            print(f"[START_EPISODE] Episode buffer ready, episode_index={buffer_ep_idx}")
             print(f"[START_EPISODE] Dataset features: {list(self.dataset.features.keys())[:5]}...")
 
         # Reset frame counter for new episode
@@ -1121,9 +1753,25 @@ class TeleoperationService:
                         self._episode_saving = False
                         return
 
-                    print(f"[STOP_EPISODE] Calling save_episode()")
+                    # Log state BEFORE save
+                    print(f"[STOP_EPISODE] BEFORE save: meta.total_episodes={current_dataset.meta.total_episodes}, episode_count={self.episode_count}")
+
+                    # Diagnostic: Check image writer status before save
+                    if hasattr(current_dataset, 'image_writer') and current_dataset.image_writer:
+                        try:
+                            queue_size = current_dataset.image_writer.queue.qsize()
+                            print(f"[STOP_EPISODE] Image writer queue size: {queue_size}")
+                        except Exception:
+                            print("[STOP_EPISODE] Image writer queue size: (unable to check)")
+
+                    print(f"[STOP_EPISODE] Calling save_episode()...")
+                    save_start = time.time()
                     # Note: task is already included in each frame, no need to pass to save_episode
                     current_dataset.save_episode()
+                    save_duration = time.time() - save_start
+                    print(f"[STOP_EPISODE] save_episode() completed in {save_duration:.1f}s")
+                    # Log state AFTER save
+                    print(f"[STOP_EPISODE] AFTER save: meta.total_episodes={current_dataset.meta.total_episodes}")
                     self.episode_count += 1
                     print(f"[STOP_EPISODE] SUCCESS! Episode {self.episode_count} Saved! ({self._recording_frame_counter} frames)")
                 except Exception as e:
