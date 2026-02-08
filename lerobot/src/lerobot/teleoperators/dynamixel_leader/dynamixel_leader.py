@@ -90,6 +90,14 @@ class DynamixelLeader(Teleoperator):
             raise DeviceAlreadyConnectedError(f"{self} already connected")
 
         self.bus.connect()
+
+        # Sync loaded calibration to bus (populates _software_homing_offsets + position limits)
+        # Must happen before configure() so offsets are available for gripper setup
+        # Disable torque first — gripper may still have torque ON from previous session
+        if self.calibration:
+            self.bus.disable_torque()
+            self.bus.write_calibration(self.calibration)
+
         self.configure()
 
         logger.info(f"{self} connected on port {self.config.port}")
@@ -108,17 +116,34 @@ class DynamixelLeader(Teleoperator):
 
         - Disables torque on arm joints (free movement for teleoperation)
         - Configures gripper in current-position mode with limited current
+        - Reads Homing_Offset to adjust gripper open/closed positions to homed coordinate space
         """
         # Disable torque on all motors for free movement
         self.bus.disable_torque()
         self.bus.configure_motors()
 
-        # Configure gripper for controlled movement
+        # Get software homing offset (motor register is always 0 now — offset applied in Python)
+        gripper_id = self.bus.motors["gripper"].id
+        offset = self.bus._software_homing_offsets.get(gripper_id, 0)
+
+        # Use calibrated range if available (config defaults may be outside position limits)
+        # For our arm: lower ticks = open, higher ticks = closed
+        if self.calibration and "gripper" in self.calibration:
+            cal = self.calibration["gripper"]
+            self._gripper_open = cal.range_min + offset    # open end (lower ticks)
+            self._gripper_closed = cal.range_max + offset   # closed end (higher ticks)
+            spring_target = cal.range_min                   # spring to open (within pos limits)
+        else:
+            self._gripper_open = self.config.gripper_open_pos + offset
+            self._gripper_closed = self.config.gripper_closed_pos + offset
+            spring_target = self.config.gripper_open_pos
+
+        # Configure gripper for controlled movement (spring to open position)
         self.bus.write("Torque_Enable", "gripper", 0, normalize=False)
         self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value, normalize=False)
         self.bus.write("Current_Limit", "gripper", 100, normalize=False)
         self.bus.write("Torque_Enable", "gripper", 1, normalize=False)
-        self.bus.write("Goal_Position", "gripper", self.config.gripper_open_pos, normalize=False)
+        self.bus.write("Goal_Position", "gripper", spring_target, normalize=False)
 
     def setup_motors(self) -> None:
         """Interactive motor ID setup.
@@ -152,9 +177,12 @@ class DynamixelLeader(Teleoperator):
             for motor, val in action.items()
         }
 
-        # Normalize gripper position to 0-1 range (0=closed, 1=open)
-        gripper_range = self.config.gripper_open_pos - self.config.gripper_closed_pos
-        action["gripper.pos"] = 1 - (action["gripper.pos"] - self.config.gripper_closed_pos) / gripper_range
+        # Normalize gripper position to 0-1 range (0=open, 1=closed)
+        # Use offset-adjusted positions (set by configure() after reading Homing_Offset)
+        open_pos = getattr(self, '_gripper_open', self.config.gripper_open_pos)
+        closed_pos = getattr(self, '_gripper_closed', self.config.gripper_closed_pos)
+        gripper_range = open_pos - closed_pos
+        action["gripper.pos"] = 1 - (action["gripper.pos"] - closed_pos) / gripper_range
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read action: {dt_ms:.1f}ms")

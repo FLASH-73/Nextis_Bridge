@@ -81,6 +81,15 @@ arms:
     port: can0
     enabled: true
     structural_design: damiao_7dof
+    config:
+      home_position:
+        base: -0.01697566186007471
+        link1: -0.994697489890898
+        link2: -1.1324101625085827
+        link3: -0.9512092774853134
+        link4: 0.05092698558022413
+        link5: 0.029564354924849212
+        gripper: 0.5186160067139713
 pairings:
 - leader: left_leader
   follower: left_follower

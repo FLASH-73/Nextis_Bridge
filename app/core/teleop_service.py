@@ -647,10 +647,15 @@ class TeleoperationService:
 
 
     def start(self, force=False, active_arms=None):
+        # Cancel any ongoing homing before starting new teleop
+        if getattr(self, '_homing_thread', None) and self._homing_thread.is_alive():
+            self._homing_cancel = True
+            self._homing_thread.join(timeout=2.0)
+
         if self.is_running:
             logger.info("Teleop already running, stopping first before restart...")
             self.stop()
-            
+
         if not self.robot and not (self.arm_registry and active_arms):
              raise Exception("Robot not connected and no arm registry arms selected")
         
@@ -746,7 +751,7 @@ class TeleoperationService:
         # Reload Inversions (Ensure latest config from disk is applied)
         if hasattr(self._active_robot, "reload_inversions"):
             try:
-                 self.robot.reload_inversions()
+                 self._active_robot.reload_inversions()
             except Exception as e:
                  logger.warning(f"Failed to reload inversions on start: {e}")
 
@@ -777,10 +782,10 @@ class TeleoperationService:
             except Exception as e:
                 logger.error(f"Failed to switch Leader Mode: {e}")
                  
-        # Startup blend: gradually ramp from follower's current position to leader commands
-        self._blend_start_time = time.time()
-        self._blend_duration = 5.0  # seconds — safe ramp for heavy Damiao arm
+        # Startup blend config (timer set in _teleop_loop to avoid thread-start delay)
+        self._blend_duration = 0.5  # seconds — rate limiter provides additional smooth ramping
         self._follower_start_pos = {}  # Captured on first teleop frame
+        self._blend_start_time = None  # Set when loop actually starts
 
         self.is_running = True
 
@@ -805,14 +810,15 @@ class TeleoperationService:
         try:
             print(f"[TELEOP] Enabling torque on {type(active_robot).__name__}...", flush=True)
 
-            # For Damiao arms: full re-configure (mode + gains + enable)
-            # Just enable_torque() is insufficient — motors may have lost their
-            # POS_VEL mode setting between connect() and teleop start.
+            # For Damiao arms: re-configure ensures correct control mode is set.
+            # Motors ARE enabled at end of configure() and ready for position commands.
+            # MIT mode is used by default (stable), POS_VEL available via config.
             from lerobot.robots.damiao_follower.damiao_follower import DamiaoFollowerRobot
             if isinstance(active_robot, DamiaoFollowerRobot):
-                print("[TELEOP] Damiao detected — running full configure() (POS_VEL + PID + enable)...", flush=True)
+                mode_name = "MIT" if active_robot.bus.config.use_mit_mode else "POS_VEL"
+                print(f"[TELEOP] Damiao detected — running configure() ({mode_name} mode)...", flush=True)
                 active_robot.bus.configure()
-                print("[TELEOP] Damiao configure() complete", flush=True)
+                print(f"[TELEOP] Damiao configure() complete (motors enabled in {mode_name} mode)", flush=True)
             else:
                 # Single-arm robot
                 if hasattr(active_robot, "bus"):
@@ -865,18 +871,21 @@ class TeleoperationService:
             except Exception as e:
                 logger.error(f"Failed to restore Leader Mode: {e}")
 
-        # Disable Damiao follower torque on stop (safety: arm goes limp)
+        # Home follower arm (or disable immediately if no home position)
         active_robot = getattr(self, '_active_robot', self.robot)
         if active_robot:
-            try:
-                from lerobot.motors.damiao.damiao import DamiaoMotorsBus
-                bus = getattr(active_robot, 'bus', None)
-                if bus and isinstance(bus, DamiaoMotorsBus):
-                    logger.info("Disabling Damiao follower torque...")
-                    for motor in bus._motors.values():
-                        bus._control.disable(motor)
-            except Exception as e:
-                logger.warning(f"Failed to disable Damiao follower torque: {e}")
+            home_pos = self._get_home_position(active_robot)
+            if home_pos:
+                logger.info(f"Homing follower to saved position ({len(home_pos)} joints)...")
+                self._homing_cancel = False
+                self._homing_thread = threading.Thread(
+                    target=self._homing_loop,
+                    args=(active_robot, home_pos),
+                    daemon=True
+                )
+                self._homing_thread.start()
+            else:
+                self._disable_follower_motors(active_robot)
 
         # Reset active instances
         self._active_robot = self.robot
@@ -888,9 +897,74 @@ class TeleoperationService:
              logger.removeHandler(self._debug_handler)
              self._debug_handler.close()
 
+    def _get_home_position(self, robot) -> dict | None:
+        """Get saved home position from arm registry config for the active follower."""
+        if not self.arm_registry:
+            return None
+        for arm_id, instance in self.arm_registry.arm_instances.items():
+            if instance is robot:
+                arm_def = self.arm_registry.arms.get(arm_id)
+                if arm_def and arm_def.config.get("home_position"):
+                    return arm_def.config["home_position"]
+        return None
+
+    def _disable_follower_motors(self, robot):
+        """Immediately disable all Damiao follower motors."""
+        try:
+            from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+            bus = getattr(robot, 'bus', None)
+            if bus and isinstance(bus, DamiaoMotorsBus):
+                logger.info("Disabling Damiao follower torque...")
+                for motor in bus._motors.values():
+                    bus._control.disable(motor)
+        except Exception as e:
+            logger.warning(f"Failed to disable Damiao follower torque: {e}")
+
+    def _homing_loop(self, robot, home_pos, duration=10.0, homing_vel=0.05):
+        """Move robot to home position over duration, then disable motors.
+
+        Uses the existing MIT rate limiter in sync_write() for smooth movement.
+        At homing_vel=0.15: J8009P ~1 rad/s, J4340P ~0.8 rad/s.
+        """
+        try:
+            from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+            bus = getattr(robot, 'bus', None)
+            if not bus or not isinstance(bus, DamiaoMotorsBus):
+                return
+
+            old_vel = bus.velocity_limit
+            bus.velocity_limit = homing_vel
+            print(f"[Teleop] Homing started (vel={homing_vel}, duration={duration}s)", flush=True)
+
+            start = time.time()
+            while time.time() - start < duration:
+                if getattr(self, '_homing_cancel', False):
+                    print("[Teleop] Homing cancelled", flush=True)
+                    break
+                bus.sync_write("Goal_Position", home_pos)
+                time.sleep(1.0 / 30)  # 30Hz
+
+            bus.velocity_limit = old_vel
+        except Exception as e:
+            print(f"[Teleop] Homing error: {e}", flush=True)
+        finally:
+            # Always disable motors when done
+            try:
+                from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+                bus = getattr(robot, 'bus', None)
+                if bus and isinstance(bus, DamiaoMotorsBus):
+                    for motor in bus._motors.values():
+                        bus._control.disable(motor)
+                    print("[Teleop] Homing complete — motors disabled", flush=True)
+            except Exception:
+                pass
+
     def _teleop_loop(self):
         logger.info(f"Teleoperation Control Loop Running at {self.frequency}Hz (Optimization Enabled)")
         print(f"[TELEOP] Control loop started at {self.frequency}Hz", flush=True)
+
+        # Start blend timer NOW — when the loop actually begins executing
+        self._blend_start_time = time.time()
 
         loop_count = 0
         self.last_loop_time = time.perf_counter()
@@ -1026,7 +1100,7 @@ class TeleoperationService:
                         print(f"[TELEOP DEBUG] leader_action after mapping ({len(leader_action)} entries): {leader_action}", flush=True)
 
                     # 1c. Startup blend: ramp from follower's current position
-                    if hasattr(self, '_blend_start_time') and leader_action:
+                    if self._blend_start_time and leader_action:
                         # First frame: capture follower's actual position
                         if not self._follower_start_pos and self._active_robot:
                             try:
@@ -1034,9 +1108,14 @@ class TeleoperationService:
                                 self._follower_start_pos = {
                                     k: v for k, v in fobs.items() if k.endswith('.pos')
                                 }
-                                logger.info(f"[Teleop] Startup blend: captured follower position ({len(self._follower_start_pos)} joints), blending over {self._blend_duration}s")
+                                print(f"[Teleop] Startup blend: captured {len(self._follower_start_pos)} follower positions", flush=True)
                             except Exception as e:
-                                logger.warning(f"[Teleop] Could not capture follower start pos: {e}")
+                                print(f"[Teleop] Startup blend: get_observation() FAILED: {e}", flush=True)
+                                # Fallback: use last known positions from bus (seeded during configure)
+                                if hasattr(self._active_robot, 'bus') and hasattr(self._active_robot.bus, '_last_positions'):
+                                    lp = self._active_robot.bus._last_positions
+                                    self._follower_start_pos = {f"{k}.pos": v for k, v in lp.items()}
+                                    print(f"[Teleop] Startup blend: using bus fallback ({len(self._follower_start_pos)} joints)", flush=True)
 
                         elapsed = time.time() - self._blend_start_time
                         alpha = min(1.0, elapsed / self._blend_duration)
@@ -1047,6 +1126,27 @@ class TeleoperationService:
                                     start = self._follower_start_pos[key]
                                     target = leader_action[key]
                                     leader_action[key] = start + alpha * (target - start)
+
+                            # First-frame diagnostic: log large position deltas
+                            if loop_count == 0:
+                                for key in list(leader_action.keys()):
+                                    if key in self._follower_start_pos:
+                                        orig_target = leader_action.get(key, 0)  # Already blended
+                                        follower_pos = self._follower_start_pos[key]
+                                        raw_delta = orig_target - follower_pos
+                                        if abs(raw_delta) > 0.01:
+                                            print(f"[Teleop] Blend frame 0: {key} "
+                                                  f"follower={follower_pos:.3f}, blended={orig_target:.3f}, "
+                                                  f"delta={raw_delta:+.4f} rad", flush=True)
+
+                # Debug: trace link3 position through teleop pipeline (first 5 frames)
+                if loop_count < 5 and leader_action and "link3.pos" in leader_action:
+                    _alpha = alpha if self._blend_start_time else -1.0
+                    blend_active = (self._blend_start_time is not None and _alpha < 1.0)
+                    fstart = self._follower_start_pos.get("link3.pos", "N/A") if self._follower_start_pos else "N/A"
+                    print(f"[Teleop] Frame {loop_count}: link3.pos={leader_action['link3.pos']:.4f} "
+                          f"(alpha={_alpha:.4f}, blend_active={blend_active}, "
+                          f"follower_start={fstart})", flush=True)
 
                 # 2. Send Action IMMEDIATELY (Low Latency Control)
                 # Key insight from LeRobot: send_action and get_observation are independent.
@@ -1061,6 +1161,29 @@ class TeleoperationService:
                         if loop_count % 60 == 0:
                             print(f"[TELEOP] Send Action Failed: {e}", flush=True)
                             logger.error(f"Send Action Failed: {e}")
+
+                    # SAFETY: Check if CAN bus died (emergency shutdown triggered in driver)
+                    if hasattr(self._active_robot, 'bus') and getattr(self._active_robot.bus, '_can_bus_dead', False):
+                        print("[TELEOP] CAN BUS DEAD — stopping teleop for safety", flush=True)
+                        logger.error("[TELEOP] CAN bus failure detected — emergency stop")
+                        self.is_running = False
+                        break
+
+                    # SAFETY: Check Damiao torque limits (every 6th frame = ~10Hz)
+                    # read_torques() costs ~14ms (7 motors x 2ms), so throttle to avoid
+                    # consuming too much of the 16.7ms frame budget at 60Hz.
+                    # 3-violation debounce in SafetyLayer triggers e-stop within ~300ms.
+                    if self._has_damiao_follower and loop_count % 6 == 3:
+                        try:
+                            if not self.safety.check_damiao_limits(self._active_robot):
+                                print("[TELEOP] SAFETY: Torque limit exceeded — EMERGENCY STOP", flush=True)
+                                logger.error("[TELEOP] Damiao torque limit exceeded — emergency stop")
+                                self.is_running = False
+                                break
+                        except Exception as e:
+                            if loop_count % 60 == 0:
+                                logger.warning(f"[TELEOP] Safety check error (non-fatal): {e}")
+
                 elif self._active_robot and loop_count % 60 == 0:
                     logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")
 

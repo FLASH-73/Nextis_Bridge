@@ -15,6 +15,14 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class CalibrationService:
+    # Dynamixel leader → Damiao follower joint name translation
+    _DYNAMIXEL_TO_DAMIAO = {
+        "joint_1": "base", "joint_2": "link1", "joint_3": "link2",
+        "joint_4": "link3", "joint_5": "link4", "joint_6": "link5",
+        "gripper": "gripper",
+    }
+    _DAMIAO_TO_DYNAMIXEL = {v: k for k, v in _DYNAMIXEL_TO_DAMIAO.items()}
+
     def __init__(self, robot, leader=None, robot_lock=None, arm_registry=None):
         self.robot = robot
         self.leader = leader
@@ -296,6 +304,14 @@ class CalibrationService:
 
         # Feetech/Dynamixel: Enable Multi-turn for discovery (Limits=0)
         # This prevents the motor from stopping at 0/4095
+        # Dynamixel EEPROM writes require torque off (DynamixelLeader keeps gripper torque on)
+        if self._is_dynamixel_arm(arm_id):
+            if self.robot_lock:
+                with self.robot_lock:
+                    arm.bus.disable_torque()
+            else:
+                arm.bus.disable_torque()
+
         if self.robot_lock:
              with self.robot_lock:
                  for motor in target_motors:
@@ -327,27 +343,20 @@ class CalibrationService:
         # Ensure we have a calibration object to update
         self._ensure_calibration_initialized(arm)
         
-        # Damiao: clear discovery mode + re-enable motors
+        # Damiao: clear discovery mode + re-enable motors with safe MIT startup
         if self._is_damiao_arm(arm_id):
             logger.info(f"[{arm_id}] Damiao — ending discovery: re-enabling motors, unblocking writes")
             arm.bus._discovery_mode = False
             _, target_motors = self._get_arm_context(arm_id)
             if target_motors:
+                # Use bus-level enable_torque() which handles safe MIT enable
+                # (sends limp frames after enable to prevent torque spikes)
+                motors_to_enable = [m for m in target_motors if m in arm.bus.motors]
                 if self.robot_lock:
                     with self.robot_lock:
-                        for motor_name in target_motors:
-                            if motor_name in arm.bus.motors:
-                                try:
-                                    arm.bus._control.enable(arm.bus._motors[motor_name])
-                                except Exception as e:
-                                    logger.warning(f"Failed to re-enable {motor_name}: {e}")
+                        arm.bus.enable_torque(motors_to_enable)
                 else:
-                    for motor_name in target_motors:
-                        if motor_name in arm.bus.motors:
-                            try:
-                                arm.bus._control.enable(arm.bus._motors[motor_name])
-                            except Exception as e:
-                                logger.warning(f"Failed to re-enable {motor_name}: {e}")
+                    arm.bus.enable_torque(motors_to_enable)
 
         warnings = []
         if arm and self.session_ranges:
@@ -364,7 +373,11 @@ class CalibrationService:
                                  warnings.append(f"{motor} used FULL RANGE (0-4096). Possible Wrap Error.")
                 else:
                     logger.warning(f"stop_discovery: Motor {motor} not found in arm.calibration")
-            
+
+            # Propagate discovered ranges to motor bus for runtime enforcement
+            if hasattr(arm, 'apply_calibration_limits'):
+                arm.apply_calibration_limits()
+
             self.save_calibration(arm_id)
             
         msg = "Range Discovery Complete."
@@ -497,14 +510,23 @@ class CalibrationService:
         try:
             # Use the robot's internal loader if possible, or manual load
             arm._load_calibration(fpath)
-            # Apply to motors
+            # Apply to motors (Dynamixel EEPROM writes require torque off)
             if hasattr(arm.bus, "write_calibration"):
+                if self._is_dynamixel_arm(arm_id):
+                    arm.bus.disable_torque()
                 arm.bus.write_calibration(arm.calibration)
-            
+                # Restore gripper spring mode after EEPROM writes
+                if self._is_dynamixel_arm(arm_id) and hasattr(arm, 'configure'):
+                    arm.configure()
+
+            # Propagate calibrated joint limits to motor bus for runtime enforcement
+            if hasattr(arm, 'apply_calibration_limits'):
+                arm.apply_calibration_limits()
+
             # Update Active Profile state
             self.active_profiles[arm_id] = filename
             self._save_persistent_active_profiles()
-            
+
             logger.info(f"Successfully loaded calibration for {arm_id}")
             return True
         except Exception as e:
@@ -525,9 +547,11 @@ class CalibrationService:
         if not arm:
             return
 
-        # Write calibration to motor hardware (Feetech/Dynamixel only)
-        # Damiao uses absolute encoders — calibration is host-side JSON only
-        if not self._is_damiao_arm(arm_id):
+        # Write calibration to motor hardware (Feetech STS3215 only)
+        # Damiao: host-side JSON only (absolute encoders, no offset registers)
+        # Dynamixel leaders: host-side JSON only (gripper has torque enabled,
+        # can't write EEPROM registers like Homing_Offset/Position_Limits)
+        if not self._is_damiao_arm(arm_id) and not self._is_dynamixel_arm(arm_id):
             if self.robot_lock:
                 with self.robot_lock:
                     arm.bus.write_calibration(arm.calibration)
@@ -691,6 +715,29 @@ class CalibrationService:
                  arm.bus.disable_torque(motors_to_home)
                  offsets = arm.bus.set_half_turn_homings(motors_to_home)
 
+            # Persist homing offsets to arm.calibration so save_calibration() writes them
+            self._ensure_calibration_initialized(arm)
+            for motor_name, offset in offsets.items():
+                if motor_name in arm.calibration:
+                    arm.calibration[motor_name].homing_offset = offset
+            # Also sync to the bus calibration cache
+            arm.bus.calibration = dict(arm.calibration)
+
+            # Update gripper offset-adjusted positions for get_action() normalization
+            # Do NOT call arm.configure() here — it re-enables gripper spring, blocking range discovery
+            if self._is_dynamixel_arm(arm_id) and hasattr(arm.bus, '_software_homing_offsets'):
+                gripper_id = arm.bus.motors["gripper"].id
+                gripper_offset = arm.bus._software_homing_offsets.get(gripper_id, 0)
+                # Use calibrated range if available (config defaults may be outside position limits)
+                # For our arm: lower ticks = open, higher ticks = closed
+                if arm.calibration and "gripper" in arm.calibration:
+                    cal = arm.calibration["gripper"]
+                    arm._gripper_open = cal.range_min + gripper_offset
+                    arm._gripper_closed = cal.range_max + gripper_offset
+                else:
+                    arm._gripper_open = arm.config.gripper_open_pos + gripper_offset
+                    arm._gripper_closed = arm.config.gripper_closed_pos + gripper_offset
+
             # Diagnostic check
             warnings = []
             for m, off in offsets.items():
@@ -741,15 +788,11 @@ class CalibrationService:
         base_dir.mkdir(parents=True, exist_ok=True)
         return base_dir / "inversions.json"
 
-    def get_inversions(self, arm_id: str) -> Dict[str, bool]:
+    def _read_inversions_file(self, arm_id: str) -> Dict[str, bool]:
+        """Read inversions directly from an arm's file (no translation)."""
         fpath = self._get_inversions_file(arm_id)
         if not fpath.exists():
-            # Return defaults if file doesn't exist
-            # We can't easily guess defaults here without the robot logic, 
-            # so we return empty which implies "use robot defaults" or "false" depending on implementation.
-            # However, to be "smart", maybe we populate it with current robot state if available?
             return {}
-            
         import json
         try:
             with open(fpath, "r") as f:
@@ -757,18 +800,56 @@ class CalibrationService:
         except:
             return {}
 
+    def _find_paired_follower(self, arm_id: str):
+        """If arm_id is a leader in a pairing, return (follower_id, need_translation).
+        need_translation is True when motor names differ (Dynamixel→Damiao)."""
+        if not self.arm_registry:
+            return None, False
+        arm_def = self.arm_registry.arms.get(arm_id)
+        if not arm_def or arm_def.role.value != "leader":
+            return None, False
+        for p in self.arm_registry.pairings:
+            if p.leader_id == arm_id:
+                follower_def = self.arm_registry.arms.get(p.follower_id)
+                is_dyn_leader = arm_def.motor_type.value.startswith("dynamixel")
+                is_dam_follower = follower_def and follower_def.motor_type.value == "damiao"
+                return p.follower_id, (is_dyn_leader and is_dam_follower)
+        return None, False
+
+    def get_inversions(self, arm_id: str) -> Dict[str, bool]:
+        # If this is a leader with a paired follower, read follower's inversions and translate
+        follower_id, need_translation = self._find_paired_follower(arm_id)
+        if follower_id:
+            follower_inv = self._read_inversions_file(follower_id)
+            if need_translation:
+                return {self._DAMIAO_TO_DYNAMIXEL.get(k, k): v for k, v in follower_inv.items()}
+            return follower_inv
+        # Not a leader or no pairing — read directly
+        return self._read_inversions_file(arm_id)
+
     def set_inversion(self, arm_id: str, motor_name: str, inverted: bool):
-        fpath = self._get_inversions_file(arm_id)
-        current = self.get_inversions(arm_id)
-        current[motor_name] = inverted
-        
+        # Check if this is a leader arm with a paired follower
+        follower_id, need_translation = self._find_paired_follower(arm_id)
+
+        if follower_id:
+            # Save to FOLLOWER (where inversions are applied at runtime)
+            target_id = follower_id
+            target_motor = self._DYNAMIXEL_TO_DAMIAO.get(motor_name, motor_name) if need_translation else motor_name
+        else:
+            # Save to this arm directly (it's a follower or unpaired)
+            target_id = arm_id
+            target_motor = motor_name
+
+        fpath = self._get_inversions_file(target_id)
+        current = self._read_inversions_file(target_id)
+        current[target_motor] = inverted
+
         import json
         with open(fpath, "w") as f:
             json.dump(current, f, indent=2)
-            
-        # If robot is active, try to apply immediately?
-        # The robot driver needs to reload this.
-        arm, _ = self._get_arm_context(arm_id)
+
+        # Reload on the target arm (follower)
+        arm, _ = self._get_arm_context(target_id)
         if arm and hasattr(arm, "reload_inversions"):
             arm.reload_inversions()
 

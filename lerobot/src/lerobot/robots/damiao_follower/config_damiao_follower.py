@@ -52,30 +52,44 @@ class DamiaoFollowerConfig(RobotConfig):
     motor_config: dict = field(default_factory=lambda: DEFAULT_DAMIAO_MOTORS.copy())
 
     # CRITICAL: Global velocity limiter (0.0-1.0)
-    # Default 0.1 (10%) for safety with heavy arm
-    velocity_limit: float = 0.1
+    # Default 0.3 (30%) — rate limiter ensures safe torque per frame.
+    # Adjust via GUI slider. At 0.3: J4340P=1.65 rad/s, J8009P=1.98 rad/s.
+    velocity_limit: float = 0.5
 
     # Gripper settings
     max_gripper_torque: float = 1.0  # Nm
     gripper_open_pos: float = 0.0  # radians
-    gripper_closed_pos: float = -4.7  # radians (adjust for your gripper)
+    gripper_closed_pos: float = -5.27  # radians (matches calibration range_min)
     skip_gripper_homing: bool = False  # Skip torque-based gripper homing on connect
 
     # Safety
     disable_torque_on_disconnect: bool = True
 
+    # SAFETY CRITICAL: Skip internal motor PID parameter writes during configure()
+    # When True, motors use their existing (factory/pre-configured) PID values.
+    # The code will validate that KP_ASR >= 0.5 before enabling motors.
+    # Only set to True if motors already have correct PID values!
+    skip_pid_config: bool = False
+
+    # MIT MODE CONTROL (RECOMMENDED)
+    # POS_VEL mode causes vibration on some motor/firmware combinations.
+    # MIT mode provides stable, smooth control with per-command kp/kd gains.
+    use_mit_mode: bool = True  # Use MIT mode instead of POS_VEL (recommended)
+    mit_kp: float = 30.0  # Position stiffness (0-500, doubled from 15 for precision)
+    mit_kd: float = 1.5   # Velocity damping (0-5, recommended 1.5 for stability)
+
     # Cameras
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
-    # Joint limits in radians (from calibration_profiles/aira_zero/cal1_test.json)
-    # Format: {"joint_name": (min, max)}
+    # Joint limits in radians (from cal_test_7_02_1821 calibration)
+    # Fallback only — overridden by HF cache calibration at startup if available.
     joint_limits: dict = field(default_factory=lambda: {
-        "base": (-1.98, 1.84),
-        "link1": (-1.58, 1.89),
-        "link2": (-1.36, 1.08),
-        "link3": (-1.52, 2.84),
-        "link4": (-0.64, 2.51),
-        "link5": (-2.78, 2.54),
+        "base": (-1.59, 1.57),
+        "link1": (-1.98, 1.97),
+        "link2": (-1.18, 3.96),
+        "link3": (-2.12, 1.95),
+        "link4": (-2.78, 0.80),
+        "link5": (-3.17, 3.08),
         "gripper": (-5.32, 0.0),
     })
 

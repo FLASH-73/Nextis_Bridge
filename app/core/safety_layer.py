@@ -5,11 +5,13 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# Damiao motor torque limits (Nm) - 85% of max for safety
+# Damiao motor torque limits (Nm) - 10% of max for initial testing safety
+# NOTE: These are reference values only. Actual limits come from
+# DAMIAO_MOTOR_SPECS["torque_limit_percent"] in tables.py via get_torque_limits()
 DAMIAO_TORQUE_LIMITS = {
-    "J8009P": 30.0,  # 85% of 35Nm max
-    "J4340P": 6.8,   # 85% of 8Nm max
-    "J4310": 3.4,    # 85% of 4Nm max
+    "J8009P": 3.5,   # 10% of 35Nm max (conservative for testing)
+    "J4340P": 0.8,   # 10% of 8Nm max
+    "J4310": 0.4,    # 10% of 4Nm max
 }
 
 class SafetyLayer:
@@ -48,8 +50,14 @@ class SafetyLayer:
                 if hasattr(robot, "bus"): buses.append(robot.bus)
                 
                 for bus in buses:
-                    # We need to know which motors are on this bus.
-                    # bus.motors is a dict
+                    # Skip Damiao CAN buses — they use check_damiao_limits() with
+                    # native torque API instead of Feetech bus.read("Present_Load")
+                    try:
+                        from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+                        if isinstance(bus, DamiaoMotorsBus):
+                            continue
+                    except ImportError:
+                        pass
                     for motor_name in bus.motors.keys():
                         self.monitored_motors.append((bus, motor_name))
                 

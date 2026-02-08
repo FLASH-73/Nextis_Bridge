@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { X, Plus, Link2, Unlink, RefreshCw, Power, PowerOff, Settings, AlertTriangle, Check, Trash2, Edit3, Save, Zap } from 'lucide-react';
+import { X, Plus, Link2, Unlink, RefreshCw, Power, PowerOff, Settings, AlertTriangle, Check, Trash2, Edit3, Save, Zap, Home } from 'lucide-react';
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -185,6 +185,23 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
             fetchPairings();
         } catch (e) {
             console.error('Failed to delete arm:', e);
+        }
+    };
+
+    const setHomePosition = async (armId: string) => {
+        try {
+            const res = await fetch(`${API_BASE}/arms/${armId}/set-home`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                const joints = Object.entries(data.home_position)
+                    .map(([k, v]) => `${k}: ${(v as number).toFixed(2)}`)
+                    .join(', ');
+                alert(`Home position saved for ${armId}\n\n${joints}`);
+            } else {
+                alert(`Failed: ${data.error}`);
+            }
+        } catch (e) {
+            alert(`Error setting home position: ${e}`);
         }
     };
 
@@ -471,6 +488,7 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                                                 onDisconnect={disconnectArm}
                                                 onDelete={deleteArm}
                                                 onEdit={(id) => { setEditingArm(id); setEditName(arm.name); }}
+                                                onSetHome={setHomePosition}
                                                 isEditing={editingArm === arm.id}
                                                 editName={editName}
                                                 setEditName={setEditName}
@@ -501,6 +519,7 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                                                 onDisconnect={disconnectArm}
                                                 onDelete={deleteArm}
                                                 onEdit={(id) => { setEditingArm(id); setEditName(arm.name); }}
+                                                onSetHome={setHomePosition}
                                                 isEditing={editingArm === arm.id}
                                                 editName={editName}
                                                 setEditName={setEditName}
@@ -990,6 +1009,7 @@ interface ArmCardProps {
     onDisconnect: (id: string) => void;
     onDelete: (id: string) => void;
     onEdit: (id: string) => void;
+    onSetHome: (id: string) => void;
     isEditing: boolean;
     editName: string;
     setEditName: (name: string) => void;
@@ -1003,6 +1023,7 @@ function ArmCard({
     onDisconnect,
     onDelete,
     onEdit,
+    onSetHome,
     isEditing,
     editName,
     setEditName,
@@ -1060,6 +1081,15 @@ function ArmCard({
             </div>
 
             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                {arm.status === 'connected' && (
+                    <button
+                        onClick={() => onSetHome(arm.id)}
+                        className="p-2 text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-950 rounded-lg transition-colors"
+                        title="Set current position as home"
+                    >
+                        <Home className="w-4 h-4" />
+                    </button>
+                )}
                 {arm.status === 'connected' ? (
                     <button
                         onClick={() => onDisconnect(arm.id)}

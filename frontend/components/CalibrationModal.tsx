@@ -270,27 +270,39 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
 
     const startRecording = async () => {
         try {
-            await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/discovery/start`, { method: 'POST' });
+            const res = await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/discovery/start`, { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                console.error("Failed to start discovery:", data.message || res.statusText);
+                alert(`Failed to start recording: ${data.message || res.statusText}`);
+                return;
+            }
             setIsRecording(true);
         } catch (e) {
-            console.error(e);
+            console.error("Network error starting discovery:", e);
+            alert("Failed to connect to server. Is the backend running?");
         }
     };
 
     const stopRecording = async () => {
         try {
             const res = await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/discovery/stop`, { method: 'POST' });
-            const data = await res.json();
+            const data = await res.json().catch(() => ({}));
             setIsRecording(false);
+
+            if (!res.ok) {
+                console.error("Failed to stop discovery:", data.message || res.statusText);
+                return;
+            }
 
             if (data.warnings && data.warnings.length > 0) {
                 alert(`Warning: ${data.message}\nReview calibration carefully.`);
             } else if (data.message) {
-                // Optional success toast?
                 console.log(data.message);
             }
         } catch (e) {
-            console.error(e);
+            console.error("Network error stopping discovery:", e);
+            setIsRecording(false);
         }
     };
 

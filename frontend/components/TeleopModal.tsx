@@ -215,6 +215,7 @@ export default function TeleopModal({ isOpen, onClose, maximizedWindow, setMaxim
     const [wizardArm, setWizardArm] = useState<string | null>(null);
     const [activeArmId, setActiveArmId] = useState<string | null>(null);
     const [inversions, setInversions] = useState<{ [key: string]: boolean }>({});
+    const [motors, setMotors] = useState<string[]>([]);
     const [assistEnabled, setAssistEnabled] = useState(false); // Default False
 
     const [profiles, setProfiles] = useState<any[]>([]);
@@ -258,6 +259,7 @@ export default function TeleopModal({ isOpen, onClose, maximizedWindow, setMaxim
             const profData = await profRes.json();
 
             setInversions(invData.inversions || {});
+            setMotors(invData.motors || []);
             setProfiles(profData.files || []);
         } catch (e) {
             console.error(e);
@@ -316,12 +318,6 @@ export default function TeleopModal({ isOpen, onClose, maximizedWindow, setMaxim
     // Use a fixed list of colors for lines
     const colors = ["#8884d8", "#82ca9d", "#ffc658", "#ff7300", "#00C49F"];
 
-    // Mock motor list if we don't have it (should be fetched from calibration state ideally)
-    // For now we assume standard set based on arm name
-    const getMotorsForArm = (armName: string) => {
-        // Simplified list for UI
-        return ["link1", "link1_follower", "link2", "link2_follower", "link3", "link4", "link5", "gripper"];
-    }
 
     if (!isOpen) return null;
 
@@ -494,7 +490,7 @@ export default function TeleopModal({ isOpen, onClose, maximizedWindow, setMaxim
 
                                 <h3 className="text-lg font-bold text-neutral-800 dark:text-zinc-200 mb-4">Motor Direction</h3>
                                 <div className="grid grid-cols-2 gap-4 content-start">
-                                    {["link1", "link1_follower", "link2", "link2_follower", "link3", "link4", "link5", "gripper"].map(motor => (
+                                    {motors.map(motor => (
                                         <div key={motor} className="flex items-center justify-between p-4 bg-white dark:bg-zinc-800 border border-neutral-100 dark:border-zinc-700 shadow-sm rounded-xl">
                                             <span className="font-medium text-neutral-700 dark:text-zinc-300">{motor}</span>
                                             <button

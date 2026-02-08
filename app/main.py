@@ -38,15 +38,9 @@ from app.core.config import load_config
 from app.core.orchestrator import TaskOrchestrator
 from app.core.recorder import DataRecorder
 from app.core.calibration_service import CalibrationService
-from app.core.leader_assist import LeaderAssistService
 from app.core.teleop_service import TeleoperationService
 from app.core.dataset_service import DatasetService
 from app.core.training_service import TrainingService
-from lerobot.robots.utils import make_robot_from_config
-from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
-from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
-from lerobot.robots.bi_umbra_follower.config_bi_umbra_follower import BiUmbraFollowerConfig
-from app.core.config import load_config
 
 app = FastAPI(title="Nextis Robotics API")
 
@@ -104,597 +98,75 @@ class SystemState:
              print("System Initialization Complete.")
 
     def _inner_initialize(self):
-        print("Initializing System (Async Internal)...")
-        import lerobot
-        # print(f"DEBUG: lerobot path: {lerobot.__file__}")
-        
-        # Initialize Camera Service
-        self.camera_service = CameraService()
-        
-        # Initialize Dataset Service
-        self.dataset_service = DatasetService()
+        print("Initializing System (Fast Startup — no hardware)...")
 
-        # Initialize Training Service
+        # 1. Lightweight services (no hardware deps)
+        self.camera_service = CameraService()
+        self.dataset_service = DatasetService()
         self.training_service = TrainingService()
 
-
-
-        
-        # Load Config
+        # 2. Load config
         config_data = load_config()
-        robot_cfg = config_data.get("robot", {})
-        teleop_cfg = config_data.get("teleop", {})
-        
-        try:
-            print(f"Attempting to connect to robot: {robot_cfg.get('type')}...")
-            
-            # Import Config Classes dynamically to avoid top-level import errors if deps missing
-            from lerobot.robots.bi_umbra_follower.config_bi_umbra_follower import BiUmbraFollowerConfig
-            from lerobot.cameras.opencv import OpenCVCameraConfig
-            from lerobot.cameras.realsense import RealSenseCameraConfig
-            
-            from app.core.camera_discovery import discover_cameras
 
-            # Extract configured OpenCV device IDs to skip in discovery
-            # This prevents triple-opening USB cameras which puts them in bad state
-            raw_cams = robot_cfg.get("cameras", {})
-            skip_opencv_ids = []
-            if isinstance(raw_cams, dict):
-                for name, cfg in raw_cams.items():
-                    if cfg.get("type") == "opencv":
-                        vid = cfg.get("video_device_id") or cfg.get("index_or_path")
-                        if vid:
-                            skip_opencv_ids.append(str(vid))
-            elif isinstance(raw_cams, list):
-                for cfg in raw_cams:
-                    if cfg.get("type") == "opencv":
-                        vid = cfg.get("video_device_id") or cfg.get("index_or_path")
-                        if vid:
-                            skip_opencv_ids.append(str(vid))
-
-            print(f"Skipping configured OpenCV cameras in discovery: {skip_opencv_ids}")
-
-            # Discover working cameras
-            print("Scanning for available cameras...")
-            discovered = discover_cameras(skip_devices=skip_opencv_ids)
-            # discovered = {"opencv": [], "realsense": []}
-            working_opencv_ports = []
-            working_realsense_serials = []
-            
-            # working_opencv_ports = [c["index_or_path"] for c in discovered["opencv"]]
-            # working_realsense_serials = [c["serial_number_or_name"] for c in discovered["realsense"]]
-            
-            print(f"Discovered OpenCV: {working_opencv_ports}")
-            print(f"Discovered RealSense: {working_realsense_serials}")
-
-            # Construct Camera Configs from Discovery
-            cameras = {}
-
-            # --- Fix Config Format Mismatch (List vs Dict) ---
-            raw_cameras = robot_cfg.get("cameras", [])
-            configured_cameras = {}
-            if isinstance(raw_cameras, list):
-                for c in raw_cameras:
-                    c_id = c.get("id", "unknown")
-                    vid = c.get("video_device_id")
-                    # Heuristic for type if missing
-                    c_type = c.get("type")
-                    if not c_type:
-                        if str(vid).startswith("/dev/video") or (str(vid).isdigit() and len(str(vid)) < 4):
-                             c_type = "opencv"
-                        else:
-                             c_type = "intelrealsense"
-                    
-                    configured_cameras[c_id] = {
-                        "type": c_type,
-                        "index_or_path": vid,
-                        "serial_number_or_name": vid,
-                        **c
-                    }
-            elif isinstance(raw_cameras, dict):
-                # Normalize dict format to ensure index_or_path exists for opencv cameras
-                # This fixes camera_3 which only has video_device_id in settings.yaml
-                for name, cfg in raw_cameras.items():
-                    if cfg.get("type") == "opencv" and "index_or_path" not in cfg:
-                        cfg["index_or_path"] = cfg.get("video_device_id")
-                configured_cameras = raw_cameras
-            # -------------------------------------------------
-            
-            # Add OpenCV Cameras
-            for i, cam in enumerate(discovered["opencv"]):
-                # Use a generic name or try to match with config if possible
-                # User wants "check which one actually work and only add them"
-                # We can try to map back to config names if ports match, otherwise generate new names
-                
-                cam_id = cam.get("id")
-                
-                # Critical Fix: Skip if ID is missing to prevent OpenCVCamera(None) crash
-                if cam_id is None:
-                    print(f"⚠️ Skipping OpenCV camera {i} due to missing ID.")
-                    continue
-                
-                # Try to find if this port was in config
-                config_name = None
-                print(f"DEBUG: Checking OpenCV Camera Discovered ID: '{cam_id}' (type: {type(cam_id)})")
-                
-                for name, cfg in configured_cameras.items():
-                    cfg_type = cfg.get("type")
-                    cfg_idx = cfg.get("index_or_path") or cfg.get("video_device_id")
-                    # print(f"  - Comparing against Config '{name}': type={cfg_type}, idx='{cfg_idx}'")
-                    
-                    if cfg_type == "opencv" and str(cfg_idx) == str(cam_id):
-                        config_name = name
-                        print(f"  -> MATCH FOUND: '{name}' matches device '{cam_id}'")
-                        break
-                
-                if not config_name:
-                    print(f"  -> NO MATCH found for device '{cam_id}'.")
-                    # STRICT MODE: If we have ANY configured cameras, ignore unconfigured ones to preventing polluting the system.
-                    # Unless it's a fresh setup (no config).
-                    if configured_cameras:
-                        print(f"  -> Skipping unconfigured device '{cam_id}' because valid config exists.")
-                        continue
-                    
-                    print(f"  -> Will use auto-generated name for '{cam_id}'.")
-
-                cam_name = config_name if config_name else f"camera_{i+1}_opencv"
-                
-                cameras[cam_name] = OpenCVCameraConfig(
-                    fps=cam.get("fps", 30),
-                    width=cam.get("width", 848),
-                    height=cam.get("height", 480),
-                    index_or_path=cam_id,
-                    fourcc=cam.get("fourcc")  # Optional: user can set in config
-                )
-                print(f"Added {cam_name} at {cam_id}")
-
-            # --- Explicitly Add Configured Cameras if Missed by Discovery ---
-            # e.g. /dev/video16 might be a loopback or not found by simple glob
-            for name, cfg in configured_cameras.items():
-                if name not in cameras and cfg.get("type") == "opencv":
-                    idx = cfg.get("index_or_path") or cfg.get("video_device_id")
-                    if idx:
-                        print(f"Adding configured camera '{name}' explicitly (was not in discovery scan) at {idx}")
-                        cameras[name] = OpenCVCameraConfig(
-                            fps=cfg.get("fps", 30),
-                            width=cfg.get("width", 640),
-                            height=cfg.get("height", 480),
-                            index_or_path=idx,
-                            fourcc=cfg.get("fourcc")  # Optional: user can set in config
-                        )
-            # ----------------------------------------------------------------
-
-            # Add RealSense Cameras
-            for i, cam in enumerate(discovered["realsense"]):
-                serial = cam.get("id")
-                if not serial and "serial_number" in cam:
-                    serial = cam["serial_number"]
-
-                if not serial:
-                    print(f"⚠️ Skipping RealSense camera {i} due to missing serial number.")
-                    continue
-                    
-                # Ensure serial is a string
-                serial = str(serial)
-
-                # Try to find if this serial was in config
-                config_name = None
-                print(f"DEBUG: Checking RealSense Camera Discovered Serial: '{serial}'")
-
-                for name, cfg in configured_cameras.items():
-                    cfg_type = cfg.get("type")
-                    cfg_serial = cfg.get("serial_number_or_name")
-                    
-                    if cfg_type == "intelrealsense" and str(cfg_serial) == serial:
-                        config_name = name
-                        print(f"  -> MATCH FOUND: '{name}' matches serial '{serial}'")
-                        break
-                
-                cam_name = config_name if config_name else f"camera_{i+1}_realsense"
-
-                # Get settings from user config if available, otherwise use discovered/defaults
-                use_depth = False
-                cam_fps = cam.get("fps", 30)
-                cam_width = cam.get("width", 848)
-                cam_height = cam.get("height", 480)
-
-                if config_name and config_name in configured_cameras:
-                    user_cfg = configured_cameras[config_name]
-                    use_depth = user_cfg.get("use_depth", False)
-                    cam_fps = user_cfg.get("fps", cam_fps)
-                    cam_width = user_cfg.get("width", cam_width)
-                    cam_height = user_cfg.get("height", cam_height)
-                    print(f"  -> Using config: {cam_width}x{cam_height}@{cam_fps}fps, depth={use_depth}")
-
-                cameras[cam_name] = RealSenseCameraConfig(
-                    fps=cam_fps,
-                    width=cam_width,
-                    height=cam_height,
-                    serial_number_or_name=serial,
-                    use_depth=use_depth
-                )
-                print(f"Added {cam_name} (RealSense {serial}, depth={'ON' if use_depth else 'OFF'})")
-            
-            if not cameras:
-                print("⚠️ No cameras found! Robot might fail to initialize if it requires cameras.")
-
-            # --- ROBUSTNESS: Verify cameras can actually connect before passing to Robot ---
-            print("Verifying camera connections...")
-            verified_cameras = {}
-            for name, cfg in cameras.items():
-                try:
-                    # Instantiate and test connection temporarily
-                    if isinstance(cfg, OpenCVCameraConfig):
-                        # Skip verification for OpenCV cameras - triple-open puts USB cameras in bad state
-                        print(f"Skipping stress verification for OpenCV {name} to avoid USB issues.")
-                        verified_cameras[name] = cfg
-                        continue
-                    elif isinstance(cfg, RealSenseCameraConfig):
-                        # skip verification for RealSense to avoid USB reset/busy issues
-                        print(f"Skipping stress verification for RealSense {name} to avoid USB race conditions.")
-                        verified_cameras[name] = cfg
-                        continue
-                    else:
-                        print(f"Skipping verification for unknown type {type(cfg)}")
-                        verified_cameras[name] = cfg
-                        continue
-
-                    # Attempt connection with warmup to verify READ works
-                    test_cam.connect(warmup=False) 
-                    
-                    # Stress test: Read multiple frames to ensure stability (filter out flaky video4)
-                    stress_passed = True
-                    for _ in range(10):
-                        if test_cam.read() is None:
-                            stress_passed = False
-                            break
-                            
-                    if stress_passed and test_cam.is_connected:
-                        print(f"  [OK] Camera {name} connected and passed stress test.")
-                        test_cam.disconnect()
-                        verified_cameras[name] = cfg
-                    else:
-                         print(f"  [FAIL] Camera {name} failed check (unstable/null frames). Ignoring.")
-                except Exception as e:
-                    print(f"  [FAIL] Camera {name} failed to connect: {e}. Ignoring.")
-                finally:
-                    # Clean up if connected or thread started
-                    try:
-                        if 'test_cam' in locals() and test_cam is not None:
-                            # Check if connected or if explicit disconnect needed
-                            # OpenCVCamera.disconnect() is safe to call if not connected? 
-                            # It raises DeviceNotConnectedError if not connected.
-                            if test_cam.is_connected or (hasattr(test_cam, 'thread') and test_cam.thread is not None):
-                                test_cam.disconnect()
-                    except Exception as cleanup_err:
-                        # Ignore cleanup errors (e.g. already disconnected)
-                        pass
-                
-                # Tiny sleep to ensure OS releases the device handle
-                import time
-                time.sleep(0.2)
-            
-            cameras = verified_cameras
-            print(f"Proceeding with {len(cameras)} verified cameras.")
-            # -------------------------------------------------------------------------------
-            
-            # Construct Robot Config
-            # We assume bi_umbra_follower for now as per user request
-            if robot_cfg.get("type") == "bi_umbra_follower":
-                r_config = BiUmbraFollowerConfig(
-                    left_arm_port=robot_cfg["left_arm_port"],
-                    right_arm_port=robot_cfg["right_arm_port"],
-                    cameras=cameras
-                )
-                
-                try:
-                    from app.core.motor_recovery import MotorRecoveryService
-                    self.robot = make_robot_from_config(r_config)
-
-                    # Retry logic for Robot Connection with Motor Recovery
-                    max_retries = 3
-                    import time
-                    recovery_service = MotorRecoveryService()
-
-                    for attempt in range(max_retries):
-                        try:
-                            # On retry attempts, run motor recovery first
-                            if attempt > 0:
-                                print(f"\n🔧 Attempting motor recovery before retry {attempt+1}...")
-                                all_results = []
-
-                                # Recover left arm motors
-                                if hasattr(self.robot, 'left_arm') and hasattr(self.robot.left_arm, 'bus'):
-                                    bus = self.robot.left_arm.bus
-                                    if not bus.is_connected:
-                                        try:
-                                            bus.port_handler.openPort()
-                                            bus.set_baudrate(bus.default_baudrate)
-                                        except:
-                                            pass
-                                    all_results.extend(recovery_service.attempt_recovery_on_bus(bus, "left_follower"))
-
-                                # Recover right arm motors
-                                if hasattr(self.robot, 'right_arm') and hasattr(self.robot.right_arm, 'bus'):
-                                    bus = self.robot.right_arm.bus
-                                    if not bus.is_connected:
-                                        try:
-                                            bus.port_handler.openPort()
-                                            bus.set_baudrate(bus.default_baudrate)
-                                        except:
-                                            pass
-                                    all_results.extend(recovery_service.attempt_recovery_on_bus(bus, "right_follower"))
-
-                                # Print status report
-                                if all_results:
-                                    print(recovery_service.format_status_report(all_results))
-
-                                # Clean up and recreate robot
-                                try:
-                                    self.robot.disconnect()
-                                except:
-                                    pass
-                                self.robot = make_robot_from_config(r_config)
-                                time.sleep(0.5)
-
-                            self.robot.connect(calibrate=False)
-                            print("✅ Real Robot Connected Successfully!")
-                            break
-
-                        except Exception as e:
-                            print(f"⚠️ Robot Connect Attempt {attempt+1}/{max_retries} Failed: {e}")
-
-                            if attempt == max_retries - 1:
-                                # Final failure - show troubleshooting guide
-                                print("\n" + "=" * 60)
-                                print("❌ CONNECTION FAILED - Troubleshooting Guide")
-                                print("=" * 60)
-                                print("1. Power cycle the robot arms (unplug power, wait 5s, replug)")
-                                print("2. Manually release any jammed joints")
-                                print("3. Check USB cable connections")
-                                print("4. Run: ls /dev/ttyUSB* to verify ports")
-                                if recovery_service.last_recovery_results:
-                                    print("\nLast known motor status:")
-                                    for port, results in recovery_service.last_recovery_results.items():
-                                        for status in results:
-                                            if status.recommendation != "OK":
-                                                print(f"  {status.motor_name}: {status.recommendation}")
-                                print("=" * 60 + "\n")
-                                raise e
-
-                            # Clean up partial connection before retry
-                            try:
-                                if hasattr(self.robot, 'disconnect'):
-                                    self.robot.disconnect()
-                            except Exception:
-                                pass
-                            # Recreate robot instance for clean state
-                            self.robot = make_robot_from_config(r_config)
-                            time.sleep(1.0)
-                            
-                    # Initialize Leader if configured
-                    if teleop_cfg and teleop_cfg.get("type") == "bi_umbra_leader":
-                        print("Initializing BiUmbraLeader...")
-                        from lerobot.teleoperators.bi_umbra_leader.bi_umbra_leader import BiUmbraLeader
-                        from lerobot.teleoperators.bi_umbra_leader.config_bi_umbra_leader import BiUmbraLeaderConfig
-                        
-                        l_config = BiUmbraLeaderConfig(
-                            id="bi_umbra_leader_main",  # Explicit ID to avoid 'None.json'
-                            left_arm_port=teleop_cfg["left_arm_port"],
-                            right_arm_port=teleop_cfg["right_arm_port"],
-                            calibration_dir=Path(teleop_cfg.get("calibration_dir", ".cache/calibration"))
-                        )
-                        self.leader = BiUmbraLeader(l_config)
-                        self.leader.connect(calibrate=False)
-                        print("✅ Leader Arms Connected Successfully!")
-                        
-                        # Initialize Leader Assist Services
-                        self.leader_assists = {}
-                        if hasattr(self.leader, "left_arm") and hasattr(self.leader, "right_arm"):
-                             self.leader_assists["left"] = LeaderAssistService(arm_id="left_leader")
-                             self.leader_assists["right"] = LeaderAssistService(arm_id="right_leader")
-                        else:
-                             self.leader_assists["default"] = LeaderAssistService(arm_id="leader")
-                             
-                    else:
-                        self.leader = None
-                        
-                except Exception as e:
-                    print(f"⚠️ Robot Connection Failed (will fallback to Mock): {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.robot = None
-                    self.leader = None
-
-            elif robot_cfg.get("type") == "damiao_follower":
-                # Initialize Damiao 7-DOF Follower Arm
-                print("Initializing Damiao Follower Arm...")
-                try:
-                    from lerobot.robots.damiao_follower import DamiaoFollowerRobot
-                    from lerobot.robots.damiao_follower.config_damiao_follower import DamiaoFollowerConfig
-
-                    damiao_config = DamiaoFollowerConfig(
-                        port=robot_cfg.get("port", "/dev/ttyUSB0"),
-                        velocity_limit=robot_cfg.get("velocity_limit", 0.2),  # Default 20% for safety
-                        max_gripper_torque=robot_cfg.get("max_gripper_torque", 1.0),
-                        motor_config=robot_cfg.get("motor_config", None),  # Use default if not specified
-                        cameras=cameras
-                    )
-
-                    self.robot = DamiaoFollowerRobot(damiao_config)
-                    self.robot.connect()
-                    print(f"✅ Damiao Follower Connected (velocity_limit={damiao_config.velocity_limit})")
-
-                    # Initialize Leader if configured (Dynamixel XL330 for low-friction teleop)
-                    if teleop_cfg and teleop_cfg.get("type") in ["bi_umbra_leader", "dynamixel_leader"]:
-                        print("Initializing Leader Arms for Damiao teleop...")
-                        from lerobot.teleoperators.bi_umbra_leader.bi_umbra_leader import BiUmbraLeader
-                        from lerobot.teleoperators.bi_umbra_leader.config_bi_umbra_leader import BiUmbraLeaderConfig
-
-                        l_config = BiUmbraLeaderConfig(
-                            id="damiao_leader",
-                            left_arm_port=teleop_cfg.get("left_arm_port"),
-                            right_arm_port=teleop_cfg.get("right_arm_port"),
-                            calibration_dir=Path(teleop_cfg.get("calibration_dir", ".cache/calibration"))
-                        )
-                        self.leader = BiUmbraLeader(l_config)
-                        self.leader.connect(calibrate=False)
-                        print("✅ Leader Arms Connected for Damiao teleop!")
-
-                        # Initialize Leader Assist Services
-                        self.leader_assists = {}
-                        if hasattr(self.leader, "left_arm") and hasattr(self.leader, "right_arm"):
-                            self.leader_assists["left"] = LeaderAssistService(arm_id="left_leader")
-                            self.leader_assists["right"] = LeaderAssistService(arm_id="right_leader")
-                        else:
-                            self.leader_assists["default"] = LeaderAssistService(arm_id="leader")
-                    else:
-                        self.leader = None
-
-                except ImportError as e:
-                    print(f"⚠️ Damiao driver not available: {e}")
-                    self.robot = None
-                    self.leader = None
-                except Exception as e:
-                    print(f"⚠️ Damiao Connection Failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self.robot = None
-                    self.leader = None
-
-            else:
-                print(f"Unknown robot type: {robot_cfg.get('type')}. Skipping connection.")
-                self.robot = None
-                self.leader = None
-
-        except Exception as e:
-            import traceback
-            err_msg = f"⚠️ Failed to connect robot: {e}\n{traceback.format_exc()}"
-            print(err_msg)
-            with open("startup_error.log", "w") as f:
-                f.write(err_msg)
-                
-            print("Falling back to Mock Robot for MVP.")
-            self.robot = None
-            self.leader = None
-
-        self.recorder = DataRecorder(repo_id="roberto/nextis_data", robot_type="bi_umbra_follower")
-        
-        # We need a mock robot for the orchestrator if real one isn't there
-        if self.robot is None:
-            from unittest.mock import MagicMock
-            self.robot = MagicMock()
-            self.robot.is_connected = False
-            self.robot.is_mock = True # Flag as Mock
-            self.robot.is_calibrated = True # Allow teleop start
-            
-            # Mock Features for LeRobotDataset
-            # We must match what LeRobot expects for a generic robot, or minimal set.
-            # Minimal 6-DOF arm + 1 Camera
-            from lerobot.configs.types import FeatureType
-            self.robot.robot_type = "mock_robot"
-            self.robot.observation_features = {
-                "observation.state": {"dtype": "float32", "shape": (6,), "names": ["base", "shoulder", "elbow", "wrist_1", "wrist_2", "gripper"]},
-                "observation.images.phone": {"dtype": "image", "shape": (480, 640, 3), "names": ["height", "width", "channels"]}
-            }
-            self.robot.action_features = {
-                "action": {"dtype": "float32", "shape": (6,), "names": ["base", "shoulder", "elbow", "wrist_1", "wrist_2", "gripper"]}
-            }
-            
-            # Mock Data Generator
-            import numpy as np
-            import torch
-            
-            def mock_get_observation():
-                 # Return items matching features
-                 return {
-                     "observation.state": torch.zeros(6),
-                     "observation.images.phone": torch.zeros((3, 480, 640)) # Channel First for LeRobot internals? Or HWC?
-                                                                           # Robot.get_observation usually returns torch tensors C,H,W
-                 }
-            
-            self.robot.get_observation.side_effect = mock_get_observation
-            self.robot.capture_observation.return_value = {} # Legacy fallback
-
-        self.orchestrator = TaskOrchestrator(self.robot, self.recorder, robot_lock=self.lock)
-        self.orchestrator.start() # Start the orchestrator and intervention engine
-        
-
-
-        # Initialize Planner
-        try:
-            from app.core.planner import LocalPlanner, GeminiPlanner
-            
-            gemini_key = os.getenv("GEMINI_API_KEY")
-            if gemini_key and gemini_key.strip():
-                print("✨ GEMINI_API_KEY found! Using GeminiPlanner.")
-                self.planner = GeminiPlanner(api_key=gemini_key)
-            else:
-                print("⚠️ GEMINI_API_KEY not found. Using LocalPlanner (Qwen).")
-                self.planner = LocalPlanner("Qwen/Qwen2.5-7B-Instruct", device="cuda")
-                
-        except Exception as e:
-            print(f"⚠️ Failed to load Planner: {e}")
-            self.planner = None
-            
-        # Initialize Arm Registry Service (always, for UI access)
+        # 3. Arm Registry (reads config only, no hardware)
         try:
             from app.core.arm_registry import ArmRegistryService
             self.arm_registry = ArmRegistryService(config_path="app/config/settings.yaml")
             print(f"Arm Registry initialized: {self.arm_registry.get_status_summary()}")
         except Exception as e:
-            print(f"⚠️ Failed to initialize Arm Registry: {e}")
+            print(f"Warning: Arm Registry init failed: {e}")
             self.arm_registry = None
 
-        if self.robot or self.leader:
-            self.calibration_service = CalibrationService(self.robot, self.leader, robot_lock=self.lock, arm_registry=self.arm_registry)
-            self.calibration_service.restore_active_profiles()
+        # 4. Data Recorder
+        self.recorder = DataRecorder(repo_id="roberto/nextis_data", robot_type="bi_umbra_follower")
 
-            # Initialize Teleoperation with arm registry
-            self.teleop_service = TeleoperationService(self.robot, self.leader, self.lock, leader_assists=getattr(self, 'leader_assists', {}), arm_registry=self.arm_registry)
+        # 5. CalibrationService (works with robot=None, uses arm_registry)
+        self.calibration_service = CalibrationService(
+            robot=None, leader=None, robot_lock=self.lock,
+            arm_registry=self.arm_registry
+        )
 
-            # Initialize HIL (Human-in-the-Loop) Service
-            if self.teleop_service and self.orchestrator and self.training_service:
-                from app.core.hil_service import HILService
-                self.hil_service = HILService(
-                    teleop_service=self.teleop_service,
-                    orchestrator=self.orchestrator,
-                    training_service=self.training_service,
-                    robot_lock=self.lock
-                )
-                print("HIL Service initialized")
+        # 6. TeleoperationService (works with robot=None, uses arm_registry)
+        self.teleop_service = TeleoperationService(
+            robot=None, leader=None, robot_lock=self.lock,
+            leader_assists={}, arm_registry=self.arm_registry
+        )
 
-            # Initialize Reward Classifier Service
-            from app.core.reward_classifier_service import RewardClassifierService
-            self.reward_classifier_service = RewardClassifierService()
-            print("Reward Classifier Service initialized")
+        # 7. Orchestrator with minimal mock robot
+        from unittest.mock import MagicMock
+        mock = MagicMock()
+        mock.is_connected = False
+        mock.is_mock = True
+        mock.is_calibrated = True
+        mock.robot_type = "mock_robot"
+        mock.observation_features = {}
+        mock.action_features = {}
+        self.robot = mock
 
-            # Initialize GVL Reward Service
-            from app.core.gvl_reward_service import GVLRewardService
-            self.gvl_reward_service = GVLRewardService()
-            print("GVL Reward Service initialized")
+        self.orchestrator = TaskOrchestrator(self.robot, self.recorder, robot_lock=self.lock)
+        self.orchestrator.start()
 
-            # Initialize SARM Reward Service
-            from app.core.sarm_reward_service import SARMRewardService
-            self.sarm_reward_service = SARMRewardService()
-            print("SARM Reward Service initialized")
+        # 8. Reward / RL services (lightweight inits)
+        from app.core.reward_classifier_service import RewardClassifierService
+        self.reward_classifier_service = RewardClassifierService()
+        from app.core.gvl_reward_service import GVLRewardService
+        self.gvl_reward_service = GVLRewardService()
+        from app.core.sarm_reward_service import SARMRewardService
+        self.sarm_reward_service = SARMRewardService()
 
-            # Initialize RL Service
-            if self.robot and self.teleop_service:
-                from app.core.rl_service import RLService
-                self.rl_service = RLService(
-                    robot=self.robot,
-                    leader=self.leader,
-                    teleop_service=self.teleop_service,
-                    camera_service=self.camera_service,
-                    calibration_service=self.calibration_service,
-                    reward_classifier_service=self.reward_classifier_service,
-                    gvl_reward_service=self.gvl_reward_service,
-                    sarm_reward_service=self.sarm_reward_service,
-                    robot_lock=self.lock,
-                )
-                print("RL Service initialized")
+        # 9. HIL Service
+        from app.core.hil_service import HILService
+        self.hil_service = HILService(
+            teleop_service=self.teleop_service,
+            orchestrator=self.orchestrator,
+            training_service=self.training_service,
+            robot_lock=self.lock
+        )
 
+        # NOTE: Planner is lazy-loaded on first /chat request
+        self.planner = None
+
+        print("System ready (connect arms via UI when needed)")
 
     def reload(self):
         print("Reloading System...")
@@ -800,59 +272,12 @@ def delayed_restart():
 
 @app.post("/system/reconnect")
 def reconnect_system(background_tasks: BackgroundTasks):
-    """Attempts to re-initialize hardware without killing the server."""
+    """Reinitialize services (arms are connected via UI)."""
     if system.is_initializing:
         return {"status": "busy", "message": "Already initializing..."}
-        
-    print("Manual Reconnect Requested.")
-    
-    def async_init():
-        max_retries = 3
-        for attempt in range(max_retries):
-            print(f"Reconnect Attempt {attempt+1}/{max_retries}...")
-            
-            # 1. Force Disconnect with Safety
-            with system.lock:
-                # Disconnect Robot
-                if system.robot:
-                    try: 
-                        print("Disconnecting Robot...")
-                        system.robot.disconnect()
-                    except Exception as e: 
-                        print(f"Warning: Robot disconnect failed: {e}")
-                    system.robot = None
-                    
-                # Disconnect Leader
-                if system.leader:
-                    try: 
-                        print("Disconnecting Leader...")
-                        system.leader.disconnect()
-                    except Exception as e: 
-                        print(f"Warning: Leader disconnect failed: {e}")
-                    system.leader = None
-            
-            # 2. Wait for OS to release ports (Critical)
-            import time
-            print("Waiting for ports to release...")
-            time.sleep(2.0)
-            
-            # 3. Try Initialize
-            print("Initializing System...")
-            system.initialize()
-            
-            # 4. Check Success
-            if not system.init_error and system.robot and system.robot.is_connected:
-                print("Reconnect SUCCESS!")
-                return
-            
-            # 5. If failed, wait before retry
-            print(f"Reconnect Failed (Error: {system.init_error}). Retrying in 3s...")
-            time.sleep(3.0)
-            
-        print("All Reconnect Attempts Failed.")
-
-    background_tasks.add_task(async_init)
-    return {"status": "initializing", "message": "Reconnecting hardware..."}
+    print("Manual Reconnect Requested — reinitializing services...")
+    background_tasks.add_task(system.initialize)
+    return {"status": "initializing", "message": "Reinitializing services..."}
 
 class ChatRequest(BaseModel):
     message: str
@@ -923,11 +348,13 @@ def get_config():
 
 @app.post("/execute")
 async def execute_endpoint(request: Request, background_tasks: BackgroundTasks):
+    if not system.orchestrator:
+        return {"status": "error", "message": "Orchestrator not initialized"}
     data = await request.json()
     plan = data.get("plan")
     if not plan:
         return {"status": "error", "message": "No plan provided"}
-    
+
     background_tasks.add_task(system.orchestrator.execute_plan, plan)
     return {"status": "success", "message": "Execution started"}
 
@@ -936,12 +363,26 @@ async def chat_endpoint(request: Request):
     data = await request.json()
     user_msg = data.get("message", "").lower()
     messages = data.get("messages", []) # Full conversation history
-    
+
+    # Lazy-load planner on first use
+    if system.planner is None:
+        try:
+            from app.core.planner import LocalPlanner, GeminiPlanner
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            if gemini_key and gemini_key.strip():
+                print("Lazy-loading GeminiPlanner...")
+                system.planner = GeminiPlanner(api_key=gemini_key)
+            else:
+                print("Lazy-loading LocalPlanner (Qwen)...")
+                system.planner = LocalPlanner("Qwen/Qwen2.5-7B-Instruct", device="cuda")
+        except Exception as e:
+            print(f"Warning: Planner load failed: {e}")
+
     # Simple keyword matching for MVP
     actions = []
     response = ""
     plan = []
-    
+
     if "stop" in user_msg:
         actions = []
         response = "Stopping all tasks."
@@ -2067,6 +1508,18 @@ def emergency_stop():
         except Exception as e:
              errors.append(f"Leader_Outer: {e}")
 
+    # 4. Force Disable Torque - ARM REGISTRY ARMS
+    if system.arm_registry and hasattr(system.arm_registry, 'arm_instances'):
+        for arm_id, instance in list(system.arm_registry.arm_instances.items()):
+            try:
+                if hasattr(instance, 'bus'):
+                    disable_bus_robust(instance.bus, f"Registry_{arm_id}")
+                elif hasattr(instance, 'left_arm'):
+                    disable_bus_robust(instance.left_arm.bus, f"Registry_{arm_id}_Left")
+                    disable_bus_robust(instance.right_arm.bus, f"Registry_{arm_id}_Right")
+            except Exception as e:
+                errors.append(f"Registry_{arm_id}: {e}")
+
     if errors:
         return {"status": "partial_success", "errors": errors}
     return {"status": "success", "message": "EMERGENCY STOP EXECUTED"}
@@ -2318,8 +1771,10 @@ async def delete_calibration_file(arm_id: str, request: Request):
 @app.get("/calibration/{arm_id}/inversions")
 def get_inversions(arm_id: str):
     if not system.calibration_service:
-        return {"inversions": {}}
-    return {"inversions": system.calibration_service.get_inversions(arm_id)}
+        return {"inversions": {}, "motors": []}
+    inversions = system.calibration_service.get_inversions(arm_id)
+    _, motors = system.calibration_service._get_arm_context(arm_id)
+    return {"inversions": inversions, "motors": motors}
 
 @app.post("/calibration/{arm_id}/inversions")
 async def set_inversion(arm_id: str, payload: dict):
@@ -2360,16 +1815,30 @@ async def save_named_calibration(arm_id: str, request: Request):
     return {"status": "saved"}
 
 @app.post("/calibration/{arm_id}/discovery/start")
-async def start_discovery(arm_id: str):
-    if system.calibration_service:
+def start_discovery(arm_id: str):
+    """Start range discovery. Runs in threadpool (def not async) to avoid blocking
+    the event loop during serial I/O and lock acquisition."""
+    if not system.calibration_service:
+        return {"status": "error", "message": "Calibration service not initialized"}
+    try:
         system.calibration_service.start_discovery(arm_id)
-    return {"status": "started"}
+        return {"status": "started"}
+    except Exception as e:
+        logger.error(f"start_discovery failed: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 @app.post("/calibration/{arm_id}/discovery/stop")
-async def stop_discovery(arm_id: str):
-    if system.calibration_service:
-        system.calibration_service.stop_discovery(arm_id)
-    return {"status": "stopped"}
+def stop_discovery(arm_id: str):
+    """Stop range discovery. Runs in threadpool (def not async) to avoid blocking
+    the event loop during serial I/O and lock acquisition."""
+    if not system.calibration_service:
+        return {"status": "error", "message": "Calibration service not initialized"}
+    try:
+        result = system.calibration_service.stop_discovery(arm_id)
+        return result
+    except Exception as e:
+        logger.error(f"stop_discovery failed: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 # --- Damiao Velocity Limiter Endpoints ---
 
@@ -2383,11 +1852,20 @@ async def get_velocity_limit():
     if system.robot and hasattr(system.robot, 'velocity_limit'):
         return {"velocity_limit": system.robot.velocity_limit, "has_velocity_limit": True}
 
-    # Check if teleop service has a damiao robot
-    if system.teleop_service and hasattr(system.teleop_service, 'robot'):
-        robot = system.teleop_service.robot
-        if hasattr(robot, 'velocity_limit'):
+    # Check teleop service's active robot (set during teleop start from arm registry)
+    if system.teleop_service:
+        active = getattr(system.teleop_service, '_active_robot', None)
+        if active and hasattr(active, 'velocity_limit'):
+            return {"velocity_limit": active.velocity_limit, "has_velocity_limit": True}
+        robot = getattr(system.teleop_service, 'robot', None)
+        if robot and hasattr(robot, 'velocity_limit'):
             return {"velocity_limit": robot.velocity_limit, "has_velocity_limit": True}
+
+    # Check arm registry for any connected Damiao follower
+    if system.arm_registry:
+        for arm_id, instance in system.arm_registry.arm_instances.items():
+            if hasattr(instance, 'velocity_limit'):
+                return {"velocity_limit": instance.velocity_limit, "has_velocity_limit": True}
 
     return {"velocity_limit": 1.0, "has_velocity_limit": False}
 
@@ -2410,13 +1888,26 @@ async def set_velocity_limit(request: Request):
         updated = True
         logger.info(f"Set velocity_limit to {limit:.2f} on main robot")
 
-    # Update teleop service robot if applicable
-    if system.teleop_service and hasattr(system.teleop_service, 'robot'):
-        robot = system.teleop_service.robot
-        if hasattr(robot, 'velocity_limit'):
+    # Update teleop service's active robot and legacy robot
+    if system.teleop_service:
+        active = getattr(system.teleop_service, '_active_robot', None)
+        if active and hasattr(active, 'velocity_limit'):
+            active.velocity_limit = limit
+            updated = True
+            logger.info(f"Set velocity_limit to {limit:.2f} on teleop active robot")
+        robot = getattr(system.teleop_service, 'robot', None)
+        if robot and hasattr(robot, 'velocity_limit') and robot is not active:
             robot.velocity_limit = limit
             updated = True
             logger.info(f"Set velocity_limit to {limit:.2f} on teleop robot")
+
+    # Update any Damiao followers in arm registry
+    if system.arm_registry:
+        for arm_id, instance in system.arm_registry.arm_instances.items():
+            if hasattr(instance, 'velocity_limit'):
+                instance.velocity_limit = limit
+                updated = True
+                logger.info(f"Set velocity_limit to {limit:.2f} on arm_registry/{arm_id}")
 
     if updated:
         return {"status": "ok", "velocity_limit": limit}
@@ -2564,8 +2055,9 @@ async def remove_arm(arm_id: str):
     return result
 
 @app.post("/arms/{arm_id}/connect")
-async def connect_arm(arm_id: str):
-    """Connect a specific arm."""
+def connect_arm(arm_id: str):
+    """Connect a specific arm. Runs in threadpool (def not async) to avoid blocking
+    the event loop during serial port connection and motor configuration."""
     if not system.arm_registry:
         return JSONResponse(status_code=400, content={"error": "Arm registry not initialized"})
     result = system.arm_registry.connect_arm(arm_id)
@@ -2574,12 +2066,49 @@ async def connect_arm(arm_id: str):
     return result
 
 @app.post("/arms/{arm_id}/disconnect")
-async def disconnect_arm(arm_id: str):
-    """Disconnect a specific arm."""
+def disconnect_arm(arm_id: str):
+    """Disconnect a specific arm. Runs in threadpool (def not async) to avoid blocking
+    the event loop during serial port disconnection."""
     if not system.arm_registry:
         return JSONResponse(status_code=400, content={"error": "Arm registry not initialized"})
     result = system.arm_registry.disconnect_arm(arm_id)
     return result
+
+@app.post("/arms/{arm_id}/set-home")
+def set_home_position(arm_id: str):
+    """Capture current motor positions as home position for this arm."""
+    if not system.arm_registry:
+        return JSONResponse(status_code=400, content={"error": "Arm registry not initialized"})
+
+    instance = system.arm_registry.arm_instances.get(arm_id)
+    if not instance or not getattr(instance, 'is_connected', False):
+        return JSONResponse(status_code=400, content={"error": f"Arm '{arm_id}' not connected"})
+
+    from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+    bus = getattr(instance, 'bus', None)
+    if not bus or not isinstance(bus, DamiaoMotorsBus):
+        return JSONResponse(status_code=400, content={"error": "Not a Damiao arm"})
+
+    positions = dict(bus._last_positions)
+    if not positions:
+        return JSONResponse(status_code=400, content={"error": "No position data available"})
+
+    result = system.arm_registry.update_arm(arm_id, config={"home_position": positions})
+    if result.get("success"):
+        return {"success": True, "home_position": {k: round(v, 4) for k, v in positions.items()}}
+    return JSONResponse(status_code=400, content=result)
+
+@app.delete("/arms/{arm_id}/set-home")
+async def clear_home_position(arm_id: str):
+    """Clear saved home position for this arm."""
+    if not system.arm_registry:
+        return JSONResponse(status_code=400, content={"error": "Arm registry not initialized"})
+    arm = system.arm_registry.arms.get(arm_id)
+    if not arm:
+        return JSONResponse(status_code=404, content={"error": f"Arm '{arm_id}' not found"})
+    arm.config.pop("home_position", None)
+    system.arm_registry._save_config()
+    return {"success": True}
 
 @app.get("/arms/{leader_id}/compatible-followers")
 async def get_compatible_followers(leader_id: str):

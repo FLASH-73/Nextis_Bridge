@@ -98,10 +98,17 @@ class DamiaoFollowerRobot(Robot):
             baudrate=config.baudrate,
             motors=config.motor_config,
             velocity_limit=config.velocity_limit,
+            skip_pid_config=getattr(config, 'skip_pid_config', False),
+            # MIT mode settings (recommended over POS_VEL for stability)
+            use_mit_mode=getattr(config, 'use_mit_mode', True),
+            mit_kp=getattr(config, 'mit_kp', 15.0),
+            mit_kd=getattr(config, 'mit_kd', 1.5),
         )
 
         self.bus = DamiaoMotorsBus(bus_config)
-        self.calibration = {}  # For compatibility with calibration service
+        if not self.calibration:
+            self.calibration = {}  # Only init if parent didn't load from HF cache
+        self.motor_inversions = {}  # Loaded from calibration_profiles/{arm_id}/inversions.json
 
         # Gripper positions
         self.gripper_open_pos = config.gripper_open_pos
@@ -161,6 +168,40 @@ class DamiaoFollowerRobot(Robot):
         """Calibration (not needed for Damiao - absolute encoders)."""
         pass
 
+    def apply_calibration_limits(self) -> None:
+        """Push calibrated joint limits to the motor bus for runtime enforcement.
+
+        Called after loading a calibration profile or completing range discovery.
+        Overrides hardcoded defaults in tables.py with user-calibrated ranges.
+        """
+        limits = {}
+        for name, cal in self.calibration.items():
+            if hasattr(cal, 'range_min') and hasattr(cal, 'range_max'):
+                limits[name] = (cal.range_min, cal.range_max)
+        if limits:
+            self.bus.update_joint_limits(limits)
+            logger.info(f"[DamiaoFollower] Applied calibrated limits for {len(limits)} motors")
+
+    def reload_inversions(self):
+        """Load motor inversion settings from calibration_profiles/{arm_id}/inversions.json."""
+        import json
+        from pathlib import Path
+
+        arm_id = self.id or "aira_zero"
+        project_root = Path(__file__).resolve().parent.parent.parent.parent.parent.parent
+        profile_path = project_root / "calibration_profiles" / arm_id / "inversions.json"
+
+        self.motor_inversions = {}
+        if profile_path.exists():
+            try:
+                with open(profile_path, "r") as f:
+                    self.motor_inversions = json.load(f)
+                logger.info(f"[DamiaoFollower] Loaded inversions for {arm_id}: {self.motor_inversions}")
+            except Exception as e:
+                logger.error(f"[DamiaoFollower] Failed to load inversions: {e}")
+        else:
+            logger.info(f"[DamiaoFollower] No inversions file at {profile_path}")
+
     def configure(self) -> None:
         """Configure motors (called during connect)."""
         if self.bus.is_connected:
@@ -176,17 +217,32 @@ class DamiaoFollowerRobot(Robot):
 
         # Connect motor bus
         self.bus.connect()
-        self.bus.configure()
+        try:
+            self.bus.configure()
 
-        # Home gripper (finds open position)
-        if getattr(self.config, 'skip_gripper_homing', False):
-            logger.info("[DamiaoFollower] Skipping gripper homing (config)")
-        else:
-            self.bus.home_gripper()
+            # Push calibrated joint limits to bus (overrides narrow defaults from tables.py)
+            if self.calibration:
+                self.apply_calibration_limits()
 
-        # Connect cameras
-        for cam in self.cameras.values():
-            cam.connect()
+            # Home gripper (finds open position)
+            if getattr(self.config, 'skip_gripper_homing', False):
+                logger.info("[DamiaoFollower] Skipping gripper homing (config)")
+            else:
+                self.bus.home_gripper()
+
+            # Connect cameras
+            for cam in self.cameras.values():
+                cam.connect()
+
+        except Exception:
+            # SAFETY: On any failure, shut down CAN bus properly to prevent
+            # orphaned recv threads and motor state leaks on retry
+            logger.error("[DamiaoFollower] Connection failed — disconnecting bus for safe cleanup")
+            try:
+                self.bus.disconnect(disable_torque=True)
+            except Exception as cleanup_err:
+                logger.warning(f"[DamiaoFollower] Cleanup disconnect failed: {cleanup_err}")
+            raise
 
         logger.info(f"[DamiaoFollower] Connected successfully")
 
@@ -215,6 +271,13 @@ class DamiaoFollowerRobot(Robot):
                 obs_dict[f"{name}.pos"] = norm_pos
             else:
                 obs_dict[f"{name}.pos"] = pos
+
+        # Apply inversions for consistent logical positions
+        if self.motor_inversions:
+            for motor, is_inverted in self.motor_inversions.items():
+                key = f"{motor}.pos"
+                if is_inverted and key in obs_dict and motor != "gripper":
+                    obs_dict[key] = -obs_dict[key]
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"[DamiaoFollower] Read state: {dt_ms:.1f}ms")
@@ -250,18 +313,34 @@ class DamiaoFollowerRobot(Robot):
                 motor_name = key.removesuffix(".pos")
                 goal_pos[motor_name] = val
 
-        # Apply joint limits
-        for motor_name, limits in self.config.joint_limits.items():
-            if motor_name in goal_pos:
-                goal_pos[motor_name] = np.clip(goal_pos[motor_name], limits[0], limits[1])
-
-        # Handle gripper specially (with force limiting)
+        # Convert gripper from normalized to radians FIRST (before joint limits).
+        # Joint limits are in radians (-5.32, 0.0), so the gripper must be in radians
+        # before clamping. Otherwise np.clip(0.8, -5.32, 0.0) = 0.0 — always open!
         if "gripper" in goal_pos:
-            gripper_norm = goal_pos.pop("gripper")
-            gripper_pos = map_range(
-                gripper_norm, 0.0, 1.0, self.gripper_open_pos, self.gripper_closed_pos
+            raw = goal_pos["gripper"]
+            if raw > 2.0:  # Umbra leader sends 0-100 (RANGE_0_100)
+                raw = raw / 100.0
+            raw = np.clip(raw, 0.0, 1.0)  # Defensive clamp to prevent out-of-range torque
+            goal_pos["gripper"] = map_range(
+                raw, 0.0, 1.0, self.gripper_open_pos, self.gripper_closed_pos
             )
-            self.bus.send_gripper_command(gripper_pos, self.config.max_gripper_torque)
+
+        # Apply motor inversions (before joint limits clipping)
+        if self.motor_inversions:
+            for motor, is_inverted in self.motor_inversions.items():
+                if is_inverted and motor in goal_pos and motor != "gripper":
+                    goal_pos[motor] = -goal_pos[motor]
+
+        # Apply joint limits (prefer calibrated ranges, fall back to config defaults)
+        for motor_name in list(goal_pos.keys()):
+            if motor_name in self.calibration and hasattr(self.calibration[motor_name], 'range_min'):
+                cal = self.calibration[motor_name]
+                lo, hi = cal.range_min, cal.range_max
+            elif motor_name in self.config.joint_limits:
+                lo, hi = self.config.joint_limits[motor_name]
+            else:
+                continue
+            goal_pos[motor_name] = np.clip(goal_pos[motor_name], lo, hi)
 
         # Send joint positions (velocity limited by bus)
         if goal_pos:
@@ -269,8 +348,6 @@ class DamiaoFollowerRobot(Robot):
 
         # Return what we sent
         result = {f"{m}.pos": v for m, v in goal_pos.items()}
-        if "gripper" in action:
-            result["gripper.pos"] = action.get("gripper.pos", action.get("gripper"))
         return result
 
     def disconnect(self) -> None:

@@ -21,8 +21,9 @@ class DynamixelLeaderConfig(TeleoperatorConfig):
     port: str = "/dev/ttyACM0"
 
     # Gripper position calibration (raw motor values)
-    gripper_open_pos: int = 2280
-    gripper_closed_pos: int = 1670
+    # Ticks decrease when squeezed: open=2820, closed=2280
+    gripper_open_pos: int = 2820
+    gripper_closed_pos: int = 2280
 
     # Optional: structural design hint for pairing compatibility
     structural_design: str = ""  # e.g., "damiao_7dof", "umbra_7dof"

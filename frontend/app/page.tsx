@@ -156,9 +156,13 @@ export default function Dashboard() {
       });
       if (res.ok) {
         setVelocityLimit(newLimit);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        console.warn("Velocity limit update rejected:", res.status, err);
       }
     } catch (e) {
-      console.error("Failed to update velocity limit:", e);
+      // "Failed to fetch" = backend unreachable (crashed or not started)
+      console.warn("Velocity limit update failed (backend unreachable?):", e);
     } finally {
       setIsUpdatingVelocity(false);
     }

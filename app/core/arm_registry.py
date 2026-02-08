@@ -508,8 +508,9 @@ class ArmRegistryService:
                 from lerobot.robots.damiao_follower import DamiaoFollowerRobot
                 from lerobot.robots.damiao_follower.config_damiao_follower import DamiaoFollowerConfig
                 config = DamiaoFollowerConfig(
+                    id=arm.id,
                     port=arm.port,
-                    velocity_limit=arm.config.get("velocity_limit", 0.1),
+                    velocity_limit=arm.config.get("velocity_limit", 0.3),
                     cameras={},
                 )
                 robot = DamiaoFollowerRobot(config)

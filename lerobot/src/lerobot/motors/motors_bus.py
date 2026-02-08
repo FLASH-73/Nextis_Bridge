@@ -263,6 +263,7 @@ class MotorsBus(abc.ABC):
         self.port = port
         self.motors = motors
         self.calibration = calibration if calibration else {}
+        self._software_homing_offsets: dict[int, int] = {}  # motor_id → offset (applied in read path)
 
         self.port_handler: PortHandler
         self.packet_handler: PacketHandler
@@ -676,20 +677,25 @@ class MotorsBus(abc.ABC):
         elif not isinstance(motors, list):
             raise TypeError(motors)
 
+        import time
+
         for motor in motors:
             model = self._get_motor_model(motor)
             max_res = self.model_resolution_table[model] - 1
             self.write("Homing_Offset", motor, 0, normalize=False)
             self.write("Min_Position_Limit", motor, 0, normalize=False)
             self.write("Max_Position_Limit", motor, max_res, normalize=False)
+            time.sleep(0.01)  # Let EEPROM commit before next motor
 
         self.calibration = {}
+        self._software_homing_offsets = {}
 
     def set_half_turn_homings(self, motors: NameOrID | list[NameOrID] | None = None) -> dict[NameOrID, Value]:
         """Centre each motor range around its current position.
 
         The function computes and writes a homing offset such that the present position becomes exactly one
-        half-turn (e.g. `2047` on a 12-bit encoder).
+        half-turn (e.g. `2047` on a 12-bit encoder).  Uses per-motor register readback verification to
+        confirm EEPROM writes succeeded.
 
         Args:
             motors (NameOrID | list[NameOrID] | None, optional): Motors to adjust. Defaults to all motors (`None`).
@@ -697,6 +703,8 @@ class MotorsBus(abc.ABC):
         Returns:
             dict[NameOrID, Value]: Mapping *motor → written homing offset*.
         """
+        import time
+
         if motors is None:
             motors = list(self.motors)
         elif isinstance(motors, (str | int)):
@@ -704,11 +712,51 @@ class MotorsBus(abc.ABC):
         elif not isinstance(motors, list):
             raise TypeError(motors)
 
+        model = self._get_motor_model(motors[0])
+        target = int((self.model_resolution_table[model] - 1) / 2)
+
+        # Step 0: Verify torque is actually disabled (EEPROM writes are silently ignored if torque is on)
+        for motor in motors:
+            for t_attempt in range(3):
+                torque = self.read("Torque_Enable", motor, normalize=False)
+                if torque == 0:
+                    break
+                logger.warning(f"{motor}: Torque still enabled ({torque}), retrying disable")
+                self.write("Torque_Enable", motor, 0, normalize=False)
+                time.sleep(0.05)
+            else:
+                logger.error(f"{motor}: Failed to disable torque after 3 attempts!")
+
+        # Step 1: Reset all calibrations (Homing_Offset=0, full position range)
         self.reset_calibration(motors)
+        time.sleep(0.2)  # Allow EEPROM commits to fully propagate
+
+        # Step 2: Read raw positions and calculate offsets
         actual_positions = self.sync_read("Present_Position", motors, normalize=False)
         homing_offsets = self._get_half_turn_homings(actual_positions)
+        logger.info(f"Homing offsets calculated: {homing_offsets} (from positions: {actual_positions})")
+
+        # Step 3: Store offsets in software (bypasses unreliable motor firmware)
+        # Motor's Homing_Offset register stays at 0; offset applied in read()/sync_read()
         for motor, offset in homing_offsets.items():
-            self.write("Homing_Offset", motor, offset)
+            motor_id = self.motors[motor].id
+            self._software_homing_offsets[motor_id] = offset
+            logger.debug(f"{motor} (id={motor_id}): software homing offset = {offset}")
+
+        # Step 4: Verify — read() now applies software offset automatically
+        bad = {}
+        for motor in motors:
+            pos = self.read("Present_Position", motor, normalize=False)
+            if abs(pos - target) > 10:
+                bad[motor] = pos
+
+        if not bad:
+            logger.info(f"Homing verified OK (all motors within ±10 of {target})")
+        else:
+            for motor, pos in bad.items():
+                logger.error(
+                    f"{motor}: Homing FAILED — Present_Position={pos} (expected ~{target})"
+                )
 
         return homing_offsets
 
@@ -945,6 +993,10 @@ class MotorsBus(abc.ABC):
 
         id_value = self._decode_sign(data_name, {id_: value})
 
+        # Apply software homing offset for Present_Position
+        if data_name == "Present_Position" and id_ in self._software_homing_offsets:
+            id_value[id_] += self._software_homing_offsets[id_]
+
         if normalize and data_name in self.normalized_data:
             id_value = self._normalize(id_value)
 
@@ -1090,6 +1142,12 @@ class MotorsBus(abc.ABC):
         )
 
         ids_values = self._decode_sign(data_name, ids_values)
+
+        # Apply software homing offsets for Present_Position
+        if data_name == "Present_Position" and self._software_homing_offsets:
+            for id_ in ids_values:
+                if id_ in self._software_homing_offsets:
+                    ids_values[id_] += self._software_homing_offsets[id_]
 
         if normalize and data_name in self.normalized_data:
             ids_values = self._normalize(ids_values)

@@ -192,7 +192,9 @@ class DynamixelMotorsBus(MotorsBus):
 
     def write_calibration(self, calibration_dict: dict[str, MotorCalibration], cache: bool = True) -> None:
         for motor, calibration in calibration_dict.items():
-            self.write("Homing_Offset", motor, calibration.homing_offset)
+            # Keep motor's Homing_Offset at 0; apply offset in software
+            # (bypasses XL330 firmware bug where Homing_Offset doesn't affect Present_Position)
+            self._software_homing_offsets[self.motors[motor].id] = calibration.homing_offset
             self.write("Min_Position_Limit", motor, calibration.range_min)
             self.write("Max_Position_Limit", motor, calibration.range_max)
 
