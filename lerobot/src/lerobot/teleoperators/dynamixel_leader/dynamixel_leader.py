@@ -160,6 +160,25 @@ class DynamixelLeader(Teleoperator):
         # Now ramp smoothly to the spring-open target
         self.bus.write("Goal_Position", "gripper", spring_target, normalize=False)
 
+        # -- Force feedback on joint_4 (link3) --
+        # CURRENT_POSITION mode: motor's internal 1kHz PID applies force.
+        # Goal_Position = follower's position (spring target, updated at 60Hz).
+        # Goal_Current = position error magnitude (how firmly to hold).
+        if "joint_4" in self.bus.motors:
+            self.bus.write("Torque_Enable", "joint_4", 0, normalize=False)
+            self.bus.write("Operating_Mode", "joint_4", OperatingMode.CURRENT_POSITION.value, normalize=False)
+            self.bus.write("Current_Limit", "joint_4", 1750, normalize=False)
+
+            # Set Goal_Position to current position BEFORE enabling torque
+            # (prevents violent jump to stale Goal_Position)
+            j4_id = self.bus.motors["joint_4"].id
+            current_pos = self.bus.sync_read("Present_Position", "joint_4", normalize=False)
+            raw_current = current_pos["joint_4"] - self.bus._software_homing_offsets.get(j4_id, 0)
+            self.bus.write("Goal_Position", "joint_4", int(raw_current), normalize=False)
+
+            self.bus.write("Torque_Enable", "joint_4", 1, normalize=False)
+            self.bus.write("Goal_Current", "joint_4", 0, normalize=False)  # Start limp
+
     def setup_motors(self) -> None:
         """Interactive motor ID setup.
 

@@ -95,6 +95,14 @@ class TeleoperationService:
         self._ff_torque_threshold = 0.2       # Nm — dead zone (friction/gravity noise)
         self._ff_torque_saturation = 2.0      # Nm — torque at which max current is reached
 
+        # Joint Force Feedback: CURRENT_POSITION mode (same mechanism as gripper)
+        # Goal_Position = follower position, Goal_Current = error magnitude
+        self._joint_ff_enabled = True
+        self._joint_ff_k_spring = 15000.0   # mA/rad — gentler ramp for better tactile gradient
+        self._joint_ff_deadzone = 0.10      # rad (~6°) — covers normal tracking lag (0.03-0.06 rad)
+        self._joint_ff_max_current = 1750   # mA — full XL330 range
+        self._joint_ff_min_force = 100      # mA — lower entry threshold (larger deadzone means bigger initial error)
+
         # Teleop Configuration
         # Lowered to 60Hz to match lerobot default and reduce USB congestion
         self.frequency = 60
@@ -490,7 +498,39 @@ class TeleoperationService:
                          self.leader.bus.disable_torque()
             except Exception as e:
                 logger.error(f"Failed to toggle Leader Assist State: {e}")
-        
+
+    def get_force_feedback_state(self) -> dict:
+        """Return current force feedback toggle states."""
+        return {
+            "gripper": self._force_feedback_enabled,
+            "joint": self._joint_ff_enabled,
+        }
+
+    def set_force_feedback(self, gripper: bool | None = None, joint: bool | None = None):
+        """Toggle force feedback at runtime. When disabling, zero the current immediately."""
+        if gripper is not None:
+            self._force_feedback_enabled = gripper
+            logger.info(f"Gripper force feedback: {'enabled' if gripper else 'disabled'}")
+            leader = getattr(self, '_active_leader', None)
+            if not gripper and self._has_damiao_follower and leader:
+                try:
+                    leader.bus.write(
+                        "Goal_Current", "gripper", self._ff_baseline_current, normalize=False
+                    )
+                except Exception:
+                    pass
+
+        if joint is not None:
+            self._joint_ff_enabled = joint
+            logger.info(f"Joint force feedback: {'enabled' if joint else 'disabled'}")
+            leader = getattr(self, '_active_leader', None)
+            if not joint and leader:
+                try:
+                    self._active_leader.bus.write(
+                        "Goal_Current", "joint_4", 0, normalize=False
+                    )
+                except Exception:
+                    pass
 
     def check_calibration(self):
         # Check Leader Calibration
@@ -900,6 +940,15 @@ class TeleoperationService:
             except Exception as e:
                 logger.warning(f"Failed to reset gripper Goal_Current: {e}")
 
+            # Zero joint force feedback current (joint_4 → limp)
+            if self._joint_ff_enabled:
+                try:
+                    self._active_leader.bus.write(
+                        "Goal_Current", "joint_4", 0, normalize=False
+                    )
+                except Exception:
+                    pass
+
         # Home follower arm (or disable immediately if no home position)
         active_robot = getattr(self, '_active_robot', self.robot)
         if active_robot:
@@ -1148,11 +1197,6 @@ class TeleoperationService:
                     if loop_count == 0:
                         print(f"[TELEOP DEBUG] leader_action after mapping ({len(leader_action)} entries): {leader_action}", flush=True)
 
-                    # [TEMPORARY DEBUG] Gripper trace — once per second
-                    if loop_count % 60 == 0 and 'gripper.pos' in leader_action:
-                        _g_raw = obs.get('gripper.pos', -1) if obs else -1
-                        print(f"[GRIPPER] frame={loop_count} leader_val={_g_raw:.3f} follower_cmd={leader_action['gripper.pos']:.1f}", flush=True)
-
                     # 1c. Startup blend: ramp from follower's current position
                     if self._blend_start_time and leader_action:
                         # First frame: capture leader start for delta-based tracking (Dynamixel→Feetech)
@@ -1220,10 +1264,6 @@ class TeleoperationService:
                     print(f"[Teleop] Frame {loop_count}: link3.pos={leader_action['link3.pos']:.4f} "
                           f"(alpha={_alpha:.4f}, blend_active={blend_active}, "
                           f"follower_start={fstart})", flush=True)
-
-                # [TEMPORARY DEBUG] Gripper trace after blend — once per second
-                if loop_count % 60 == 0 and leader_action and 'gripper.pos' in leader_action:
-                    print(f"[GRIPPER] after_blend={leader_action['gripper.pos']:.1f}", flush=True)
 
                 # 2. Send Action IMMEDIATELY (Low Latency Control)
                 # Key insight from LeRobot: send_action and get_observation are independent.
@@ -1310,6 +1350,51 @@ class TeleoperationService:
                         except Exception as e:
                             if loop_count % 60 == 0:
                                 logger.warning(f"[FORCE_FB] Error: {e}")
+
+                        # 2a-ii. Joint force feedback: CURRENT_POSITION mode (virtual spring)
+                        # Goal_Position = follower's actual position (spring target)
+                        # Goal_Current = position error magnitude (how firmly to hold)
+                        if self._joint_ff_enabled:
+                            try:
+                                cached = self._active_robot.get_cached_positions()
+                                follower_pos = cached.get("link3", None)
+                                leader_pos = obs.get("joint_4.pos", None)
+
+                                if follower_pos is not None and leader_pos is not None:
+                                    pos_error = abs(leader_pos - follower_pos)
+
+                                    # Goal_Current: how firmly the motor holds at Goal_Position
+                                    if pos_error > self._joint_ff_deadzone:
+                                        excess = pos_error - self._joint_ff_deadzone
+                                        goal_current = min(
+                                            int(max(self._joint_ff_k_spring * excess, self._joint_ff_min_force)),
+                                            self._joint_ff_max_current,
+                                        )
+                                    else:
+                                        goal_current = 0  # Completely limp during normal tracking
+
+                                    # Goal_Position: follower's actual position (spring target)
+                                    # Convert radians → Dynamixel raw ticks
+                                    homed_ticks = int((follower_pos + np.pi) / (2 * np.pi) * 4096)
+                                    j4_id = self._active_leader.bus.motors["joint_4"].id
+                                    raw_ticks = homed_ticks - self._active_leader.bus._software_homing_offsets.get(j4_id, 0)
+
+                                    self._active_leader.bus.write(
+                                        "Goal_Position", "joint_4", int(raw_ticks), normalize=False
+                                    )
+                                    self._active_leader.bus.write(
+                                        "Goal_Current", "joint_4", goal_current, normalize=False
+                                    )
+
+                                    if loop_count % 60 == 0:
+                                        print(
+                                            f"[JOINT_FB] leader={leader_pos:.3f} follower={follower_pos:.3f} "
+                                            f"error={pos_error:.3f}rad current={goal_current}mA",
+                                            flush=True,
+                                        )
+                            except Exception as e:
+                                if loop_count % 60 == 0:
+                                    logger.warning(f"[JOINT_FB] Error: {e}")
 
                 elif self._active_robot and loop_count % 60 == 0:
                     logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")

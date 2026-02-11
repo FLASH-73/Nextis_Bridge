@@ -36,7 +36,7 @@ interface ArmManagerModalProps {
     onClose: () => void;
 }
 
-type Tab = 'arms' | 'pairings' | 'add' | 'motor_setup';
+type Tab = 'arms' | 'pairings' | 'add' | 'motor_setup' | 'haptics';
 
 const MOTOR_TYPE_COLORS: Record<string, string> = {
     sts3215: 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300',
@@ -115,6 +115,11 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
         motor?: { id: number; model_name: string; baudrate: number };
     } | null>(null);
 
+    // Force feedback (haptics) state
+    const [ffGripper, setFfGripper] = useState(true);
+    const [ffJoint, setFfJoint] = useState(true);
+    const [ffLoading, setFfLoading] = useState(false);
+
     // Fetch data on open
     useEffect(() => {
         if (isOpen) {
@@ -123,6 +128,13 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
         }
     }, [isOpen]);
 
+    // Fetch force feedback state when haptics tab is selected
+    useEffect(() => {
+        if (activeTab === 'haptics') {
+            fetchForceFeedback();
+        }
+    }, [activeTab]);
+
     const fetchArms = async () => {
         try {
             const res = await fetch(`${API_BASE}/arms`);
@@ -130,6 +142,41 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
             setArms(data.arms || []);
         } catch (e) {
             console.error('Failed to fetch arms:', e);
+        }
+    };
+
+    const fetchForceFeedback = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/teleop/force-feedback`);
+            const data = await res.json();
+            if (data.status === 'success') {
+                setFfGripper(data.gripper);
+                setFfJoint(data.joint);
+            }
+        } catch (e) {
+            console.error('Failed to fetch force feedback state:', e);
+        }
+    };
+
+    const toggleForceFeedback = async (key: 'gripper' | 'joint', value: boolean) => {
+        setFfLoading(true);
+        try {
+            const res = await fetch(`${API_BASE}/teleop/force-feedback`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ [key]: value }),
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                setFfGripper(data.gripper);
+                setFfJoint(data.joint);
+            } else {
+                setError(data.message || 'Failed to toggle force feedback');
+            }
+        } catch (e: any) {
+            setError(e.message || 'Failed to toggle force feedback');
+        } finally {
+            setFfLoading(false);
         }
     };
 
@@ -439,6 +486,7 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                         { id: 'pairings', label: 'Pairings' },
                         { id: 'add', label: 'Add Arm' },
                         { id: 'motor_setup', label: 'Motor Setup' },
+                        { id: 'haptics', label: 'Haptics' },
                     ].map(tab => (
                         <button
                             key={tab.id}
@@ -998,6 +1046,57 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                                         <li>Finally, connect <strong>gripper</strong> motor → Set ID to <strong>7</strong></li>
                                     </ol>
                                 </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Haptics Tab */}
+                    {activeTab === 'haptics' && (
+                        <div className="space-y-4">
+                            <p className="text-sm text-neutral-500 dark:text-zinc-400">
+                                Toggle force feedback channels on the leader arm during teleoperation.
+                            </p>
+
+                            {/* Gripper Force Feedback */}
+                            <div className="flex items-center justify-between p-4 bg-white/60 dark:bg-zinc-800/60 rounded-xl border border-neutral-100 dark:border-zinc-700">
+                                <div>
+                                    <h4 className="text-sm font-medium text-black dark:text-white">Gripper Force Feedback</h4>
+                                    <p className="text-xs text-neutral-500 dark:text-zinc-400 mt-1">
+                                        Resistance on leader gripper when follower contacts objects
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => toggleForceFeedback('gripper', !ffGripper)}
+                                    disabled={ffLoading}
+                                    className={`relative w-11 h-6 rounded-full transition-colors ${
+                                        ffGripper ? 'bg-green-500' : 'bg-neutral-300 dark:bg-zinc-600'
+                                    } ${ffLoading ? 'opacity-50' : ''}`}
+                                >
+                                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
+                                        ffGripper ? 'translate-x-5' : 'translate-x-0'
+                                    }`} />
+                                </button>
+                            </div>
+
+                            {/* Joint Force Feedback */}
+                            <div className="flex items-center justify-between p-4 bg-white/60 dark:bg-zinc-800/60 rounded-xl border border-neutral-100 dark:border-zinc-700">
+                                <div>
+                                    <h4 className="text-sm font-medium text-black dark:text-white">Joint Force Feedback (link3)</h4>
+                                    <p className="text-xs text-neutral-500 dark:text-zinc-400 mt-1">
+                                        Virtual spring resistance when follower arm is blocked
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => toggleForceFeedback('joint', !ffJoint)}
+                                    disabled={ffLoading}
+                                    className={`relative w-11 h-6 rounded-full transition-colors ${
+                                        ffJoint ? 'bg-green-500' : 'bg-neutral-300 dark:bg-zinc-600'
+                                    } ${ffLoading ? 'opacity-50' : ''}`}
+                                >
+                                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${
+                                        ffJoint ? 'translate-x-5' : 'translate-x-0'
+                                    }`} />
+                                </button>
                             </div>
                         </div>
                     )}

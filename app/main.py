@@ -1570,6 +1570,23 @@ async def set_teleop_assist(request: Request):
         return {"status": "success", "enabled": enabled}
     return {"status": "error", "message": "Teleop Service not running"}
 
+@app.get("/teleop/force-feedback")
+async def get_force_feedback():
+    if system.teleop_service:
+        return {"status": "success", **system.teleop_service.get_force_feedback_state()}
+    return {"status": "success", "gripper": False, "joint": False}
+
+@app.post("/teleop/force-feedback")
+async def set_force_feedback(request: Request):
+    data = await request.json()
+    if system.teleop_service:
+        system.teleop_service.set_force_feedback(
+            gripper=data.get("gripper"),
+            joint=data.get("joint"),
+        )
+        return {"status": "success", **system.teleop_service.get_force_feedback_state()}
+    return {"status": "error", "message": "Teleop service not active"}
+
 # --- Gravity Calibration (Wizard) ---
 
 def _get_calibration_target(arm_key: str):

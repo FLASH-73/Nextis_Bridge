@@ -1476,6 +1476,19 @@ class DamiaoMotorsBus:
             return result
         return self.sync_read("Present_Torque")
 
+    def read_cached_positions(self) -> dict[str, float]:
+        """Read cached motor positions (zero CAN overhead, from MIT response cache).
+
+        In MIT mode, every control_MIT() triggers a response with position data that
+        the recv thread parses into motor.state_q — no extra probes needed.
+        Returns positions in user space (MIT offset removed).
+        """
+        result = {}
+        for name, motor in self._motors.items():
+            if name not in self._quarantined_motors:
+                result[name] = motor.getPosition() - self._mit_offsets.get(name, 0.0)
+        return result
+
     def get_torque_limits(self) -> dict[str, float]:
         """Get torque limits for each motor (85% of max)."""
         limits = {}

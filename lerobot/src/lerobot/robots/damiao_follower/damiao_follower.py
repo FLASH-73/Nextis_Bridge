@@ -368,6 +368,19 @@ class DamiaoFollowerRobot(Robot):
         """Read current torques from all motors (for safety monitoring)."""
         return self.bus.read_torques()
 
+    def get_cached_positions(self) -> dict[str, float]:
+        """Get cached follower positions in logical space (zero CAN overhead).
+
+        Uses MIT response cache (no CAN reads). Applies inversions for
+        consistent coordinate space with leader.
+        """
+        positions = self.bus.read_cached_positions()
+        if self.motor_inversions:
+            for motor, is_inverted in self.motor_inversions.items():
+                if is_inverted and motor in positions and motor != "gripper":
+                    positions[motor] = -positions[motor]
+        return positions
+
     def get_torque_limits(self) -> dict[str, float]:
         """Get torque limits for each motor (85% of max)."""
         return self.bus.get_torque_limits()

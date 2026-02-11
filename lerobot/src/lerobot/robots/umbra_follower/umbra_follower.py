@@ -388,16 +388,6 @@ class UmbraFollowerRobot(Robot):
         speed_goals = {motor: default_speed for motor in goal_pos}
         self.bus.sync_write("Goal_Velocity", speed_goals)  # Correct register name for Feetech STS series
 
-        # [TEMPORARY DEBUG] Gripper trace — once per second
-        import time as _time
-        if 'gripper' in goal_pos:
-            if not hasattr(self, '_gripper_dbg_t') or _time.time() - self._gripper_dbg_t > 1.0:
-                self._gripper_dbg_t = _time.time()
-                print(f"[GRIPPER] send_action: goal_pos[gripper]={goal_pos['gripper']:.1f}", flush=True)
-        elif not hasattr(self, '_gripper_miss_warned'):
-            self._gripper_miss_warned = True
-            print(f"[GRIPPER] WARNING: 'gripper' not in goal_pos! Keys: {list(goal_pos.keys())}", flush=True)
-
         # Send goal position to the arm
         self.bus.sync_write("Goal_Position", goal_pos)
         return {f"{motor}.pos": val for motor, val in goal_pos.items() if motor in self.bus.motors and not motor.endswith("_follower")}
