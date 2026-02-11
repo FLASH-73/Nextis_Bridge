@@ -21,6 +21,7 @@
 
 import abc
 import logging
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -373,7 +374,18 @@ class MotorsBus(abc.ABC):
             if model_nb is not None:
                 found_models[id_] = model_nb
 
+        # Retry missing motors up to 3 times with delay (handles intermittent daisy-chain issues)
         missing_ids = [id_ for id_ in self.ids if id_ not in found_models]
+        for retry in range(3):
+            if not missing_ids:
+                break
+            time.sleep(0.5)
+            logger.info(f"Retrying {len(missing_ids)} missing motor(s) (attempt {retry + 1}/3)...")
+            for id_ in list(missing_ids):
+                model_nb = self.ping(id_, num_retry=2)
+                if model_nb is not None:
+                    found_models[id_] = model_nb
+                    missing_ids.remove(id_)
         wrong_models = {
             id_: (expected_models[id_], found_models[id_])
             for id_ in found_models

@@ -257,7 +257,9 @@ class UmbraFollowerRobot(Robot):
         # Compute project root relative to this file
         # umbra_follower.py → umbra_follower/ → robots/ → lerobot/ → src/ → lerobot/ → PROJECT_ROOT
         project_root = Path(__file__).resolve().parent.parent.parent.parent.parent.parent
-        profile_path = project_root / "calibration_profiles" / f"{self.config.arm_side}_follower" / "inversions.json"
+        # Use arm_registry ID (e.g. "umbra_follower") when available, fall back to legacy "{arm_side}_follower"
+        profile_name = self.config.id if self.config.id else f"{self.config.arm_side}_follower"
+        profile_path = project_root / "calibration_profiles" / profile_name / "inversions.json"
         
         self.motor_inversions = {}
         
@@ -265,7 +267,7 @@ class UmbraFollowerRobot(Robot):
             try:
                 with open(profile_path, "r") as f:
                     self.motor_inversions = json.load(f)
-                logger.info(f"Loaded Inversions for {self.config.arm_side}: {self.motor_inversions}")
+                logger.info(f"Loaded Inversions for {profile_name}: {self.motor_inversions}")
             except Exception as e:
                 logger.error(f"Failed to load inversions from {profile_path}: {e}")
         else:

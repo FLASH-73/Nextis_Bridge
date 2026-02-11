@@ -108,13 +108,14 @@ PID_GAINS = {
 MIT_GAINS = {
     "J8009P": {"kp": 30.0, "kd": 1.5},  # Heavy 35Nm motor — high stiffness, stable at this kd
     "J4340P": {"kp": 30.0, "kd": 1.5},  # Medium motor — same gains, works well
-    "J4310":  {"kp": 15.0, "kd": 0.25},  # Low kd prevents torque saturation; v_des feedforward eliminates kd drag
+    "J4310":  {"kp": 15.0, "kd": 0.15},  # Low kd prevents torque saturation; v_des feedforward eliminates kd drag
 }
 
 # Per-motor MIT gain overrides (takes priority over per-type MIT_GAINS)
 # Use when identical motor types need different gains due to load/gravity differences.
 MIT_MOTOR_GAINS = {
-    "base": {"kp": 20.0, "kd": 1.0},  # No gravity load — softer to avoid gear backlash chatter
+    "base":  {"kp": 20.0, "kd": 1.0},  # No gravity load — softer to avoid gear backlash chatter
+    "link3": {"kp": 22.0, "kd": 0.7},  # Lower payload than link2 — softer gains
 }
 
 # Default joint limits (radians) — safety fallback, matches cal_test_7_02_1821 calibration

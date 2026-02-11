@@ -122,7 +122,7 @@ class DynamixelLeader(Teleoperator):
         self.bus.disable_torque()
         self.bus.configure_motors()
 
-        # Get software homing offset (motor register is always 0 now — offset applied in Python)
+        # Get software homing offset for spring target conversion to raw ticks
         gripper_id = self.bus.motors["gripper"].id
         offset = self.bus._software_homing_offsets.get(gripper_id, 0)
 
@@ -130,19 +130,33 @@ class DynamixelLeader(Teleoperator):
         # For our arm: lower ticks = open, higher ticks = closed
         if self.calibration and "gripper" in self.calibration:
             cal = self.calibration["gripper"]
-            self._gripper_open = cal.range_min + offset    # open end (lower ticks)
-            self._gripper_closed = cal.range_max + offset   # closed end (higher ticks)
-            spring_target = cal.range_min                   # spring to open (within pos limits)
+            # range_min/max are in homed coordinates; sync_read already returns homed,
+            # so do NOT add offset again (that was the double-offset bug)
+            self._gripper_open = cal.range_min      # open end (lower homed ticks)
+            self._gripper_closed = cal.range_max    # closed end (higher homed ticks)
+            # Spring target must be RAW ticks (sent with normalize=False to motor firmware)
+            spring_target = cal.range_min - offset
         else:
-            self._gripper_open = self.config.gripper_open_pos + offset
-            self._gripper_closed = self.config.gripper_closed_pos + offset
+            # Config values are in raw tick space (no calibration = no offset)
+            self._gripper_open = self.config.gripper_open_pos
+            self._gripper_closed = self.config.gripper_closed_pos
             spring_target = self.config.gripper_open_pos
 
         # Configure gripper for controlled movement (spring to open position)
         self.bus.write("Torque_Enable", "gripper", 0, normalize=False)
         self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value, normalize=False)
-        self.bus.write("Current_Limit", "gripper", 100, normalize=False)
+        self.bus.write("Current_Limit", "gripper", 400, normalize=False)
+
+        # Read current position and set Goal_Position to it BEFORE enabling torque.
+        # This prevents a violent jump (and overload error) when the motor's stale
+        # Goal_Position is far from the actual position.
+        current_pos = self.bus.sync_read("Present_Position", "gripper", normalize=False)
+        raw_current = current_pos["gripper"] - self.bus._software_homing_offsets.get(gripper_id, 0)
+        self.bus.write("Goal_Position", "gripper", int(raw_current), normalize=False)
+
         self.bus.write("Torque_Enable", "gripper", 1, normalize=False)
+
+        # Now ramp smoothly to the spring-open target
         self.bus.write("Goal_Position", "gripper", spring_target, normalize=False)
 
     def setup_motors(self) -> None:

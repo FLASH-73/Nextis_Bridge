@@ -505,6 +505,8 @@ class TeleoperationService:
 
         # Detect if any follower arm is Damiao (uses float radians, not int ticks)
         self._has_damiao_follower = False
+        # Value conversion mode: "float" (Damiao rad), "rad_to_percent" (Dyn→Feetech), "int" (legacy)
+        self._follower_value_mode = "int"
         if self.robot:
             try:
                 from lerobot.robots.damiao_follower.damiao_follower import DamiaoFollowerRobot as DamiaoFollower
@@ -566,13 +568,19 @@ class TeleoperationService:
 
             is_dynamixel_leader = leader_arm and leader_arm.motor_type in ('dynamixel_xl330', 'dynamixel_xl430')
             is_damiao_follower = follower_arm and follower_arm.motor_type == 'damiao'
+            is_feetech_follower = follower_arm and follower_arm.motor_type == 'sts3215'
 
             if is_dynamixel_leader and is_damiao_follower:
-                # Direct mapping: Dynamixel joint_N.pos → Damiao base/linkN.pos (no prefixes)
+                # Dynamixel→Damiao: direct mapping, float radians passthrough
                 for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
-                    leader_key = f"{dyn_name}.pos"
-                    follower_key = f"{dam_name}.pos"
-                    self.joint_mapping[leader_key] = follower_key
+                    self.joint_mapping[f"{dyn_name}.pos"] = f"{dam_name}.pos"
+                self._has_damiao_follower = True
+                self._follower_value_mode = "float"
+            elif is_dynamixel_leader and is_feetech_follower:
+                # Dynamixel→Feetech: direct mapping, rad→percent conversion
+                for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
+                    self.joint_mapping[f"{dyn_name}.pos"] = f"{dam_name}.pos"
+                self._follower_value_mode = "rad_to_percent"
             else:
                 # Legacy prefix-based mapping for Feetech/same-type arms
                 leader_prefix = self._get_arm_prefix(leader_id)
@@ -785,6 +793,8 @@ class TeleoperationService:
         # Startup blend config (timer set in _teleop_loop to avoid thread-start delay)
         self._blend_duration = 0.5  # seconds — rate limiter provides additional smooth ramping
         self._follower_start_pos = {}  # Captured on first teleop frame
+        self._leader_start_rad = {}   # Captured on first teleop frame (Dynamixel raw values for delta tracking)
+        self._rad_to_percent_scale = {}  # Per-joint scale factor: radians → RANGE_M100_100 percent
         self._blend_start_time = None  # Set when loop actually starts
 
         self.is_running = True
@@ -1093,14 +1103,37 @@ class TeleoperationService:
                     for l_key, f_key in self.joint_mapping.items():
                         if l_key in obs:
                             val = obs[l_key]
-                            # Keep float for Damiao (radians), int for Feetech (ticks)
-                            leader_action[f_key] = val if self._has_damiao_follower else int(val)
+                            if self._follower_value_mode == "float":
+                                leader_action[f_key] = val  # Damiao: radians
+                            elif self._follower_value_mode == "rad_to_percent":
+                                # Delta-based: track leader change from start, apply to follower start position
+                                if l_key in self._leader_start_rad and f_key in self._follower_start_pos:
+                                    delta = val - self._leader_start_rad[l_key]
+                                    if 'gripper' in f_key:
+                                        leader_action[f_key] = self._follower_start_pos[f_key] + delta * 100.0
+                                    else:
+                                        scale = self._rad_to_percent_scale.get(f_key, 100.0 / np.pi)
+                                        leader_action[f_key] = self._follower_start_pos[f_key] + delta * scale
+                                else:
+                                    # Fallback before start positions are captured (frame 0)
+                                    if 'gripper' in f_key:
+                                        leader_action[f_key] = val * 100.0
+                                    else:
+                                        scale = self._rad_to_percent_scale.get(f_key, 100.0 / np.pi)
+                                        leader_action[f_key] = val * scale
+                            else:
+                                leader_action[f_key] = int(val)  # Legacy Feetech→Feetech
 
                     if loop_count == 0:
                         print(f"[TELEOP DEBUG] leader_action after mapping ({len(leader_action)} entries): {leader_action}", flush=True)
 
                     # 1c. Startup blend: ramp from follower's current position
                     if self._blend_start_time and leader_action:
+                        # First frame: capture leader start for delta-based tracking (Dynamixel→Feetech)
+                        if not self._leader_start_rad and self._follower_value_mode == "rad_to_percent" and obs:
+                            self._leader_start_rad = {l_key: obs[l_key] for l_key in self.joint_mapping if l_key in obs}
+                            print(f"[Teleop] Delta tracking: captured {len(self._leader_start_rad)} leader start positions", flush=True)
+
                         # First frame: capture follower's actual position
                         if not self._follower_start_pos and self._active_robot:
                             try:
@@ -1116,6 +1149,20 @@ class TeleoperationService:
                                     lp = self._active_robot.bus._last_positions
                                     self._follower_start_pos = {f"{k}.pos": v for k, v in lp.items()}
                                     print(f"[Teleop] Startup blend: using bus fallback ({len(self._follower_start_pos)} joints)", flush=True)
+
+                        # Compute per-joint rad→percent scale factors from follower calibration
+                        if not self._rad_to_percent_scale and self._follower_value_mode == "rad_to_percent":
+                            if hasattr(self._active_robot, 'calibration') and self._active_robot.calibration:
+                                for l_key, f_key in self.joint_mapping.items():
+                                    motor_name = f_key.replace('.pos', '')
+                                    if 'gripper' in motor_name:
+                                        continue  # Gripper uses its own scaling
+                                    cal = self._active_robot.calibration.get(motor_name)
+                                    if cal:
+                                        tick_range = cal.range_max - cal.range_min
+                                        if tick_range > 0:
+                                            self._rad_to_percent_scale[f_key] = 4096.0 * 100.0 / (np.pi * tick_range)
+                                print(f"[Teleop] Per-joint scales: { {k: f'{v:.1f}' for k, v in self._rad_to_percent_scale.items()} }", flush=True)
 
                         elapsed = time.time() - self._blend_start_time
                         alpha = min(1.0, elapsed / self._blend_duration)

@@ -1,0 +1,9 @@
+{
+  "base": true,
+  "link1": true,
+  "gripper": true,
+  "link4": true,
+  "link3": true,
+  "link1_follower": true,
+  "link5": true
+}

@@ -654,17 +654,13 @@ class ArmRegistryService:
 
                 HARDWARE_ERROR_STATUS_ADDR = 70
 
-                # Scan common baud rates (57600 is factory default for XL330)
-                # Use multiple ping attempts per baud rate to handle bus collisions
-                # with many motors (broadcast_ping can miss motors on a busy bus)
-                for baudrate in [57600, 1_000_000, 115200, 9600]:
+                # Scan XL330-relevant baud rates only (57600 = factory default, 1M = common config)
+                for baudrate in [57600, 1_000_000]:
                     bus.set_baudrate(baudrate)
-                    merged_id_model = {}
-                    for _attempt in range(3):
-                        id_model = bus.broadcast_ping(num_retry=2)
-                        if id_model:
-                            merged_id_model.update(id_model)
-                    id_model = merged_id_model if merged_id_model else None
+                    id_model = bus.broadcast_ping(num_retry=2)
+                    if id_model:
+                        # Only show IDs 0-20 (typical arm range)
+                        id_model = {k: v for k, v in id_model.items() if k <= 20}
                     if id_model:
                         baudrate_ids[baudrate] = list(id_model.keys())
                         for motor_id, model_number in id_model.items():

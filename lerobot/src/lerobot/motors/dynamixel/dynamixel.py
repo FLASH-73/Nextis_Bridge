@@ -19,6 +19,7 @@
 # -> Need to check compatibility across models
 
 import logging
+import time
 from copy import deepcopy
 from enum import Enum
 
@@ -138,6 +139,30 @@ class DynamixelMotorsBus(MotorsBus):
         pass
 
     def _handshake(self) -> None:
+        # Clear hardware errors before motor check — motors with errors fail ping
+        HARDWARE_ERROR_STATUS_ADDR = 70
+        rebooted_any = False
+        for id_ in self.ids:
+            error_status, comm, _ = self.packet_handler.read1ByteTxRx(
+                self.port_handler, id_, HARDWARE_ERROR_STATUS_ADDR
+            )
+            if self._is_comm_success(comm) and error_status != 0:
+                error_names = []
+                if error_status & 0x01: error_names.append("Input Voltage")
+                if error_status & 0x04: error_names.append("Overheating")
+                if error_status & 0x08: error_names.append("Motor Encoder")
+                if error_status & 0x10: error_names.append("Electrical Shock")
+                if error_status & 0x20: error_names.append("Overload")
+                logger.warning(
+                    f"Motor {id_} has hardware error (0x{error_status:02X}: {', '.join(error_names)}), rebooting to clear..."
+                )
+                self.packet_handler.reboot(self.port_handler, id_)
+                rebooted_any = True
+
+        if rebooted_any:
+            time.sleep(1.5)
+            logger.info("Rebooted motor(s) with hardware errors, proceeding with handshake")
+
         self._assert_motors_exist()
 
     def _find_single_motor(self, motor: str, initial_baudrate: int | None = None) -> tuple[int, int]:
@@ -195,8 +220,13 @@ class DynamixelMotorsBus(MotorsBus):
             # Keep motor's Homing_Offset at 0; apply offset in software
             # (bypasses XL330 firmware bug where Homing_Offset doesn't affect Present_Position)
             self._software_homing_offsets[self.motors[motor].id] = calibration.homing_offset
-            self.write("Min_Position_Limit", motor, calibration.range_min)
-            self.write("Max_Position_Limit", motor, calibration.range_max)
+            # Position limit registers are enforced by motor firmware in RAW tick space
+            # (EEPROM Homing_Offset is always 0 — offset applied in software instead)
+            # Calibration ranges are in homed coordinates, so subtract offset to get raw.
+            raw_min = calibration.range_min - calibration.homing_offset
+            raw_max = calibration.range_max - calibration.homing_offset
+            self.write("Min_Position_Limit", motor, raw_min)
+            self.write("Max_Position_Limit", motor, raw_max)
 
         if cache:
             self.calibration = calibration_dict

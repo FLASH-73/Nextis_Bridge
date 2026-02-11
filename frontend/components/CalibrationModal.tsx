@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Save, RotateCcw, Check, ArrowRight, AlertTriangle, Play, Pause, Settings } from 'lucide-react';
 
+const API_BASE = typeof window !== 'undefined'
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : 'http://127.0.0.1:8000';
+
 interface CalibrationModalProps {
     isOpen: boolean;
     onClose: () => void;
@@ -138,7 +142,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
     }, [isOpen]);
 
     const fetchArms = () => {
-        fetch('http://127.0.0.1:8000/calibration/arms')
+        fetch(`${API_BASE}/calibration/arms`)
             .then(res => res.json())
             .then(data => {
                 setArms(data.arms);
@@ -154,7 +158,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
     }, [showProfiles, selectedArm]);
 
     const fetchProfiles = (armId: string) => {
-        fetch(`http://127.0.0.1:8000/calibration/${armId}/files`)
+        fetch(`${API_BASE}/calibration/${armId}/files`)
             .then(res => res.json())
             .then(data => setProfiles(data.files))
             .catch(err => console.error(err));
@@ -162,7 +166,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
 
     const loadProfile = async (filename: string) => {
         try {
-            const res = await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/load`, {
+            const res = await fetch(`${API_BASE}/calibration/${selectedArm}/load`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ filename })
@@ -179,7 +183,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
 
     const deleteProfile = async (filename: string) => {
         try {
-            await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/delete`, {
+            await fetch(`${API_BASE}/calibration/${selectedArm}/delete`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ filename })
@@ -191,7 +195,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
     };
 
     const fetchInversions = (armId: string) => {
-        fetch(`http://127.0.0.1:8000/calibration/${armId}/inversions`)
+        fetch(`${API_BASE}/calibration/${armId}/inversions`)
             .then(res => res.json())
             .then(data => setInversions(data.inversions))
             .catch(err => console.error("Failed to fetch inversions", err));
@@ -200,7 +204,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
     const toggleInversion = async (motorName: string) => {
         const current = inversions[motorName] || false;
         try {
-            await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/inversions`, {
+            await fetch(`${API_BASE}/calibration/${selectedArm}/inversions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ motor: motorName, inverted: !current })
@@ -219,7 +223,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
             fetchInversions(selectedArm); // Fetch once on entry
 
             interval = setInterval(() => {
-                fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/state`)
+                fetch(`${API_BASE}/calibration/${selectedArm}/state`)
                     .then(res => res.json())
                     .then(data => {
                         setMotors(data.state);
@@ -233,7 +237,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
     const toggleTorque = async () => {
         const shouldEnable = !isTorqueEnabled;
         try {
-            await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/torque`, {
+            await fetch(`${API_BASE}/calibration/${selectedArm}/torque`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enable: shouldEnable })
@@ -246,7 +250,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
 
     const performHoming = async () => {
         try {
-            const res = await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/homing`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/calibration/${selectedArm}/homing`, { method: 'POST' });
             const data = await res.json();
 
             if (res.ok && data.status === 'success') {
@@ -270,7 +274,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
 
     const startRecording = async () => {
         try {
-            const res = await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/discovery/start`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/calibration/${selectedArm}/discovery/start`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 console.error("Failed to start discovery:", data.message || res.statusText);
@@ -286,7 +290,7 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
 
     const stopRecording = async () => {
         try {
-            const res = await fetch(`http://127.0.0.1:8000/calibration/${selectedArm}/discovery/stop`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/calibration/${selectedArm}/discovery/stop`, { method: 'POST' });
             const data = await res.json().catch(() => ({}));
             setIsRecording(false);
 
@@ -310,8 +314,8 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
         try {
             // Use the named save endpoint if a name is provided
             const endpoint = saveName
-                ? `http://127.0.0.1:8000/calibration/${selectedArm}/save_named`
-                : `http://127.0.0.1:8000/calibration/${selectedArm}/save`;
+                ? `${API_BASE}/calibration/${selectedArm}/save_named`
+                : `${API_BASE}/calibration/${selectedArm}/save`;
 
             await fetch(endpoint, {
                 method: 'POST',

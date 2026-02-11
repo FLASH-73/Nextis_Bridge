@@ -80,6 +80,7 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
     // Edit arm state
     const [editingArm, setEditingArm] = useState<string | null>(null);
     const [editName, setEditName] = useState('');
+    const [editPort, setEditPort] = useState('');
 
     // Motor setup state
     const [motorSetup, setMotorSetup] = useState({
@@ -233,12 +234,12 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
         }
     };
 
-    const updateArmName = async (armId: string) => {
+    const updateArm = async (armId: string) => {
         try {
             await fetch(`${API_BASE}/arms/${armId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: editName }),
+                body: JSON.stringify({ name: editName, port: editPort }),
             });
             setEditingArm(null);
             fetchArms();
@@ -487,12 +488,14 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                                                 onConnect={connectArm}
                                                 onDisconnect={disconnectArm}
                                                 onDelete={deleteArm}
-                                                onEdit={(id) => { setEditingArm(id); setEditName(arm.name); }}
+                                                onEdit={(id) => { setEditingArm(id); setEditName(arm.name); setEditPort(arm.port); }}
                                                 onSetHome={setHomePosition}
                                                 isEditing={editingArm === arm.id}
                                                 editName={editName}
                                                 setEditName={setEditName}
-                                                onSaveEdit={updateArmName}
+                                                editPort={editPort}
+                                                setEditPort={setEditPort}
+                                                onSaveEdit={updateArm}
                                                 onCancelEdit={() => setEditingArm(null)}
                                             />
                                         ))
@@ -518,12 +521,14 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                                                 onConnect={connectArm}
                                                 onDisconnect={disconnectArm}
                                                 onDelete={deleteArm}
-                                                onEdit={(id) => { setEditingArm(id); setEditName(arm.name); }}
+                                                onEdit={(id) => { setEditingArm(id); setEditName(arm.name); setEditPort(arm.port); }}
                                                 onSetHome={setHomePosition}
                                                 isEditing={editingArm === arm.id}
                                                 editName={editName}
                                                 setEditName={setEditName}
-                                                onSaveEdit={updateArmName}
+                                                editPort={editPort}
+                                                setEditPort={setEditPort}
+                                                onSaveEdit={updateArm}
                                                 onCancelEdit={() => setEditingArm(null)}
                                             />
                                         ))
@@ -1013,6 +1018,8 @@ interface ArmCardProps {
     isEditing: boolean;
     editName: string;
     setEditName: (name: string) => void;
+    editPort: string;
+    setEditPort: (port: string) => void;
     onSaveEdit: (id: string) => void;
     onCancelEdit: () => void;
 }
@@ -1027,6 +1034,8 @@ function ArmCard({
     isEditing,
     editName,
     setEditName,
+    editPort,
+    setEditPort,
     onSaveEdit,
     onCancelEdit,
 }: ArmCardProps) {
@@ -1052,7 +1061,15 @@ function ArmCard({
                                 value={editName}
                                 onChange={(e) => setEditName(e.target.value)}
                                 className="px-2 py-1 text-sm border border-neutral-200 dark:border-zinc-600 rounded bg-white dark:bg-zinc-900"
+                                placeholder="Name"
                                 autoFocus
+                            />
+                            <input
+                                type="text"
+                                value={editPort}
+                                onChange={(e) => setEditPort(e.target.value)}
+                                className="px-2 py-1 text-sm border border-neutral-200 dark:border-zinc-600 rounded bg-white dark:bg-zinc-900 font-mono"
+                                placeholder="Port"
                             />
                             <button onClick={() => onSaveEdit(arm.id)} className="p-1 text-green-500 hover:bg-green-50 dark:hover:bg-green-950 rounded">
                                 <Save className="w-4 h-4" />

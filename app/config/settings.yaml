@@ -1,102 +1,75 @@
-robot:
-  cameras:
-    camera_1:
-      fps: 30
-      height: 720
-      index_or_path: '218622275492'
-      serial_number_or_name: '218622275492'
-      type: intelrealsense
-      use_depth: false
-      video_device_id: '218622275492'
-      width: 1280
-    camera_2:
-      fps: 30
-      height: 480
-      index_or_path: '336222072963'
-      serial_number_or_name: '336222072963'
-      type: intelrealsense
-      use_depth: false
-      video_device_id: '336222072963'
-      width: 640
-    camera_3:
-      fps: 30
-      height: 480
-      type: opencv
-      video_device_id: /dev/video12
-      width: 640
-  id: umbra_bi_2
-  left_arm_port: /dev/ttyUSB3
-  right_arm_port: /dev/ttyUSB2
-  type: bi_umbra_follower
-teleop:
-  id: leader_bi_3
-  left_arm_port: /dev/ttyUSB0
-  right_arm_port: /dev/ttyUSB1
-  type: bi_umbra_leader
-training:
-  batch_size: 8
-  offline_steps: 10000
-  policy: diffusion
-  steps: 5000
 arms:
-  left_follower:
-    name: Left Follower
-    role: follower
-    motor_type: sts3215
-    port: /dev/ttyUSB3
-    enabled: true
-    structural_design: umbra_7dof
-  right_follower:
-    name: Right Follower
-    role: follower
-    motor_type: sts3215
-    port: /dev/ttyUSB2
-    enabled: true
-    structural_design: umbra_7dof
-  left_leader:
-    name: Left Leader
-    role: leader
-    motor_type: sts3215
-    port: /dev/ttyUSB0
-    enabled: true
-    structural_design: umbra_7dof
-  right_leader:
-    name: Right Leader
-    role: leader
-    motor_type: sts3215
-    port: /dev/ttyUSB1
-    enabled: true
-    structural_design: umbra_7dof
-  aira_lead:
-    name: AIRA Zero Leader
-    role: leader
-    motor_type: dynamixel_xl330
-    port: /dev/ttyACM0
-    enabled: true
-    structural_design: damiao_7dof
   aira_zero:
-    name: Aira Zero Follower
-    role: follower
-    motor_type: damiao
-    port: can0
-    enabled: true
-    structural_design: damiao_7dof
     config:
       home_position:
         base: -0.01697566186007471
+        gripper: 0.5186160067139713
         link1: -0.994697489890898
         link2: -1.1324101625085827
         link3: -0.9512092774853134
         link4: 0.05092698558022413
         link5: 0.029564354924849212
-        gripper: 0.5186160067139713
+    enabled: true
+    motor_type: damiao
+    name: Aira Zero Follower
+    port: can0
+    role: follower
+    structural_design: damiao_7dof
+  aira_zero_leader:
+    enabled: true
+    motor_type: dynamixel_xl330
+    name: Aira Zero Leader
+    port: /dev/ttyACM0
+    role: leader
+    structural_design: umbra_7dof
+  umbra_follower:
+    enabled: true
+    motor_type: sts3215
+    name: 'Umbra Follower '
+    port: /dev/ttyUSB1
+    role: follower
+    structural_design: umbra_7dof
+  umbra_leader:
+    enabled: true
+    motor_type: dynamixel_xl330
+    name: Umbra Leader
+    port: /dev/ttyACM1
+    role: leader
+    structural_design: umbra_7dof
 pairings:
-- leader: left_leader
-  follower: left_follower
-  name: Left Pair
-- leader: right_leader
-  follower: right_follower
-  name: Right Pair
-- leader: aira_lead
-  follower: aira_zero
-  name: Aira  Zero
+- follower: aira_zero
+  leader: aira_zero_leader
+  name: Aira Zero Leader -> Aira Zero Follower
+- follower: umbra_follower
+  leader: umbra_leader
+  name: 'Umbra Leader -> Umbra Follower '
+robot:
+  cameras:
+    camera_1:
+      fps: 30
+      height: 720
+      index_or_path: /dev/video0
+      type: opencv
+      video_device_id: /dev/video0
+      width: 1280
+    camera_2:
+      fps: 30
+      height: 720
+      serial_number_or_name: '218622275492'
+      type: intelrealsense
+      use_depth: false
+      video_device_id: '218622275492'
+      width: 1280
+    camera_3:
+      fps: 30
+      height: 720
+      serial_number_or_name: '218622275492'
+      type: intelrealsense
+      use_depth: false
+      video_device_id: '218622275492'
+      width: 1280
+training:
+  batch_size: 8
+  offline_steps: 10000
+  policy: diffusion
+  steps: 5000
