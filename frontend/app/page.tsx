@@ -3,11 +3,12 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { Play, Mic, Search, Layers, Command, GripHorizontal, Minimize2, Maximize2, X, Plus, Terminal, RefreshCw, Power, Loader2, Activity, Database, Upload, User, LogOut, Cloud, Sparkles, Settings } from 'lucide-react';
+import { Play, Mic, Search, Layers, Command, GripHorizontal, Minimize2, Maximize2, X, Plus, Terminal, RefreshCw, Power, Loader2, Activity, Database, Upload, User, LogOut, Cloud, Sparkles, Settings, Cpu } from 'lucide-react';
 import TaskGraph from '../components/TaskGraph';
 import CalibrationModal from '../components/CalibrationModal';
 import CameraModal from '../components/CameraModal';
 import ArmManagerModal from '../components/ArmManagerModal';
+import MotorMonitorModal from '../components/MotorMonitorModal';
 import { useDraggable } from '../hooks/useDraggable';
 import TeleopModal from '../components/TeleopModal';
 import RecordingModal from '../components/RecordingModal';
@@ -63,6 +64,7 @@ export default function Dashboard() {
   const [isHILOpen, setIsHILOpen] = useState(false);
   const [isRLTrainingOpen, setIsRLTrainingOpen] = useState(false);
   const [isArmManagerOpen, setIsArmManagerOpen] = useState(false);
+  const [isMotorMonitorOpen, setIsMotorMonitorOpen] = useState(false);
 
   // Arm status for status menu quick view
   const [armsSummary, setArmsSummary] = useState<{total_arms: number, connected: number}>({ total_arms: 0, connected: 0 });
@@ -300,6 +302,12 @@ export default function Dashboard() {
         isOpen={isArmManagerOpen}
         onClose={() => setIsArmManagerOpen(false)}
       />
+      <MotorMonitorModal
+        isOpen={isMotorMonitorOpen}
+        onClose={() => { setIsMotorMonitorOpen(false); if (maximizedWindow === 'motor-monitor') setMaximizedWindow(null); }}
+        maximizedWindow={maximizedWindow}
+        setMaximizedWindow={setMaximizedWindow}
+      />
 
       {/* 1. LAYER: BACKGROUND (Task Graph) */}
       <div className="absolute inset-0 z-0">
@@ -409,6 +417,12 @@ export default function Dashboard() {
               className={`px-4 py-2 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ${isArmManagerOpen ? 'bg-black dark:bg-white text-white dark:text-black shadow-md' : 'hover:bg-neutral-100/50 dark:hover:bg-zinc-800/50 text-neutral-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'}`}
             >
               <Settings className="w-3 h-3" /> Arms
+            </button>
+            <button
+              onClick={() => setIsMotorMonitorOpen(true)}
+              className={`px-4 py-2 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ${isMotorMonitorOpen ? 'bg-black dark:bg-white text-white dark:text-black shadow-md' : 'hover:bg-neutral-100/50 dark:hover:bg-zinc-800/50 text-neutral-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'}`}
+            >
+              <Cpu className="w-3 h-3" /> Motors
             </button>
             <button
               onClick={() => setIsCalibrationOpen(true)}

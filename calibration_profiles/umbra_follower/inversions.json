@@ -1,7 +1,7 @@
 {
   "base": true,
   "link1": true,
-  "gripper": true,
+  "gripper": false,
   "link4": true,
   "link3": true,
   "link1_follower": true,

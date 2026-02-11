@@ -2110,6 +2110,158 @@ async def clear_home_position(arm_id: str):
     system.arm_registry._save_config()
     return {"success": True}
 
+@app.get("/arms/{arm_id}/motors/diagnostics")
+def get_motor_diagnostics(arm_id: str):
+    """Read live motor telemetry (position, temperature, voltage, current, errors) for a connected arm."""
+    if not system.arm_registry:
+        return JSONResponse(status_code=400, content={"error": "Arm registry not initialized"})
+
+    arm_def = system.arm_registry.arms.get(arm_id)
+    if not arm_def:
+        return JSONResponse(status_code=404, content={"error": f"Arm '{arm_id}' not found"})
+
+    instance = system.arm_registry.arm_instances.get(arm_id)
+    if not instance or not getattr(instance, 'is_connected', False):
+        return JSONResponse(status_code=400, content={"error": f"Arm '{arm_id}' not connected"})
+
+    bus = getattr(instance, 'bus', None)
+    if not bus:
+        return JSONResponse(status_code=400, content={"error": "No motor bus available"})
+
+    motor_type = arm_def.motor_type.value
+    motors_info = []
+
+    # Determine which registers to read based on motor type
+    try:
+        from lerobot.motors.dynamixel.dynamixel import DynamixelMotorsBus
+        from lerobot.motors.feetech.feetech import FeetechMotorsBus
+        is_dynamixel = isinstance(bus, DynamixelMotorsBus)
+        is_feetech = isinstance(bus, FeetechMotorsBus)
+    except ImportError:
+        is_dynamixel = False
+        is_feetech = False
+
+    # Check for Damiao (CAN-based, different API)
+    is_damiao = False
+    try:
+        from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+        is_damiao = isinstance(bus, DamiaoMotorsBus)
+    except ImportError:
+        pass
+
+    if is_damiao:
+        # Damiao: read from CAN state cache (no sync_read for these)
+        for name, motor in bus.motors.items():
+            motor_data = {
+                "name": name,
+                "id": motor.id if hasattr(motor, 'id') else getattr(motor, 'slave_id', 0),
+                "model": getattr(motor, 'model', 'damiao'),
+                "position": None,
+                "velocity": None,
+                "current": None,
+                "temperature": None,
+                "voltage": None,
+                "load": None,
+                "error": 0,
+                "error_names": [],
+            }
+            # Damiao stores last state in _last_positions, _last_velocities, _last_torques
+            if hasattr(bus, '_last_positions'):
+                motor_data["position"] = round(bus._last_positions.get(name, 0), 3)
+            if hasattr(bus, '_last_velocities'):
+                motor_data["velocity"] = round(bus._last_velocities.get(name, 0), 3)
+            if hasattr(bus, '_last_torques'):
+                motor_data["load"] = round(bus._last_torques.get(name, 0), 3)
+            motors_info.append(motor_data)
+    else:
+        # Dynamixel / Feetech: use sync_read for each register
+        motor_names = list(bus.motors.keys())
+
+        # Build motor list with IDs
+        motor_map = {}
+        for name in motor_names:
+            m = bus.motors[name]
+            motor_map[name] = {
+                "name": name,
+                "id": m.id,
+                "model": getattr(m, 'model', motor_type),
+                "position": None,
+                "velocity": None,
+                "current": None,
+                "temperature": None,
+                "voltage": None,
+                "load": None,
+                "error": 0,
+                "error_names": [],
+            }
+
+        def safe_read(data_name):
+            try:
+                return bus.sync_read(data_name, normalize=False)
+            except Exception:
+                return {}
+
+        positions = safe_read("Present_Position")
+        for name, val in positions.items():
+            if name in motor_map:
+                motor_map[name]["position"] = int(val) if val is not None else None
+
+        velocities = safe_read("Present_Velocity")
+        for name, val in velocities.items():
+            if name in motor_map:
+                motor_map[name]["velocity"] = int(val) if val is not None else None
+
+        temperatures = safe_read("Present_Temperature")
+        for name, val in temperatures.items():
+            if name in motor_map:
+                motor_map[name]["temperature"] = int(val) if val is not None else None
+
+        # Current (Dynamixel) or Present_Current (Feetech)
+        currents = safe_read("Present_Current")
+        for name, val in currents.items():
+            if name in motor_map:
+                motor_map[name]["current"] = int(val) if val is not None else None
+
+        # Voltage — different register names per type
+        if is_dynamixel:
+            voltages = safe_read("Present_Input_Voltage")
+        else:
+            voltages = safe_read("Present_Voltage")
+        for name, val in voltages.items():
+            if name in motor_map:
+                motor_map[name]["voltage"] = round(int(val) * 0.1, 1) if val is not None else None
+
+        # Load (Feetech only)
+        if is_feetech:
+            loads = safe_read("Present_Load")
+            for name, val in loads.items():
+                if name in motor_map:
+                    motor_map[name]["load"] = int(val) if val is not None else None
+
+        # Hardware errors (Dynamixel only)
+        if is_dynamixel:
+            errors = safe_read("Hardware_Error_Status")
+            for name, val in errors.items():
+                if name in motor_map and val:
+                    err = int(val)
+                    motor_map[name]["error"] = err
+                    names = []
+                    if err & 0x01: names.append("Voltage")
+                    if err & 0x04: names.append("Overheat")
+                    if err & 0x08: names.append("Encoder")
+                    if err & 0x10: names.append("Shock")
+                    if err & 0x20: names.append("Overload")
+                    motor_map[name]["error_names"] = names
+
+        motors_info = list(motor_map.values())
+
+    return {
+        "arm_id": arm_id,
+        "motor_type": motor_type,
+        "motors": motors_info,
+    }
+
+
 @app.get("/arms/{leader_id}/compatible-followers")
 async def get_compatible_followers(leader_id: str):
     """Get followers compatible with a leader arm."""

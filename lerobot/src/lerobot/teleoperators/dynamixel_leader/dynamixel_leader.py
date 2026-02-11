@@ -135,7 +135,8 @@ class DynamixelLeader(Teleoperator):
             self._gripper_open = cal.range_min      # open end (lower homed ticks)
             self._gripper_closed = cal.range_max    # closed end (higher homed ticks)
             # Spring target must be RAW ticks (sent with normalize=False to motor firmware)
-            spring_target = cal.range_min - offset
+            # Add margin to avoid stalling at the mechanical stop (causes overload error)
+            spring_target = cal.range_min - offset + 150
         else:
             # Config values are in raw tick space (no calibration = no offset)
             self._gripper_open = self.config.gripper_open_pos
@@ -145,7 +146,7 @@ class DynamixelLeader(Teleoperator):
         # Configure gripper for controlled movement (spring to open position)
         self.bus.write("Torque_Enable", "gripper", 0, normalize=False)
         self.bus.write("Operating_Mode", "gripper", OperatingMode.CURRENT_POSITION.value, normalize=False)
-        self.bus.write("Current_Limit", "gripper", 400, normalize=False)
+        self.bus.write("Current_Limit", "gripper", 1750, normalize=False)
 
         # Read current position and set Goal_Position to it BEFORE enabling torque.
         # This prevents a violent jump (and overload error) when the motor's stale

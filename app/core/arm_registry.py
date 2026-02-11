@@ -445,6 +445,8 @@ class ArmRegistryService:
             if instance:
                 self.arm_instances[arm_id] = instance
                 self.arm_status[arm_id] = ConnectionStatus.CONNECTED
+                if hasattr(instance, 'is_calibrated'):
+                    arm.calibrated = instance.is_calibrated
                 logger.info(f"Connected arm: {arm.name} ({arm_id})")
                 return {"success": True, "status": "connected"}
             else:

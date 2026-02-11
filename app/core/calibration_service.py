@@ -510,6 +510,8 @@ class CalibrationService:
         try:
             # Use the robot's internal loader if possible, or manual load
             arm._load_calibration(fpath)
+            # Persist to runtime cache so future arm connects load correct values
+            arm._save_calibration()
             # Apply to motors (Dynamixel EEPROM writes require torque off)
             if hasattr(arm.bus, "write_calibration"):
                 if self._is_dynamixel_arm(arm_id):

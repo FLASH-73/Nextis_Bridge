@@ -86,6 +86,15 @@ class TeleoperationService:
         self.joint_mapping = {} # {leader_key: follower_key}
         self.assist_groups = {} # {arm_key: [joint_name, ...]}
 
+        # Gripper Force Feedback (follower torque → leader current ceiling)
+        self._force_feedback_enabled = True
+        self._filtered_gripper_torque = 0.0   # EMA-filtered absolute torque (Nm)
+        self._ff_alpha = 0.3                  # EMA smoothing (τ ≈ 55ms at 60Hz)
+        self._ff_baseline_current = 60        # mA — light spring (perceptible, not fatiguing)
+        self._ff_max_current = 1750           # mA — full XL330 range (must be <= Current_Limit)
+        self._ff_torque_threshold = 0.2       # Nm — dead zone (friction/gravity noise)
+        self._ff_torque_saturation = 2.0      # Nm — torque at which max current is reached
+
         # Teleop Configuration
         # Lowered to 60Hz to match lerobot default and reduce USB congestion
         self.frequency = 60
@@ -795,6 +804,7 @@ class TeleoperationService:
         self._follower_start_pos = {}  # Captured on first teleop frame
         self._leader_start_rad = {}   # Captured on first teleop frame (Dynamixel raw values for delta tracking)
         self._rad_to_percent_scale = {}  # Per-joint scale factor: radians → RANGE_M100_100 percent
+        self._filtered_gripper_torque = 0.0  # Reset force feedback filter
         self._blend_start_time = None  # Set when loop actually starts
 
         self.is_running = True
@@ -880,6 +890,15 @@ class TeleoperationService:
                      self.leader.bus.disable_torque()
             except Exception as e:
                 logger.error(f"Failed to restore Leader Mode: {e}")
+
+        # Reset force feedback: restore baseline Goal_Current on leader gripper
+        if self._has_damiao_follower and self._active_leader:
+            try:
+                self._active_leader.bus.write(
+                    "Goal_Current", "gripper", self._ff_baseline_current, normalize=False
+                )
+            except Exception as e:
+                logger.warning(f"Failed to reset gripper Goal_Current: {e}")
 
         # Home follower arm (or disable immediately if no home position)
         active_robot = getattr(self, '_active_robot', self.robot)
@@ -1110,7 +1129,9 @@ class TeleoperationService:
                                 if l_key in self._leader_start_rad and f_key in self._follower_start_pos:
                                     delta = val - self._leader_start_rad[l_key]
                                     if 'gripper' in f_key:
-                                        leader_action[f_key] = self._follower_start_pos[f_key] + delta * 100.0
+                                        # Absolute mapping: leader 0-1 maps directly to follower 0-100%
+                                        # (delta tracking breaks when follower starts at range extreme)
+                                        leader_action[f_key] = val * 100.0
                                     else:
                                         scale = self._rad_to_percent_scale.get(f_key, 100.0 / np.pi)
                                         leader_action[f_key] = self._follower_start_pos[f_key] + delta * scale
@@ -1126,6 +1147,11 @@ class TeleoperationService:
 
                     if loop_count == 0:
                         print(f"[TELEOP DEBUG] leader_action after mapping ({len(leader_action)} entries): {leader_action}", flush=True)
+
+                    # [TEMPORARY DEBUG] Gripper trace — once per second
+                    if loop_count % 60 == 0 and 'gripper.pos' in leader_action:
+                        _g_raw = obs.get('gripper.pos', -1) if obs else -1
+                        print(f"[GRIPPER] frame={loop_count} leader_val={_g_raw:.3f} follower_cmd={leader_action['gripper.pos']:.1f}", flush=True)
 
                     # 1c. Startup blend: ramp from follower's current position
                     if self._blend_start_time and leader_action:
@@ -1195,6 +1221,10 @@ class TeleoperationService:
                           f"(alpha={_alpha:.4f}, blend_active={blend_active}, "
                           f"follower_start={fstart})", flush=True)
 
+                # [TEMPORARY DEBUG] Gripper trace after blend — once per second
+                if loop_count % 60 == 0 and leader_action and 'gripper.pos' in leader_action:
+                    print(f"[GRIPPER] after_blend={leader_action['gripper.pos']:.1f}", flush=True)
+
                 # 2. Send Action IMMEDIATELY (Low Latency Control)
                 # Key insight from LeRobot: send_action and get_observation are independent.
                 # Motor writes use sync_write (no response wait), cameras have background threads.
@@ -1230,6 +1260,56 @@ class TeleoperationService:
                         except Exception as e:
                             if loop_count % 60 == 0:
                                 logger.warning(f"[TELEOP] Safety check error (non-fatal): {e}")
+
+                    # 2a. Gripper Force Feedback (follower torque → leader current ceiling)
+                    if (self._force_feedback_enabled
+                            and self._has_damiao_follower
+                            and self._active_leader
+                            and loop_count > 0):
+                        try:
+                            torques = self._active_robot.get_torques()
+                            raw_torque = torques.get("gripper", 0.0)
+
+                            # Use absolute value — direction doesn't matter for grip feel
+                            torque_mag = abs(raw_torque)
+
+                            # EMA filter
+                            self._filtered_gripper_torque = (
+                                self._ff_alpha * torque_mag
+                                + (1 - self._ff_alpha) * self._filtered_gripper_torque
+                            )
+
+                            # Map to Goal_Current: dead zone → linear ramp → saturation
+                            if self._filtered_gripper_torque <= self._ff_torque_threshold:
+                                goal_current = self._ff_baseline_current
+                            elif self._filtered_gripper_torque >= self._ff_torque_saturation:
+                                goal_current = self._ff_max_current
+                            else:
+                                t = (self._filtered_gripper_torque - self._ff_torque_threshold) / (
+                                    self._ff_torque_saturation - self._ff_torque_threshold
+                                )
+                                goal_current = int(
+                                    self._ff_baseline_current
+                                    + t * (self._ff_max_current - self._ff_baseline_current)
+                                )
+
+                            goal_current = max(self._ff_baseline_current, min(self._ff_max_current, goal_current))
+
+                            self._active_leader.bus.write(
+                                "Goal_Current", "gripper", goal_current, normalize=False
+                            )
+
+                            # Debug log once per second
+                            if loop_count % 60 == 0:
+                                print(
+                                    f"[FORCE_FB] torque={raw_torque:.2f}Nm "
+                                    f"filtered={self._filtered_gripper_torque:.2f}Nm "
+                                    f"goal_current={goal_current}mA",
+                                    flush=True,
+                                )
+                        except Exception as e:
+                            if loop_count % 60 == 0:
+                                logger.warning(f"[FORCE_FB] Error: {e}")
 
                 elif self._active_robot and loop_count % 60 == 0:
                     logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")
