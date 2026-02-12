@@ -129,7 +129,8 @@ class SystemState:
         # 6. TeleoperationService (works with robot=None, uses arm_registry)
         self.teleop_service = TeleoperationService(
             robot=None, leader=None, robot_lock=self.lock,
-            leader_assists={}, arm_registry=self.arm_registry
+            leader_assists={}, arm_registry=self.arm_registry,
+            camera_service=self.camera_service
         )
 
         # 7. Orchestrator with minimal mock robot
@@ -200,7 +201,14 @@ class SystemState:
         print("Shutting Down System State...")
         if self.orchestrator:
             self.orchestrator.stop()
-            
+
+        # Disconnect all managed cameras
+        if self.camera_service:
+            try:
+                self.camera_service.disconnect_all()
+            except Exception as e:
+                print(f"Error disconnecting cameras: {e}")
+
         with self.lock:
             # Disconnect Robot
             if self.robot:
@@ -209,7 +217,7 @@ class SystemState:
                         self.robot.disconnect()
                 except Exception as e:
                     print(f"Error disconnecting robot: {e}")
-            
+
             # Disconnect Leader
             if self.leader:
                 try:
@@ -430,17 +438,20 @@ import time
 def generate_frames(camera_key: str):
     while True:
         frame = None
-        
-        # PRIORITY 1: Direct Live Feed from Robot (Low Latency, Always Fresh)
-        # Note: Don't check robot.is_connected - it fails if ANY camera has issues,
-        # blocking ALL cameras. Let individual async_read handle connection gracefully.
-        if system.robot and system.robot.cameras and camera_key in system.robot.cameras:
-            cam = system.robot.cameras[camera_key]
+
+        # PRIORITY 1: CameraService managed cameras (independent of robot connection)
+        if system.camera_service and camera_key in system.camera_service.cameras:
+            cam = system.camera_service.cameras[camera_key]
             try:
                 frame = cam.async_read(blocking=False)  # ZOH pattern: return cached frame immediately
-                if frame is None:
-                    # occasional log?
-                    pass
+            except Exception:
+                pass
+
+        # PRIORITY 1b: Robot cameras (legacy path, if cameras were attached directly)
+        if frame is None and system.robot and hasattr(system.robot, 'cameras') and system.robot.cameras and camera_key in system.robot.cameras:
+            cam = system.robot.cameras[camera_key]
+            try:
+                frame = cam.async_read(blocking=False)
             except Exception:
                 pass
 
@@ -2475,6 +2486,34 @@ async def reset_system(background_tasks: BackgroundTasks):
         return {"status": "error", "message": str(e)}
 
 # --- Camera Endpoints ---
+
+@app.post("/cameras/{camera_key}/connect")
+def connect_camera(camera_key: str):
+    """Connect a single camera by its config key.
+    Uses def (not async) so FastAPI runs it in a thread pool — avoids blocking the event loop
+    during the 2-3s camera warmup (time.sleep + frame reads).
+    """
+    if not system.camera_service:
+        raise HTTPException(status_code=503, detail="Camera service not initialized")
+    result = system.camera_service.connect_camera(camera_key)
+    return result
+
+@app.post("/cameras/{camera_key}/disconnect")
+def disconnect_camera(camera_key: str):
+    """Disconnect a single camera by its config key.
+    Uses def (not async) so FastAPI runs it in a thread pool.
+    """
+    if not system.camera_service:
+        raise HTTPException(status_code=503, detail="Camera service not initialized")
+    result = system.camera_service.disconnect_camera(camera_key)
+    return result
+
+@app.get("/cameras/status")
+def get_camera_status():
+    """Get connection status of all configured cameras."""
+    if not system.camera_service:
+        return {}
+    return system.camera_service.get_status()
 
 @app.get("/cameras/scan")
 def scan_cameras():

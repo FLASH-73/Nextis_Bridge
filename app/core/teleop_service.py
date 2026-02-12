@@ -27,11 +27,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class TeleoperationService:
-    def __init__(self, robot, leader, robot_lock, leader_assists=None, arm_registry=None):
+    def __init__(self, robot, leader, robot_lock, leader_assists=None, arm_registry=None, camera_service=None):
         self.robot = robot
         self.leader = leader
         self.robot_lock = robot_lock
         self.arm_registry = arm_registry  # For pairing-based mapping
+        self.camera_service = camera_service  # Standalone camera manager
 
         self.safety = SafetyLayer(robot_lock) # Initialize Safety Layer
         
@@ -85,6 +86,7 @@ class TeleoperationService:
         # Optimization: Pre-computed mappings
         self.joint_mapping = {} # {leader_key: follower_key}
         self.assist_groups = {} # {arm_key: [joint_name, ...]}
+        self._leader_cal_ranges = {}  # {follower_key: (range_min, range_max)} from leader calibration
 
         # Gripper Force Feedback (follower torque → leader current ceiling)
         self._force_feedback_enabled = True
@@ -343,14 +345,22 @@ class TeleoperationService:
 
                     # SOURCE 2: Capture camera images with async_read (FAST - ZOH pattern)
                     # Only capture selected cameras
-                    if hasattr(self.robot, 'cameras') and self.robot.cameras:
-                        # Determine which cameras to capture
-                        cameras_to_capture = self._selected_cameras if self._selected_cameras else list(self.robot.cameras.keys())
+                    # Priority: CameraService (standalone) > robot.cameras (legacy)
+                    cameras_dict = None
+                    if self.camera_service and self.camera_service.cameras:
+                        cameras_dict = self.camera_service.cameras
+                    elif hasattr(self, '_active_robot') and self._active_robot and hasattr(self._active_robot, 'cameras') and self._active_robot.cameras:
+                        cameras_dict = self._active_robot.cameras
+                    elif hasattr(self.robot, 'cameras') and self.robot.cameras:
+                        cameras_dict = self.robot.cameras
+
+                    if cameras_dict:
+                        cameras_to_capture = self._selected_cameras if self._selected_cameras else list(cameras_dict.keys())
 
                         for cam_key in cameras_to_capture:
-                            if cam_key not in self.robot.cameras:
+                            if cam_key not in cameras_dict:
                                 continue
-                            cam = self.robot.cameras[cam_key]
+                            cam = cameras_dict[cam_key]
                             try:
                                 # async_read(blocking=False) returns last cached frame instantly
                                 if hasattr(cam, 'async_read'):
@@ -526,7 +536,7 @@ class TeleoperationService:
             leader = getattr(self, '_active_leader', None)
             if not joint and leader:
                 try:
-                    self._active_leader.bus.write(
+                    leader.bus.write(
                         "Goal_Current", "joint_4", 0, normalize=False
                     )
                 except Exception:
@@ -630,6 +640,19 @@ class TeleoperationService:
                 for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
                     self.joint_mapping[f"{dyn_name}.pos"] = f"{dam_name}.pos"
                 self._follower_value_mode = "rad_to_percent"
+                # Precompute leader calibration ranges for absolute rad→percent mapping
+                if self._active_leader and hasattr(self._active_leader, 'calibration') and self._active_leader.calibration:
+                    for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
+                        if dyn_name == "gripper":
+                            continue
+                        l_cal = self._active_leader.calibration.get(dyn_name)
+                        if l_cal:
+                            f_key = f"{dam_name}.pos"
+                            self._leader_cal_ranges[f_key] = (l_cal.range_min, l_cal.range_max)
+                    if self._leader_cal_ranges:
+                        print(f"[Teleop] Absolute mapping: {len(self._leader_cal_ranges)} joints from leader calibration", flush=True)
+                    else:
+                        print("[Teleop] WARNING: Leader calibration missing — falling back to relative delta tracking", flush=True)
             else:
                 # Legacy prefix-based mapping for Feetech/same-type arms
                 leader_prefix = self._get_arm_prefix(leader_id)
@@ -844,6 +867,7 @@ class TeleoperationService:
         self._follower_start_pos = {}  # Captured on first teleop frame
         self._leader_start_rad = {}   # Captured on first teleop frame (Dynamixel raw values for delta tracking)
         self._rad_to_percent_scale = {}  # Per-joint scale factor: radians → RANGE_M100_100 percent
+        self._leader_cal_ranges = {}  # Reset for re-precomputation
         self._filtered_gripper_torque = 0.0  # Reset force feedback filter
         self._blend_start_time = None  # Set when loop actually starts
 
@@ -1174,20 +1198,20 @@ class TeleoperationService:
                             if self._follower_value_mode == "float":
                                 leader_action[f_key] = val  # Damiao: radians
                             elif self._follower_value_mode == "rad_to_percent":
-                                # Delta-based: track leader change from start, apply to follower start position
-                                if l_key in self._leader_start_rad and f_key in self._follower_start_pos:
-                                    delta = val - self._leader_start_rad[l_key]
-                                    if 'gripper' in f_key:
-                                        # Absolute mapping: leader 0-1 maps directly to follower 0-100%
-                                        # (delta tracking breaks when follower starts at range extreme)
-                                        leader_action[f_key] = val * 100.0
-                                    else:
+                                if 'gripper' in f_key:
+                                    # Gripper: leader 0-1 → follower 0-100 (already absolute)
+                                    leader_action[f_key] = val * 100.0
+                                elif f_key in self._leader_cal_ranges:
+                                    # Absolute mapping: leader radians → leader's ±100% → follower's ±100%
+                                    rmin, rmax = self._leader_cal_ranges[f_key]
+                                    leader_ticks = (val + np.pi) * 4096.0 / (2 * np.pi)
+                                    leader_action[f_key] = ((leader_ticks - rmin) / (rmax - rmin)) * 200 - 100
+                                else:
+                                    # Fallback: delta-based (no leader calibration available)
+                                    if l_key in self._leader_start_rad and f_key in self._follower_start_pos:
+                                        delta = val - self._leader_start_rad[l_key]
                                         scale = self._rad_to_percent_scale.get(f_key, 100.0 / np.pi)
                                         leader_action[f_key] = self._follower_start_pos[f_key] + delta * scale
-                                else:
-                                    # Fallback before start positions are captured (frame 0)
-                                    if 'gripper' in f_key:
-                                        leader_action[f_key] = val * 100.0
                                     else:
                                         scale = self._rad_to_percent_scale.get(f_key, 100.0 / np.pi)
                                         leader_action[f_key] = val * scale

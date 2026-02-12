@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, RefreshCw, Camera, Check, Settings, Image as ImageIcon, ExternalLink, Trash2, ArrowRight, Plus, Pencil, Layers } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { X, RefreshCw, Camera, Check, Settings, Image as ImageIcon, ExternalLink, Trash2, ArrowRight, Plus, Pencil, Layers, Power, Loader2, AlertCircle } from 'lucide-react';
 
 interface CameraModalProps {
     isOpen: boolean;
@@ -23,6 +23,13 @@ interface CameraDevice {
     type: 'opencv' | 'intelrealsense'; // Camera type
 }
 
+type CameraConnectionStatus = 'connected' | 'disconnected' | 'connecting' | 'disconnecting' | 'error';
+
+interface CameraStatusEntry {
+    status: CameraConnectionStatus;
+    error: string;
+}
+
 export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
     const [activeTab, setActiveTab] = useState<'assign' | 'preview'>('assign');
     const [availableCameras, setAvailableCameras] = useState<CameraDevice[]>([]);
@@ -35,12 +42,32 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
     const [editingRole, setEditingRole] = useState<string | null>(null);
     const [tempRoleName, setTempRoleName] = useState('');
 
+    // Camera connection status
+    const [cameraStatus, setCameraStatus] = useState<Record<string, CameraStatusEntry>>({});
+    const statusPollRef = useRef<NodeJS.Timeout | null>(null);
+
     useEffect(() => {
         if (isOpen) {
             loadConfigs();
             scanCameras();
+            fetchCameraStatus();
         }
+        return () => {
+            if (statusPollRef.current) clearInterval(statusPollRef.current);
+        };
     }, [isOpen]);
+
+    // Poll camera status when preview tab is active
+    useEffect(() => {
+        if (statusPollRef.current) clearInterval(statusPollRef.current);
+
+        if (isOpen && activeTab === 'preview') {
+            statusPollRef.current = setInterval(fetchCameraStatus, 5000);
+        }
+        return () => {
+            if (statusPollRef.current) clearInterval(statusPollRef.current);
+        };
+    }, [isOpen, activeTab]);
 
     // Sync roles with loaded configs, but preserve user-added roles that might not be assigned yet
     useEffect(() => {
@@ -52,6 +79,52 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
             });
         }
     }, [configs]);
+
+    const fetchCameraStatus = async () => {
+        try {
+            const res = await fetch('http://127.0.0.1:8000/cameras/status');
+            if (res.ok) {
+                const data = await res.json();
+                setCameraStatus(prev => {
+                    const merged = { ...prev };
+                    for (const [key, val] of Object.entries(data)) {
+                        const entry = val as CameraStatusEntry;
+                        // Don't overwrite local 'connecting'/'disconnecting' states
+                        if (merged[key]?.status === 'connecting' || merged[key]?.status === 'disconnecting') continue;
+                        merged[key] = entry;
+                    }
+                    return merged;
+                });
+            }
+        } catch {
+            // Silently handle - backend may be reloading
+        }
+    };
+
+    const connectCamera = async (cameraKey: string) => {
+        setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'connecting', error: '' } }));
+        try {
+            const res = await fetch(`http://127.0.0.1:8000/cameras/${cameraKey}/connect`, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'connected') {
+                setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'connected', error: '' } }));
+            } else {
+                setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'error', error: data.message || 'Unknown error' } }));
+            }
+        } catch (e: any) {
+            setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'error', error: e.message || 'Connection failed' } }));
+        }
+    };
+
+    const disconnectCamera = async (cameraKey: string) => {
+        setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnecting', error: '' } }));
+        try {
+            await fetch(`http://127.0.0.1:8000/cameras/${cameraKey}/disconnect`, { method: 'POST' });
+            setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnected', error: '' } }));
+        } catch {
+            setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnected', error: '' } }));
+        }
+    };
 
     const scanCameras = async () => {
         setIsScanning(true);
@@ -219,6 +292,10 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
     const removeAssignment = (cameraName: string) => {
         const newConfigs = configs.filter(c => c.id !== cameraName);
         saveConfig(newConfigs);
+    };
+
+    const getStatusForCamera = (cameraId: string): CameraStatusEntry => {
+        return cameraStatus[cameraId] || { status: 'disconnected', error: '' };
     };
 
     if (!isOpen) return null;
@@ -407,8 +484,8 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
                                                             <Camera className="w-4 h-4 text-neutral-500 dark:text-zinc-400" />
                                                         </div>
                                                         <div>
-                                                            <p className="text-sm font-medium text-black dark:text-white">/dev/video{cam.id}</p>
-                                                            <p className="text-xs text-neutral-500 dark:text-zinc-400 truncate max-w-[150px]">{cam.name}</p>
+                                                            <p className="text-sm font-medium text-black dark:text-white">{typeof cam.id === 'string' && cam.id.includes('video') ? cam.id : cam.name}</p>
+                                                            <p className="text-xs text-neutral-500 dark:text-zinc-400 truncate max-w-[150px]">{cam.type === 'intelrealsense' ? `RealSense ${cam.id}` : cam.name}</p>
                                                         </div>
                                                     </div>
                                                     {/* Check if assigned */}
@@ -432,30 +509,105 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
                     {activeTab === 'preview' && (
                         <div className="h-full bg-black/90 dark:bg-black/95 p-8 flex flex-col overflow-y-auto">
                             <div className="grid grid-cols-2 gap-6">
-                                {configs.map(conf => (
-                                    <div key={conf.id} className="bg-neutral-900 rounded-2xl overflow-hidden border border-white/10 shadow-2xl relative group">
-                                        <img
-                                            src={`http://127.0.0.1:8000/video_feed/${conf.id}`}
-                                            alt={conf.id}
-                                            className="w-full aspect-video object-cover bg-neutral-800"
-                                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-                                        />
-                                        <div className="absolute top-4 left-4">
-                                            <span className="px-3 py-1 bg-black/50 backdrop-blur-md rounded-full text-xs text-white border border-white/20 font-medium flex items-center gap-2">
-                                                <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-                                                {conf.id}
-                                            </span>
-                                        </div>
+                                {configs.map(conf => {
+                                    const status = getStatusForCamera(conf.id);
+                                    const isConnected = status.status === 'connected';
+                                    const isLoading = status.status === 'connecting' || status.status === 'disconnecting';
+                                    const isError = status.status === 'error';
 
-                                        {/* Overlay Stats */}
-                                        <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm">
-                                            <div className="text-center">
-                                                <p className="text-white font-medium mb-2">{conf.width}x{conf.height} @ {conf.fps}fps</p>
-                                                <p className="text-neutral-400 text-xs">/dev/video{conf.video_device_id}</p>
+                                    return (
+                                        <div key={conf.id} className="bg-neutral-900 rounded-2xl overflow-hidden border border-white/10 shadow-2xl relative group">
+                                            {/* Stream or placeholder */}
+                                            {isConnected ? (
+                                                <img
+                                                    src={`http://127.0.0.1:8000/video_feed/${conf.id}?t=${Date.now()}`}
+                                                    alt={conf.id}
+                                                    className="w-full aspect-video object-cover bg-neutral-800"
+                                                    onError={(e) => {
+                                                        // Hide broken image but don't remove — browser will retry MJPEG
+                                                        (e.target as HTMLImageElement).style.opacity = '0.3';
+                                                    }}
+                                                />
+                                            ) : (
+                                                <div className="w-full aspect-video bg-neutral-800 flex items-center justify-center">
+                                                    {isLoading ? (
+                                                        <div className="flex flex-col items-center gap-3">
+                                                            <Loader2 className="w-8 h-8 text-white/30 animate-spin" />
+                                                            <p className="text-white/30 text-sm">
+                                                                {status.status === 'connecting' ? 'Connecting...' : 'Disconnecting...'}
+                                                            </p>
+                                                        </div>
+                                                    ) : isError ? (
+                                                        <div className="flex flex-col items-center gap-3 px-6 text-center">
+                                                            <AlertCircle className="w-8 h-8 text-red-400/60" />
+                                                            <p className="text-red-400/80 text-sm">Connection Failed</p>
+                                                            <p className="text-white/20 text-xs max-w-[200px] truncate">{status.error}</p>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="flex flex-col items-center gap-3">
+                                                            <Camera className="w-8 h-8 text-white/15" />
+                                                            <p className="text-white/20 text-sm">Disconnected</p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
+                                            {/* Camera label */}
+                                            <div className="absolute top-4 left-4">
+                                                <span className="px-3 py-1 bg-black/50 backdrop-blur-md rounded-full text-xs text-white border border-white/20 font-medium flex items-center gap-2">
+                                                    <div className={`w-2 h-2 rounded-full ${
+                                                        isConnected ? 'bg-green-500 animate-pulse' :
+                                                        isLoading ? 'bg-yellow-500 animate-pulse' :
+                                                        isError ? 'bg-red-500' :
+                                                        'bg-neutral-500'
+                                                    }`} />
+                                                    {conf.id}
+                                                    {conf.type === 'intelrealsense' && (
+                                                        <span className="text-blue-400 text-[10px]">RS</span>
+                                                    )}
+                                                </span>
                                             </div>
+
+                                            {/* Connect/Disconnect button */}
+                                            <div className="absolute top-4 right-4">
+                                                {isConnected ? (
+                                                    <button
+                                                        onClick={() => disconnectCamera(conf.id)}
+                                                        className="px-3 py-1.5 bg-red-500/80 hover:bg-red-500 backdrop-blur-md rounded-full text-xs text-white font-medium transition-all flex items-center gap-1.5 opacity-0 group-hover:opacity-100"
+                                                    >
+                                                        <Power className="w-3 h-3" />
+                                                        Disconnect
+                                                    </button>
+                                                ) : isLoading ? (
+                                                    <div className="px-3 py-1.5 bg-yellow-500/50 backdrop-blur-md rounded-full text-xs text-white font-medium flex items-center gap-1.5">
+                                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                                        {status.status === 'connecting' ? 'Connecting' : 'Stopping'}
+                                                    </div>
+                                                ) : (
+                                                    <button
+                                                        onClick={() => connectCamera(conf.id)}
+                                                        className="px-3 py-1.5 bg-green-500/80 hover:bg-green-500 backdrop-blur-md rounded-full text-xs text-white font-medium transition-all flex items-center gap-1.5"
+                                                    >
+                                                        <Power className="w-3 h-3" />
+                                                        Connect
+                                                    </button>
+                                                )}
+                                            </div>
+
+                                            {/* Overlay Stats (on hover, only when connected) */}
+                                            {isConnected && (
+                                                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-sm pointer-events-none">
+                                                    <div className="text-center">
+                                                        <p className="text-white font-medium mb-2">{conf.width}x{conf.height} @ {conf.fps}fps</p>
+                                                        <p className="text-neutral-400 text-xs">
+                                                            {conf.type === 'intelrealsense' ? `RealSense ${conf.video_device_id}` : conf.video_device_id}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                                 {configs.length === 0 && (
                                     <div className="col-span-2 flex flex-col items-center justify-center p-12 text-neutral-500 border-2 border-dashed border-neutral-800 rounded-3xl">
                                         <ImageIcon className="w-12 h-12 mb-4 opacity-20" />

@@ -78,17 +78,9 @@ def is_camera_available(port):
         return ret
     except Exception as e:
         logger.error(f"Error checking camera {port}: {e}")
-        print(f"DEBUG: Camera {port} ERROR: {e}")
         return False
 
-    if not ret:
-        print(f"DEBUG: Camera {port} failed to read frame.")
-    else:
-        print(f"DEBUG: Camera {port} ok.")
-    
-    return ret
-
-def discover_cameras(skip_devices: list = None):
+def discover_cameras(skip_devices: list = None, opencv_only: bool = False):
     """
     Scans for available cameras and returns a list of working camera configurations.
     Returns a dictionary with 'opencv' and 'realsense' lists.
@@ -96,6 +88,9 @@ def discover_cameras(skip_devices: list = None):
     Args:
         skip_devices: List of device paths to skip (e.g., ['/dev/video12']).
                       Used to avoid opening cameras that are already in use.
+        opencv_only: If True, skip RealSense scanning. Used during OpenCV
+                     fallback to avoid creating an rs.context that could
+                     interfere with subsequent RealSense connections.
     """
     if skip_devices is None:
         skip_devices = []
@@ -126,10 +121,10 @@ def discover_cameras(skip_devices: list = None):
                 "fps": 30
             })
             
-    # 2. Scan RealSense Cameras
-    # We can use rs-enumerate-devices or python library if available.
-    # For now, let's assume if we find a device with specific name/id via lsusb or similar
-    # Or just try to init RealSense if we have the library.
+    # 2. Scan RealSense Cameras (skip if caller only needs OpenCV)
+    if opencv_only:
+        return available_cameras
+
     try:
         import pyrealsense2 as rs
         ctx = rs.context()

@@ -63,10 +63,10 @@ robot:
     camera_3:
       fps: 30
       height: 720
-      serial_number_or_name: '218622275492'
+      serial_number_or_name: '336222072963'
       type: intelrealsense
       use_depth: false
-      video_device_id: '218622275492'
+      video_device_id: '336222072963'
       width: 1280
 training:
   batch_size: 8
