@@ -393,7 +393,6 @@ export default function TeleopModal({ isOpen, onClose, maximizedWindow, setMaxim
                                     <GravityWizard
                                         armId={wizardArm}
                                         armKey={wizardArm.includes('left') ? 'left' : wizardArm.includes('right') ? 'right' : 'default'}
-                                        apiBase={API_BASE}
                                         onClose={() => setWizardArm(null)}
                                     />
                                 )}

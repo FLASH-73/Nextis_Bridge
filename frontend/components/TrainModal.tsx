@@ -576,12 +576,12 @@ export default function TrainModal({ isOpen, onClose, maximizedWindow, setMaximi
                             <div>
                                 <label className="block text-sm font-bold text-neutral-700 dark:text-zinc-300 mb-2">Policy Type</label>
                                 <div className="grid grid-cols-2 gap-3">
-                                    {[
-                                        { id: 'smolvla', name: 'SmolVLA', icon: Brain, desc: 'Vision-Language-Action' },
-                                        { id: 'diffusion', name: 'Diffusion', icon: Zap, desc: 'Diffusion Policy' },
-                                        { id: 'pi05', name: 'Pi0.5', icon: Sparkles, desc: 'Open-World VLA', badge: '22GB+ LoRA' },
-                                        { id: 'act', name: 'ACT', icon: Settings, desc: 'Action Chunking', badge: '~8GB' },
-                                    ].map(p => (
+                                    {([
+                                        { id: 'smolvla', name: 'SmolVLA', icon: Brain, desc: 'Vision-Language-Action', badge: undefined as string | undefined, disabled: false },
+                                        { id: 'diffusion', name: 'Diffusion', icon: Zap, desc: 'Diffusion Policy', badge: undefined as string | undefined, disabled: false },
+                                        { id: 'pi05', name: 'Pi0.5', icon: Sparkles, desc: 'Open-World VLA', badge: '22GB+ LoRA', disabled: false },
+                                        { id: 'act', name: 'ACT', icon: Settings, desc: 'Action Chunking', badge: '~8GB', disabled: false },
+                                    ]).map(p => (
                                         <button
                                             key={p.id}
                                             onClick={() => !p.disabled && setPolicyType(p.id as any)}
@@ -1368,7 +1368,7 @@ export default function TrainModal({ isOpen, onClose, maximizedWindow, setMaximi
                                                     tickFormatter={(v) => v.toFixed(3)}
                                                 />
                                                 <Tooltip
-                                                    formatter={(value: number) => [value.toFixed(4), 'Loss']}
+                                                    formatter={(value) => [Number(value).toFixed(4), 'Loss']}
                                                     labelFormatter={(label) => `Step ${label}`}
                                                 />
                                                 <Line

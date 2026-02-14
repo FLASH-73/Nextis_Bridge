@@ -1,13 +1,11 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Minimize2, Maximize2, Cpu, RefreshCw, ChevronDown } from 'lucide-react';
 import { motion, useDragControls } from 'framer-motion';
 import { useResizable } from '../hooks/useResizable';
-
-const API_BASE = typeof window !== 'undefined'
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : 'http://127.0.0.1:8000';
+import { armsApi } from '../lib/api';
+import { usePolling } from '../hooks/usePolling';
 
 interface MotorData {
     name: string;
@@ -51,50 +49,29 @@ export default function MotorMonitorModal({ isOpen, onClose, maximizedWindow, se
     const [motorType, setMotorType] = useState<string>('');
     const [polling, setPolling] = useState(true);
     const [lastUpdate, setLastUpdate] = useState<number>(0);
-    const pollRef = useRef<NodeJS.Timeout | null>(null);
     const [dropdownOpen, setDropdownOpen] = useState(false);
 
     // Fetch arms list
-    useEffect(() => {
-        if (!isOpen) return;
-        const fetchArms = async () => {
-            try {
-                const res = await fetch(`${API_BASE}/arms`);
-                const data = await res.json();
-                const armsList: Arm[] = (data.arms || []).filter((a: Arm) => a.status === 'connected');
-                setArms(armsList);
-                if (armsList.length > 0 && !selectedArm) {
-                    setSelectedArm(armsList[0].id);
-                }
-            } catch { /* ignore */ }
-        };
-        fetchArms();
-        const interval = setInterval(fetchArms, 5000);
-        return () => clearInterval(interval);
-    }, [isOpen]);
+    usePolling(async () => {
+        try {
+            const data = await armsApi.list();
+            const armsList: Arm[] = (data.arms || []).filter((a: Arm) => a.status === 'connected');
+            setArms(armsList);
+            if (armsList.length > 0 && !selectedArm) {
+                setSelectedArm(armsList[0].id);
+            }
+        } catch { /* ignore */ }
+    }, 5000, isOpen);
 
     // Poll motor diagnostics
-    useEffect(() => {
-        if (!isOpen || !selectedArm || !polling) {
-            if (pollRef.current) clearInterval(pollRef.current);
-            return;
-        }
-
-        const fetchDiagnostics = async () => {
-            try {
-                const res = await fetch(`${API_BASE}/arms/${selectedArm}/motors/diagnostics`);
-                if (!res.ok) return;
-                const data = await res.json();
-                setMotors(data.motors || []);
-                setMotorType(data.motor_type || '');
-                setLastUpdate(Date.now());
-            } catch { /* ignore */ }
-        };
-
-        fetchDiagnostics();
-        pollRef.current = setInterval(fetchDiagnostics, 500);
-        return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, [isOpen, selectedArm, polling]);
+    usePolling(async () => {
+        try {
+            const data = await armsApi.motorDiagnostics(selectedArm);
+            setMotors(data.motors || []);
+            setMotorType((data as any).motor_type || '');
+            setLastUpdate(Date.now());
+        } catch { /* ignore */ }
+    }, 500, isOpen && !!selectedArm && polling);
 
     // Clear motors when arm changes
     useEffect(() => { setMotors([]); }, [selectedArm]);

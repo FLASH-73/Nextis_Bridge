@@ -1,14 +1,14 @@
 import React, { useState } from 'react';
 import { ArrowLeft, ArrowRight, CheckCircle, RotateCcw, Weight, Activity, Lock, Unlock, Play } from 'lucide-react';
+import { API_BASE, calibrationApi } from '../lib/api';
 
 interface GravityWizardProps {
     armKey: string;
     armId: string;
     onClose: () => void;
-    apiBase: string;
 }
 
-export default function GravityWizard({ armKey, armId, onClose, apiBase }: GravityWizardProps) {
+export default function GravityWizard({ armKey, armId, onClose }: GravityWizardProps) {
     const [step, setStep] = useState<'INTRO' | 'CAPTURE' | 'COMPUTING' | 'DONE'>('INTRO');
     const [samples, setSamples] = useState(0);
     const [isCapturing, setIsCapturing] = useState(false);
@@ -34,11 +34,7 @@ export default function GravityWizard({ armKey, armId, onClose, apiBase }: Gravi
     // Toggle Torque Helper
     const setTorque = async (enable: boolean) => {
         try {
-            await fetch(`${apiBase}/calibration/${armId}/torque`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enable })
-            });
+            await calibrationApi.torque(armId, enable);
             setIsLocked(enable);
         } catch (e) {
             console.error("Torque toggle failed", e);
@@ -48,7 +44,7 @@ export default function GravityWizard({ armKey, armId, onClose, apiBase }: Gravi
     const startCalibration = async () => {
         try {
             // Use armId (full unique ID) instead of armKey
-            const res = await fetch(`${apiBase}/calibration/${armId}/gravity/start`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/calibration/${armId}/gravity/start`, { method: 'POST' });
             const data = await res.json();
             if (data.status === 'success') {
                 setStep('CAPTURE');
@@ -68,7 +64,7 @@ export default function GravityWizard({ armKey, armId, onClose, apiBase }: Gravi
 
         setIsCapturing(true);
         try {
-            const res = await fetch(`${apiBase}/calibration/${armId}/gravity/sample`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/calibration/${armId}/gravity/sample`, { method: 'POST' });
             const data = await res.json();
             if (data.status === 'success') {
                 setSamples(data.samples);
@@ -87,7 +83,7 @@ export default function GravityWizard({ armKey, armId, onClose, apiBase }: Gravi
     const finishCalibration = async () => {
         setStep('COMPUTING');
         try {
-            const res = await fetch(`${apiBase}/calibration/${armId}/gravity/compute`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/calibration/${armId}/gravity/compute`, { method: 'POST' });
             const data = await res.json();
             if (data.status === 'success') {
                 setStep('DONE');

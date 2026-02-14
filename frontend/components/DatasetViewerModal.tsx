@@ -1435,7 +1435,7 @@ export default function DatasetViewerModal({ isOpen, onClose, maximizedWindow, s
                                                             />
                                                             <Tooltip
                                                                 contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e5e5', borderRadius: '8px', fontSize: '12px' }}
-                                                                formatter={(value: number) => [value.toFixed(4), 'Loss']}
+                                                                formatter={(value) => [Number(value).toFixed(4), 'Loss']}
                                                                 labelFormatter={(label) => `Step ${label}`}
                                                             />
                                                             {selectedPolicyData.length > 1 && <Legend />}

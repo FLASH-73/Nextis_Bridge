@@ -2,7 +2,7 @@
 
 import { X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import FileUploader from "./FileUploader";
+import FileUploader from "./modals/upload";
 import { type Dataset } from "../lib/supabase";
 
 interface UploadModalProps {
