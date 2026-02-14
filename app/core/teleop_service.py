@@ -2,12 +2,36 @@ import time
 import threading
 import logging
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 
 from app.core.safety_layer import SafetyLayer
 from app.core.leader_assist import LeaderAssistService
 from lerobot.motors.feetech.feetech import OperatingMode
+
+
+@dataclass
+class PairingContext:
+    """Per-pairing state for independent teleop loops.
+
+    Each leader→follower pair gets its own context so that multiple pairs
+    can run simultaneously without cross-contaminating mapping, scaling,
+    or value-mode state.
+    """
+    pairing_id: str            # e.g. "aira_zero_leader→aira_zero"
+    active_leader: object      # Leader arm instance
+    active_robot: object       # Follower arm instance
+    joint_mapping: dict        # {leader_key: follower_key}
+    follower_value_mode: str   # "float" (Damiao rad), "rad_to_percent" (Dyn→Feetech), "int" (legacy)
+    has_damiao_follower: bool
+    leader_cal_ranges: dict    # {follower_key: (range_min, range_max)} from leader calibration
+    # Mutable per-loop state (reset each start):
+    follower_start_pos: dict = field(default_factory=dict)
+    leader_start_rad: dict = field(default_factory=dict)
+    rad_to_percent_scale: dict = field(default_factory=dict)
+    blend_start_time: float | None = None
+    filtered_gripper_torque: float = 0.0
 
 # Compute project root relative to this file (app/core/teleop_service.py -> project root)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -83,10 +107,16 @@ class TeleoperationService:
         self.history_lock = threading.Lock()
         self.action_history = deque(maxlen=self.max_history)
         
-        # Optimization: Pre-computed mappings
+        # Optimization: Pre-computed mappings (legacy single-pair; kept for backward compat)
         self.joint_mapping = {} # {leader_key: follower_key}
         self.assist_groups = {} # {arm_key: [joint_name, ...]}
         self._leader_cal_ranges = {}  # {follower_key: (range_min, range_max)} from leader calibration
+        self._active_leader = None  # Resolved in start() from arm registry or legacy
+        self._active_robot = None   # Resolved in start() from arm registry or legacy
+
+        # Multi-pair support: per-pairing contexts and threads
+        self._pairing_contexts: list[PairingContext] = []
+        self._teleop_threads: list[threading.Thread] = []
 
         # Gripper Force Feedback (follower torque → leader current ceiling)
         self._force_feedback_enabled = True
@@ -667,6 +697,77 @@ class TeleoperationService:
             for lk, fk in self.joint_mapping.items():
                 logger.info(f"  {lk} → {fk}")
 
+    def _build_pairing_context(self, pairing: dict, leader_inst, follower_inst) -> PairingContext:
+        """Build a fully independent PairingContext for one leader→follower pair.
+
+        This ensures each pair's mapping, value mode, and scaling are isolated
+        from other pairs — preventing the cross-contamination that caused the
+        Damiao crash when running simultaneously with Feetech pairs.
+        """
+        leader_id = pairing['leader_id']
+        follower_id = pairing['follower_id']
+        pairing_id = f"{leader_id}→{follower_id}"
+
+        joint_mapping = {}
+        follower_value_mode = "int"
+        has_damiao_follower = False
+        leader_cal_ranges = {}
+
+        # Determine arm types
+        leader_arm = self.arm_registry.arms.get(leader_id) if self.arm_registry else None
+        follower_arm = self.arm_registry.arms.get(follower_id) if self.arm_registry else None
+
+        is_dynamixel_leader = leader_arm and leader_arm.motor_type in ('dynamixel_xl330', 'dynamixel_xl430')
+        is_damiao_follower_arm = follower_arm and follower_arm.motor_type == 'damiao'
+        is_feetech_follower = follower_arm and follower_arm.motor_type == 'sts3215'
+
+        if is_dynamixel_leader and is_damiao_follower_arm:
+            # Dynamixel→Damiao: direct mapping, float radians passthrough
+            for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
+                joint_mapping[f"{dyn_name}.pos"] = f"{dam_name}.pos"
+            has_damiao_follower = True
+            follower_value_mode = "float"
+        elif is_dynamixel_leader and is_feetech_follower:
+            # Dynamixel→Feetech: direct mapping, rad→percent conversion
+            for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
+                joint_mapping[f"{dyn_name}.pos"] = f"{dam_name}.pos"
+            follower_value_mode = "rad_to_percent"
+            # Precompute leader calibration ranges for absolute rad→percent mapping
+            if leader_inst and hasattr(leader_inst, 'calibration') and leader_inst.calibration:
+                for dyn_name, dam_name in self.DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
+                    if dyn_name == "gripper":
+                        continue
+                    l_cal = leader_inst.calibration.get(dyn_name)
+                    if l_cal:
+                        f_key = f"{dam_name}.pos"
+                        leader_cal_ranges[f_key] = (l_cal.range_min, l_cal.range_max)
+                if leader_cal_ranges:
+                    print(f"[Teleop] [{pairing_id}] Absolute mapping: {len(leader_cal_ranges)} joints from leader calibration", flush=True)
+                else:
+                    print(f"[Teleop] [{pairing_id}] WARNING: Leader calibration missing — falling back to relative delta tracking", flush=True)
+        else:
+            # Legacy prefix-based mapping for Feetech/same-type arms
+            leader_prefix = self._get_arm_prefix(leader_id)
+            follower_prefix = self._get_arm_prefix(follower_id)
+            for name in self.joint_names_template:
+                leader_key = f"{leader_prefix}{name}.pos"
+                follower_key = f"{follower_prefix}{name}.pos"
+                joint_mapping[leader_key] = follower_key
+
+        logger.info(f"[{pairing_id}] Built context: mode={follower_value_mode}, damiao={has_damiao_follower}, {len(joint_mapping)} joints")
+        for lk, fk in joint_mapping.items():
+            logger.info(f"  [{pairing_id}] {lk} → {fk}")
+
+        return PairingContext(
+            pairing_id=pairing_id,
+            active_leader=leader_inst,
+            active_robot=follower_inst,
+            joint_mapping=joint_mapping,
+            follower_value_mode=follower_value_mode,
+            has_damiao_follower=has_damiao_follower,
+            leader_cal_ranges=leader_cal_ranges,
+        )
+
     def _get_arm_prefix(self, arm_id: str) -> str:
         """Get the joint name prefix for an arm ID."""
         # For legacy IDs like "left_follower", "right_leader" -> extract side
@@ -769,21 +870,19 @@ class TeleoperationService:
              else:
                  logger.warning(f"FORCE START: {msg}")
         
-        # Optimize Mappings
-        self._precompute_mappings()
-
         # Resolve active robot/leader from arm registry pairings
-        # This allows different arm types (Damiao, Dynamixel, etc.) to be used
-        # without changing the legacy robot/leader references.
-        self._active_robot = self.robot  # default to legacy
+        # Build per-pairing contexts for independent teleop loops
+        self._active_robot = self.robot  # default to legacy (used by recording)
         self._active_leader = self.leader  # default to legacy
+        self._pairing_contexts = []
+        self._teleop_threads = []
         print(f"[TELEOP] arm_registry={self.arm_registry is not None}, active_arms={self.active_arms}", flush=True)
 
         if self.arm_registry and self.active_arms:
             pairings = self.arm_registry.get_active_pairings(self.active_arms)
             print(f"[TELEOP] Found {len(pairings)} pairings for active_arms={self.active_arms}", flush=True)
-            if pairings:
-                pairing = pairings[0]  # Use first active pairing
+
+            for pairing in pairings:
                 leader_id = pairing['leader_id']
                 follower_id = pairing['follower_id']
                 print(f"[TELEOP] Resolving arm instances for pairing: {leader_id} → {follower_id}", flush=True)
@@ -798,6 +897,7 @@ class TeleoperationService:
                         import traceback
                         print(f"[TELEOP] Leader connect EXCEPTION: {e}", flush=True)
                         traceback.print_exc()
+                        continue  # Skip this pairing if leader can't connect
                 else:
                     print(f"[TELEOP] Leader {leader_id} already connected", flush=True)
                 if follower_id not in self.arm_registry.arm_instances:
@@ -809,6 +909,7 @@ class TeleoperationService:
                         import traceback
                         print(f"[TELEOP] Follower connect EXCEPTION: {e}", flush=True)
                         traceback.print_exc()
+                        continue  # Skip this pairing if follower can't connect
                 else:
                     print(f"[TELEOP] Follower {follower_id} already connected", flush=True)
 
@@ -816,27 +917,44 @@ class TeleoperationService:
                 follower_inst = self.arm_registry.arm_instances.get(follower_id)
 
                 if leader_inst:
-                    self._active_leader = leader_inst
                     print(f"[TELEOP] Using arm-registry leader: {leader_id} ({type(leader_inst).__name__})", flush=True)
                 else:
-                    print(f"[TELEOP] WARNING: No instance for leader {leader_id}, using legacy leader ({type(self.leader).__name__ if self.leader else 'None'})", flush=True)
+                    print(f"[TELEOP] WARNING: No instance for leader {leader_id}, skipping pairing", flush=True)
+                    continue
                 if follower_inst:
-                    self._active_robot = follower_inst
                     print(f"[TELEOP] Using arm-registry follower: {follower_id} ({type(follower_inst).__name__})", flush=True)
                 else:
-                    print(f"[TELEOP] WARNING: No instance for follower {follower_id}, using legacy robot ({type(self.robot).__name__ if self.robot else 'None'})", flush=True)
+                    print(f"[TELEOP] WARNING: No instance for follower {follower_id}, skipping pairing", flush=True)
+                    continue
+
+                # Build isolated per-pairing context (prevents cross-contamination)
+                ctx = self._build_pairing_context(pairing, leader_inst, follower_inst)
+                self._pairing_contexts.append(ctx)
+
+                # Reload inversions per follower
+                if hasattr(follower_inst, "reload_inversions"):
+                    try:
+                        follower_inst.reload_inversions()
+                    except Exception as e:
+                        logger.warning(f"Failed to reload inversions for {follower_id}: {e}")
+
+                # Enable torque per follower
+                self._enable_torque_for_robot(follower_inst)
+
+            # Set _active_robot/_active_leader to first pair for recording/legacy compatibility
+            if self._pairing_contexts:
+                self._active_robot = self._pairing_contexts[0].active_robot
+                self._active_leader = self._pairing_contexts[0].active_leader
+                # Also set legacy joint_mapping/value_mode from first pair (for any code
+                # that still reads self.joint_mapping directly)
+                self.joint_mapping = self._pairing_contexts[0].joint_mapping
+                self._follower_value_mode = self._pairing_contexts[0].follower_value_mode
+                self._has_damiao_follower = self._pairing_contexts[0].has_damiao_follower
+                self._leader_cal_ranges = self._pairing_contexts[0].leader_cal_ranges
         else:
             print(f"[TELEOP] No arm_registry or no active_arms — using legacy robot/leader", flush=True)
-
-        # Reload Inversions (Ensure latest config from disk is applied)
-        if hasattr(self._active_robot, "reload_inversions"):
-            try:
-                 self._active_robot.reload_inversions()
-            except Exception as e:
-                 logger.warning(f"Failed to reload inversions on start: {e}")
-
-        # Enable Torque for Follower Arms
-        self._enable_torque_for_active_arms()
+            # Legacy single-pair: build context from self.robot/self.leader
+            self._precompute_mappings()
 
         # Switch Leader to PWM Mode for Active Assist
         if self.leader and self.leader_assists:
@@ -858,29 +976,51 @@ class TeleoperationService:
                          self.leader.right_arm.bus.disable_torque()
                     else:
                          self.leader.bus.disable_torque()
-                         
+
             except Exception as e:
                 logger.error(f"Failed to switch Leader Mode: {e}")
-                 
-        # Startup blend config (timer set in _teleop_loop to avoid thread-start delay)
+
+        # Startup blend config
         self._blend_duration = 0.5  # seconds — rate limiter provides additional smooth ramping
-        self._follower_start_pos = {}  # Captured on first teleop frame
-        self._leader_start_rad = {}   # Captured on first teleop frame (Dynamixel raw values for delta tracking)
-        self._rad_to_percent_scale = {}  # Per-joint scale factor: radians → RANGE_M100_100 percent
-        self._leader_cal_ranges = {}  # Reset for re-precomputation
         self._filtered_gripper_torque = 0.0  # Reset force feedback filter
-        self._blend_start_time = None  # Set when loop actually starts
 
         self.is_running = True
 
-        # Start Control Loop Thread
-        self.thread = threading.Thread(target=self._teleop_loop, daemon=True)
-        self.thread.start()
+        # Start per-pairing teleop loop threads
+        if self._pairing_contexts:
+            for ctx in self._pairing_contexts:
+                t = threading.Thread(
+                    target=self._teleop_loop,
+                    args=(ctx,),
+                    daemon=True,
+                    name=f"teleop-{ctx.pairing_id}",
+                )
+                self._teleop_threads.append(t)
+                t.start()
+                print(f"[TELEOP] Started loop thread for {ctx.pairing_id}", flush=True)
+        else:
+            # Legacy single-pair fallback: build a context from self state
+            ctx = PairingContext(
+                pairing_id="legacy",
+                active_leader=self._active_leader,
+                active_robot=self._active_robot,
+                joint_mapping=self.joint_mapping,
+                follower_value_mode=getattr(self, '_follower_value_mode', 'int'),
+                has_damiao_follower=getattr(self, '_has_damiao_follower', False),
+                leader_cal_ranges=self._leader_cal_ranges,
+            )
+            self._pairing_contexts = [ctx]
+            t = threading.Thread(target=self._teleop_loop, args=(ctx,), daemon=True, name="teleop-legacy")
+            self._teleop_threads = [t]
+            t.start()
 
     def _enable_torque_for_active_arms(self):
-        """Helper to enable torque on follower arms involved in teleop."""
-        # Use arm-registry active robot if available, otherwise legacy
+        """Legacy helper — delegates to _enable_torque_for_robot with self._active_robot."""
         active_robot = getattr(self, '_active_robot', None) or self.robot
+        self._enable_torque_for_robot(active_robot)
+
+    def _enable_torque_for_robot(self, active_robot):
+        """Enable torque on a specific follower robot instance."""
         if not active_robot:
             print("[TELEOP] WARNING: No active robot for torque enable", flush=True)
             return
@@ -926,9 +1066,18 @@ class TeleoperationService:
             return
         logger.info("Stopping teleoperation...")
         self.is_running = False
-        # Only join if we're not being called from within the thread itself
-        if self.thread and self.thread != threading.current_thread():
-            self.thread.join(timeout=2.0)
+
+        # Join all per-pairing teleop threads
+        current = threading.current_thread()
+        for t in self._teleop_threads:
+            if t and t != current and t.is_alive():
+                t.join(timeout=2.0)
+        # Legacy fallback: join self.thread if it exists
+        if hasattr(self, 'thread') and self.thread and self.thread != current:
+            try:
+                self.thread.join(timeout=2.0)
+            except Exception:
+                pass
 
         # Stop observation capture thread if running
         self._stop_obs_thread()
@@ -955,46 +1104,65 @@ class TeleoperationService:
             except Exception as e:
                 logger.error(f"Failed to restore Leader Mode: {e}")
 
-        # Reset force feedback: restore baseline Goal_Current on leader gripper
-        if self._has_damiao_follower and self._active_leader:
-            try:
-                self._active_leader.bus.write(
-                    "Goal_Current", "gripper", self._ff_baseline_current, normalize=False
-                )
-            except Exception as e:
-                logger.warning(f"Failed to reset gripper Goal_Current: {e}")
-
-            # Zero joint force feedback current (joint_4 → limp)
-            if self._joint_ff_enabled:
+        # Per-pairing cleanup: reset force feedback and home each follower
+        for ctx in self._pairing_contexts:
+            # Reset force feedback on leader gripper
+            if ctx.has_damiao_follower and ctx.active_leader:
                 try:
-                    self._active_leader.bus.write(
-                        "Goal_Current", "joint_4", 0, normalize=False
+                    ctx.active_leader.bus.write(
+                        "Goal_Current", "gripper", self._ff_baseline_current, normalize=False
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[{ctx.pairing_id}] Failed to reset gripper Goal_Current: {e}")
 
-        # Home follower arm (or disable immediately if no home position)
-        active_robot = getattr(self, '_active_robot', self.robot)
-        if active_robot:
-            home_pos = self._get_home_position(active_robot)
-            if home_pos:
-                logger.info(f"Homing follower to saved position ({len(home_pos)} joints)...")
-                self._homing_cancel = False
-                self._homing_thread = threading.Thread(
-                    target=self._homing_loop,
-                    args=(active_robot, home_pos),
-                    daemon=True
-                )
-                self._homing_thread.start()
-            else:
-                self._disable_follower_motors(active_robot)
+                # Zero joint force feedback current (joint_4 → limp)
+                if self._joint_ff_enabled:
+                    try:
+                        ctx.active_leader.bus.write(
+                            "Goal_Current", "joint_4", 0, normalize=False
+                        )
+                    except Exception:
+                        pass
+
+            # Home follower arm (or disable immediately if no home position)
+            if ctx.active_robot:
+                home_pos = self._get_home_position(ctx.active_robot)
+                if home_pos:
+                    logger.info(f"[{ctx.pairing_id}] Homing follower to saved position ({len(home_pos)} joints)...")
+                    self._homing_cancel = False
+                    self._homing_thread = threading.Thread(
+                        target=self._homing_loop,
+                        args=(ctx.active_robot, home_pos),
+                        daemon=True
+                    )
+                    self._homing_thread.start()
+                else:
+                    self._disable_follower_motors(ctx.active_robot)
+
+        # Legacy fallback if no pairing contexts (shouldn't happen, but just in case)
+        if not self._pairing_contexts:
+            active_robot = getattr(self, '_active_robot', self.robot)
+            if active_robot:
+                home_pos = self._get_home_position(active_robot)
+                if home_pos:
+                    self._homing_cancel = False
+                    self._homing_thread = threading.Thread(
+                        target=self._homing_loop,
+                        args=(active_robot, home_pos),
+                        daemon=True
+                    )
+                    self._homing_thread.start()
+                else:
+                    self._disable_follower_motors(active_robot)
 
         # Reset active instances
         self._active_robot = self.robot
         self._active_leader = self.leader
-            
+        self._pairing_contexts = []
+        self._teleop_threads = []
+
         logger.info("Teleoperation stopped.")
-        
+
         if hasattr(self, '_debug_handler'):
              logger.removeHandler(self._debug_handler)
              self._debug_handler.close()
@@ -1061,12 +1229,18 @@ class TeleoperationService:
             except Exception:
                 pass
 
-    def _teleop_loop(self):
-        logger.info(f"Teleoperation Control Loop Running at {self.frequency}Hz (Optimization Enabled)")
-        print(f"[TELEOP] Control loop started at {self.frequency}Hz", flush=True)
+    def _teleop_loop(self, ctx: PairingContext):
+        """Main teleop control loop for one leader→follower pairing.
+
+        Each pairing runs in its own thread with fully isolated state via ctx,
+        preventing cross-contamination between different arm types.
+        """
+        pid = ctx.pairing_id
+        logger.info(f"[{pid}] Teleoperation Control Loop Running at {self.frequency}Hz")
+        print(f"[TELEOP] [{pid}] Control loop started at {self.frequency}Hz", flush=True)
 
         # Start blend timer NOW — when the loop actually begins executing
-        self._blend_start_time = time.time()
+        ctx.blend_start_time = time.time()
 
         loop_count = 0
         self.last_loop_time = time.perf_counter()
@@ -1084,13 +1258,13 @@ class TeleoperationService:
                 # Capture Follower Obs (Needed for Recording)
                 follower_obs = {}
 
-                if self._active_leader:
+                if ctx.active_leader:
                     obs = None
 
                     # Retry loop for transient serial communication errors on leader
                     for attempt in range(3):
                         try:
-                            obs = self._active_leader.get_action()
+                            obs = ctx.active_leader.get_action()
                             break  # Success
                         except (OSError, ConnectionError) as e:
                             error_str = str(e)
@@ -1185,106 +1359,113 @@ class TeleoperationService:
 
                     # Debug: log on first frame to diagnose mapping issues
                     if loop_count == 0:
-                        print(f"[TELEOP DEBUG] _active_leader type: {type(self._active_leader).__name__}", flush=True)
-                        print(f"[TELEOP DEBUG] _active_robot type: {type(self._active_robot).__name__}", flush=True)
-                        print(f"[TELEOP DEBUG] joint_mapping ({len(self.joint_mapping)} entries): {self.joint_mapping}", flush=True)
+                        print(f"[TELEOP DEBUG] [{pid}] _active_leader type: {type(ctx.active_leader).__name__}", flush=True)
+                        print(f"[TELEOP DEBUG] [{pid}] _active_robot type: {type(ctx.active_robot).__name__}", flush=True)
+                        print(f"[TELEOP DEBUG] [{pid}] joint_mapping ({len(ctx.joint_mapping)} entries): {ctx.joint_mapping}", flush=True)
                         print(f"[TELEOP DEBUG] obs keys from leader: {list(obs.keys()) if obs else 'None'}", flush=True)
 
                     # 1b. Map to Follower Action (Optimized)
-                    # Use pre-computed mapping
-                    for l_key, f_key in self.joint_mapping.items():
+                    # Use per-pairing mapping from ctx (prevents cross-contamination)
+                    for l_key, f_key in ctx.joint_mapping.items():
                         if l_key in obs:
                             val = obs[l_key]
-                            if self._follower_value_mode == "float":
+                            if ctx.follower_value_mode == "float":
                                 leader_action[f_key] = val  # Damiao: radians
-                            elif self._follower_value_mode == "rad_to_percent":
+                            elif ctx.follower_value_mode == "rad_to_percent":
                                 if 'gripper' in f_key:
                                     # Gripper: leader 0-1 → follower 0-100 (already absolute)
                                     leader_action[f_key] = val * 100.0
-                                elif f_key in self._leader_cal_ranges:
+                                elif f_key in ctx.leader_cal_ranges:
                                     # Absolute mapping: leader radians → leader's ±100% → follower's ±100%
-                                    rmin, rmax = self._leader_cal_ranges[f_key]
+                                    rmin, rmax = ctx.leader_cal_ranges[f_key]
                                     leader_ticks = (val + np.pi) * 4096.0 / (2 * np.pi)
+                                    # Unwrap: if homed ticks crossed the 0/4096 encoder boundary,
+                                    # bring them back into the calibration range
+                                    center = (rmin + rmax) * 0.5
+                                    while leader_ticks < center - 2048:
+                                        leader_ticks += 4096
+                                    while leader_ticks > center + 2048:
+                                        leader_ticks -= 4096
                                     leader_action[f_key] = ((leader_ticks - rmin) / (rmax - rmin)) * 200 - 100
                                 else:
                                     # Fallback: delta-based (no leader calibration available)
-                                    if l_key in self._leader_start_rad and f_key in self._follower_start_pos:
-                                        delta = val - self._leader_start_rad[l_key]
-                                        scale = self._rad_to_percent_scale.get(f_key, 100.0 / np.pi)
-                                        leader_action[f_key] = self._follower_start_pos[f_key] + delta * scale
+                                    if l_key in ctx.leader_start_rad and f_key in ctx.follower_start_pos:
+                                        delta = val - ctx.leader_start_rad[l_key]
+                                        scale = ctx.rad_to_percent_scale.get(f_key, 100.0 / np.pi)
+                                        leader_action[f_key] = ctx.follower_start_pos[f_key] + delta * scale
                                     else:
-                                        scale = self._rad_to_percent_scale.get(f_key, 100.0 / np.pi)
+                                        scale = ctx.rad_to_percent_scale.get(f_key, 100.0 / np.pi)
                                         leader_action[f_key] = val * scale
                             else:
                                 leader_action[f_key] = int(val)  # Legacy Feetech→Feetech
 
                     if loop_count == 0:
-                        print(f"[TELEOP DEBUG] leader_action after mapping ({len(leader_action)} entries): {leader_action}", flush=True)
+                        print(f"[TELEOP DEBUG] [{pid}] leader_action after mapping ({len(leader_action)} entries): {leader_action}", flush=True)
 
                     # 1c. Startup blend: ramp from follower's current position
-                    if self._blend_start_time and leader_action:
+                    if ctx.blend_start_time and leader_action:
                         # First frame: capture leader start for delta-based tracking (Dynamixel→Feetech)
-                        if not self._leader_start_rad and self._follower_value_mode == "rad_to_percent" and obs:
-                            self._leader_start_rad = {l_key: obs[l_key] for l_key in self.joint_mapping if l_key in obs}
-                            print(f"[Teleop] Delta tracking: captured {len(self._leader_start_rad)} leader start positions", flush=True)
+                        if not ctx.leader_start_rad and ctx.follower_value_mode == "rad_to_percent" and obs:
+                            ctx.leader_start_rad = {l_key: obs[l_key] for l_key in ctx.joint_mapping if l_key in obs}
+                            print(f"[Teleop] [{pid}] Delta tracking: captured {len(ctx.leader_start_rad)} leader start positions", flush=True)
 
                         # First frame: capture follower's actual position
-                        if not self._follower_start_pos and self._active_robot:
+                        if not ctx.follower_start_pos and ctx.active_robot:
                             try:
-                                fobs = self._active_robot.get_observation()
-                                self._follower_start_pos = {
+                                fobs = ctx.active_robot.get_observation()
+                                ctx.follower_start_pos = {
                                     k: v for k, v in fobs.items() if k.endswith('.pos')
                                 }
-                                print(f"[Teleop] Startup blend: captured {len(self._follower_start_pos)} follower positions", flush=True)
+                                print(f"[Teleop] [{pid}] Startup blend: captured {len(ctx.follower_start_pos)} follower positions", flush=True)
                             except Exception as e:
-                                print(f"[Teleop] Startup blend: get_observation() FAILED: {e}", flush=True)
+                                print(f"[Teleop] [{pid}] Startup blend: get_observation() FAILED: {e}", flush=True)
                                 # Fallback: use last known positions from bus (seeded during configure)
-                                if hasattr(self._active_robot, 'bus') and hasattr(self._active_robot.bus, '_last_positions'):
-                                    lp = self._active_robot.bus._last_positions
-                                    self._follower_start_pos = {f"{k}.pos": v for k, v in lp.items()}
-                                    print(f"[Teleop] Startup blend: using bus fallback ({len(self._follower_start_pos)} joints)", flush=True)
+                                if hasattr(ctx.active_robot, 'bus') and hasattr(ctx.active_robot.bus, '_last_positions'):
+                                    lp = ctx.active_robot.bus._last_positions
+                                    ctx.follower_start_pos = {f"{k}.pos": v for k, v in lp.items()}
+                                    print(f"[Teleop] [{pid}] Startup blend: using bus fallback ({len(ctx.follower_start_pos)} joints)", flush=True)
 
                         # Compute per-joint rad→percent scale factors from follower calibration
-                        if not self._rad_to_percent_scale and self._follower_value_mode == "rad_to_percent":
-                            if hasattr(self._active_robot, 'calibration') and self._active_robot.calibration:
-                                for l_key, f_key in self.joint_mapping.items():
+                        if not ctx.rad_to_percent_scale and ctx.follower_value_mode == "rad_to_percent":
+                            if hasattr(ctx.active_robot, 'calibration') and ctx.active_robot.calibration:
+                                for l_key, f_key in ctx.joint_mapping.items():
                                     motor_name = f_key.replace('.pos', '')
                                     if 'gripper' in motor_name:
                                         continue  # Gripper uses its own scaling
-                                    cal = self._active_robot.calibration.get(motor_name)
+                                    cal = ctx.active_robot.calibration.get(motor_name)
                                     if cal:
                                         tick_range = cal.range_max - cal.range_min
                                         if tick_range > 0:
-                                            self._rad_to_percent_scale[f_key] = 4096.0 * 100.0 / (np.pi * tick_range)
-                                print(f"[Teleop] Per-joint scales: { {k: f'{v:.1f}' for k, v in self._rad_to_percent_scale.items()} }", flush=True)
+                                            ctx.rad_to_percent_scale[f_key] = 4096.0 * 100.0 / (np.pi * tick_range)
+                                print(f"[Teleop] [{pid}] Per-joint scales: { {k: f'{v:.1f}' for k, v in ctx.rad_to_percent_scale.items()} }", flush=True)
 
-                        elapsed = time.time() - self._blend_start_time
+                        elapsed = time.time() - ctx.blend_start_time
                         alpha = min(1.0, elapsed / self._blend_duration)
 
-                        if alpha < 1.0 and self._follower_start_pos:
+                        if alpha < 1.0 and ctx.follower_start_pos:
                             for key in list(leader_action.keys()):
-                                if key in self._follower_start_pos:
-                                    start = self._follower_start_pos[key]
+                                if key in ctx.follower_start_pos:
+                                    start = ctx.follower_start_pos[key]
                                     target = leader_action[key]
                                     leader_action[key] = start + alpha * (target - start)
 
                             # First-frame diagnostic: log large position deltas
                             if loop_count == 0:
                                 for key in list(leader_action.keys()):
-                                    if key in self._follower_start_pos:
+                                    if key in ctx.follower_start_pos:
                                         orig_target = leader_action.get(key, 0)  # Already blended
-                                        follower_pos = self._follower_start_pos[key]
+                                        follower_pos = ctx.follower_start_pos[key]
                                         raw_delta = orig_target - follower_pos
                                         if abs(raw_delta) > 0.01:
-                                            print(f"[Teleop] Blend frame 0: {key} "
+                                            print(f"[Teleop] [{pid}] Blend frame 0: {key} "
                                                   f"follower={follower_pos:.3f}, blended={orig_target:.3f}, "
                                                   f"delta={raw_delta:+.4f} rad", flush=True)
 
                 # Debug: trace link3 position through teleop pipeline (first 5 frames)
                 if loop_count < 5 and leader_action and "link3.pos" in leader_action:
-                    _alpha = alpha if self._blend_start_time else -1.0
-                    blend_active = (self._blend_start_time is not None and _alpha < 1.0)
-                    fstart = self._follower_start_pos.get("link3.pos", "N/A") if self._follower_start_pos else "N/A"
+                    _alpha = alpha if ctx.blend_start_time else -1.0
+                    blend_active = (ctx.blend_start_time is not None and _alpha < 1.0)
+                    fstart = ctx.follower_start_pos.get("link3.pos", "N/A") if ctx.follower_start_pos else "N/A"
                     print(f"[Teleop] Frame {loop_count}: link3.pos={leader_action['link3.pos']:.4f} "
                           f"(alpha={_alpha:.4f}, blend_active={blend_active}, "
                           f"follower_start={fstart})", flush=True)
@@ -1293,20 +1474,20 @@ class TeleoperationService:
                 # Key insight from LeRobot: send_action and get_observation are independent.
                 # Motor writes use sync_write (no response wait), cameras have background threads.
                 # NO LOCK NEEDED - LeRobot's architecture handles thread safety at bus level.
-                if leader_action and self._active_robot:
+                if leader_action and ctx.active_robot:
                     try:
-                        self._active_robot.send_action(leader_action)
+                        ctx.active_robot.send_action(leader_action)
                         if loop_count == 0:
-                            print(f"[TELEOP DEBUG] send_action SUCCESS, sent {len(leader_action)} values to {type(self._active_robot).__name__}", flush=True)
+                            print(f"[TELEOP DEBUG] [{pid}] send_action SUCCESS, sent {len(leader_action)} values to {type(ctx.active_robot).__name__}", flush=True)
                     except Exception as e:
                         if loop_count % 60 == 0:
                             print(f"[TELEOP] Send Action Failed: {e}", flush=True)
                             logger.error(f"Send Action Failed: {e}")
 
                     # SAFETY: Check if CAN bus died (emergency shutdown triggered in driver)
-                    if hasattr(self._active_robot, 'bus') and getattr(self._active_robot.bus, '_can_bus_dead', False):
-                        print("[TELEOP] CAN BUS DEAD — stopping teleop for safety", flush=True)
-                        logger.error("[TELEOP] CAN bus failure detected — emergency stop")
+                    if hasattr(ctx.active_robot, 'bus') and getattr(ctx.active_robot.bus, '_can_bus_dead', False):
+                        print(f"[TELEOP] [{pid}] CAN BUS DEAD — stopping teleop for safety", flush=True)
+                        logger.error(f"[TELEOP] [{pid}] CAN bus failure detected — emergency stop")
                         self.is_running = False
                         break
 
@@ -1314,11 +1495,11 @@ class TeleoperationService:
                     # read_torques() costs ~14ms (7 motors x 2ms), so throttle to avoid
                     # consuming too much of the 16.7ms frame budget at 60Hz.
                     # 3-violation debounce in SafetyLayer triggers e-stop within ~300ms.
-                    if self._has_damiao_follower and loop_count % 6 == 3:
+                    if ctx.has_damiao_follower and loop_count % 6 == 3:
                         try:
-                            if not self.safety.check_damiao_limits(self._active_robot):
-                                print("[TELEOP] SAFETY: Torque limit exceeded — EMERGENCY STOP", flush=True)
-                                logger.error("[TELEOP] Damiao torque limit exceeded — emergency stop")
+                            if not self.safety.check_damiao_limits(ctx.active_robot):
+                                print(f"[TELEOP] [{pid}] SAFETY: Torque limit exceeded — EMERGENCY STOP", flush=True)
+                                logger.error(f"[TELEOP] [{pid}] Damiao torque limit exceeded — emergency stop")
                                 self.is_running = False
                                 break
                         except Exception as e:
@@ -1327,29 +1508,29 @@ class TeleoperationService:
 
                     # 2a. Gripper Force Feedback (follower torque → leader current ceiling)
                     if (self._force_feedback_enabled
-                            and self._has_damiao_follower
-                            and self._active_leader
+                            and ctx.has_damiao_follower
+                            and ctx.active_leader
                             and loop_count > 0):
                         try:
-                            torques = self._active_robot.get_torques()
+                            torques = ctx.active_robot.get_torques()
                             raw_torque = torques.get("gripper", 0.0)
 
                             # Use absolute value — direction doesn't matter for grip feel
                             torque_mag = abs(raw_torque)
 
                             # EMA filter
-                            self._filtered_gripper_torque = (
+                            ctx.filtered_gripper_torque = (
                                 self._ff_alpha * torque_mag
-                                + (1 - self._ff_alpha) * self._filtered_gripper_torque
+                                + (1 - self._ff_alpha) * ctx.filtered_gripper_torque
                             )
 
                             # Map to Goal_Current: dead zone → linear ramp → saturation
-                            if self._filtered_gripper_torque <= self._ff_torque_threshold:
+                            if ctx.filtered_gripper_torque <= self._ff_torque_threshold:
                                 goal_current = self._ff_baseline_current
-                            elif self._filtered_gripper_torque >= self._ff_torque_saturation:
+                            elif ctx.filtered_gripper_torque >= self._ff_torque_saturation:
                                 goal_current = self._ff_max_current
                             else:
-                                t = (self._filtered_gripper_torque - self._ff_torque_threshold) / (
+                                t = (ctx.filtered_gripper_torque - self._ff_torque_threshold) / (
                                     self._ff_torque_saturation - self._ff_torque_threshold
                                 )
                                 goal_current = int(
@@ -1359,15 +1540,15 @@ class TeleoperationService:
 
                             goal_current = max(self._ff_baseline_current, min(self._ff_max_current, goal_current))
 
-                            self._active_leader.bus.write(
+                            ctx.active_leader.bus.write(
                                 "Goal_Current", "gripper", goal_current, normalize=False
                             )
 
                             # Debug log once per second
                             if loop_count % 60 == 0:
                                 print(
-                                    f"[FORCE_FB] torque={raw_torque:.2f}Nm "
-                                    f"filtered={self._filtered_gripper_torque:.2f}Nm "
+                                    f"[FORCE_FB] [{pid}] torque={raw_torque:.2f}Nm "
+                                    f"filtered={ctx.filtered_gripper_torque:.2f}Nm "
                                     f"goal_current={goal_current}mA",
                                     flush=True,
                                 )
@@ -1380,7 +1561,7 @@ class TeleoperationService:
                         # Goal_Current = position error magnitude (how firmly to hold)
                         if self._joint_ff_enabled:
                             try:
-                                cached = self._active_robot.get_cached_positions()
+                                cached = ctx.active_robot.get_cached_positions()
                                 follower_pos = cached.get("link3", None)
                                 leader_pos = obs.get("joint_4.pos", None)
 
@@ -1400,13 +1581,13 @@ class TeleoperationService:
                                     # Goal_Position: follower's actual position (spring target)
                                     # Convert radians → Dynamixel raw ticks
                                     homed_ticks = int((follower_pos + np.pi) / (2 * np.pi) * 4096)
-                                    j4_id = self._active_leader.bus.motors["joint_4"].id
-                                    raw_ticks = homed_ticks - self._active_leader.bus._software_homing_offsets.get(j4_id, 0)
+                                    j4_id = ctx.active_leader.bus.motors["joint_4"].id
+                                    raw_ticks = homed_ticks - ctx.active_leader.bus._software_homing_offsets.get(j4_id, 0)
 
-                                    self._active_leader.bus.write(
+                                    ctx.active_leader.bus.write(
                                         "Goal_Position", "joint_4", int(raw_ticks), normalize=False
                                     )
-                                    self._active_leader.bus.write(
+                                    ctx.active_leader.bus.write(
                                         "Goal_Current", "joint_4", goal_current, normalize=False
                                     )
 
@@ -1420,15 +1601,15 @@ class TeleoperationService:
                                 if loop_count % 60 == 0:
                                     logger.warning(f"[JOINT_FB] Error: {e}")
 
-                elif self._active_robot and loop_count % 60 == 0:
-                    logger.warning("No Leader Action generated (Mapping issue or Empty Obs)")
+                elif ctx.active_robot and loop_count % 60 == 0:
+                    logger.warning(f"[{pid}] No Leader Action generated (Mapping issue or Empty Obs)")
 
                 # 2b. Share motor positions with recording thread
                 # IMPORTANT: Use FOLLOWER robot positions, not leader positions!
                 # This ensures recorded data matches what HIL reads at inference time.
                 # Leader and follower may have different calibrations, so same physical
                 # position can give different encoder values.
-                if self._active_robot:
+                if ctx.active_robot:
                     if self.recording_active:
                         # Only read follower positions when recording — needed for
                         # accurate dataset frames. For Damiao (CAN), this costs ~14ms
@@ -1438,7 +1619,7 @@ class TeleoperationService:
                         # Retry loop for transient serial communication errors
                         for attempt in range(3):  # Up to 3 attempts
                             try:
-                                follower_obs = self._active_robot.get_observation()
+                                follower_obs = ctx.active_robot.get_observation()
                                 break  # Success, exit retry loop
                             except (OSError, ConnectionError) as e:
                                 error_str = str(e)
@@ -1492,24 +1673,25 @@ class TeleoperationService:
                 precise_sleep(self.dt - dt_s)
 
             # Normal exit - log why we stopped
-            logger.info("Teleop loop exited normally (is_running=False)")
-            print("[TELEOP] Loop exited normally")
+            logger.info(f"[{pid}] Teleop loop exited normally (is_running=False)")
+            print(f"[TELEOP] [{pid}] Loop exited normally")
 
         except OSError as e:
             if e.errno == 5:
-                logger.error(f"TELEOP STOPPED: Hardware Disconnected: {e}")
-                print(f"[TELEOP ERROR] Hardware Disconnected: {e}")
+                logger.error(f"[{pid}] TELEOP STOPPED: Hardware Disconnected: {e}")
+                print(f"[TELEOP ERROR] [{pid}] Hardware Disconnected: {e}")
             else:
-                logger.error(f"TELEOP STOPPED: OSError {e.errno}: {e}")
-                print(f"[TELEOP ERROR] OSError: {e}")
+                logger.error(f"[{pid}] TELEOP STOPPED: OSError {e.errno}: {e}")
+                print(f"[TELEOP ERROR] [{pid}] OSError: {e}")
         except Exception as e:
-            logger.error(f"TELEOP STOPPED: {e}")
-            print(f"[TELEOP ERROR] Loop Failed: {e}")
+            logger.error(f"[{pid}] TELEOP STOPPED: {e}")
+            print(f"[TELEOP ERROR] [{pid}] Loop Failed: {e}")
             import traceback
             traceback.print_exc()
         finally:
-            logger.info("TELEOP CLEANUP: Calling stop()")
-            print("[TELEOP] Cleanup - calling stop()")
+            # Signal all loops to stop (idempotent), then trigger cleanup
+            logger.info(f"[{pid}] TELEOP CLEANUP: Calling stop()")
+            print(f"[TELEOP] [{pid}] Cleanup - calling stop()")
             self.stop()
 
     def _update_history(self, action_dict):

@@ -72,15 +72,16 @@ class CameraService:
                 return {"status": "error", "message": str(e)}
 
     def _connect_opencv_camera(self, camera_key: str, cam_cfg: dict) -> OpenCVCamera:
-        """Connect an OpenCV camera, with auto-discovery fallback if configured path fails."""
+        """Connect an OpenCV camera, with fps/resolution auto-detect and discovery fallbacks."""
         from lerobot.cameras.opencv import OpenCVCameraConfig
+        import gc
 
         idx = cam_cfg.get("index_or_path")
         fps = cam_cfg.get("fps", 30)
         width = cam_cfg.get("width", 640)
         height = cam_cfg.get("height", 480)
 
-        # Try configured path first
+        # Attempt 1: Try with configured fps/width/height
         try:
             c_conf = OpenCVCameraConfig(
                 index_or_path=idx,
@@ -91,10 +92,52 @@ class CameraService:
             camera = OpenCVCamera(c_conf)
             camera.connect(warmup=True)
             return camera
-        except (ConnectionError, RuntimeError) as first_err:
-            logger.warning(f"Camera '{camera_key}': configured path '{idx}' failed ({first_err}), trying auto-discovery...")
+        except RuntimeError as fps_err:
+            # FPS or resolution validation failed — camera opened but can't match settings
+            logger.warning(
+                f"Camera '{camera_key}': configured {width}x{height}@{fps}fps failed "
+                f"({fps_err}), retrying with auto-detect..."
+            )
+            try:
+                del camera
+            except NameError:
+                pass
+            gc.collect()
+        except ConnectionError as conn_err:
+            # Camera can't be opened at all — skip to discovery
+            logger.warning(f"Camera '{camera_key}': path '{idx}' can't be opened ({conn_err}), trying discovery...")
+            # Jump straight to discovery (auto-detect won't help if device can't open)
+            return self._opencv_discovery_fallback(camera_key, idx, fps, width, height)
 
-        # Auto-discovery fallback: find available OpenCV cameras (skip RealSense scan)
+        # Attempt 2: Auto-detect fps/resolution (let camera pick native capabilities)
+        try:
+            c_conf = OpenCVCameraConfig(
+                index_or_path=idx,
+                fps=None,
+                width=None,
+                height=None,
+            )
+            camera = OpenCVCamera(c_conf)
+            camera.connect(warmup=True)
+            logger.info(
+                f"Camera '{camera_key}': auto-detect connected at "
+                f"{camera.width}x{camera.height}@{camera.fps}fps"
+            )
+            return camera
+        except (ConnectionError, RuntimeError) as second_err:
+            logger.warning(f"Camera '{camera_key}': auto-detect also failed ({second_err}), trying discovery...")
+            try:
+                del camera
+            except NameError:
+                pass
+            gc.collect()
+
+        # Attempt 3: Auto-discovery fallback
+        return self._opencv_discovery_fallback(camera_key, idx, fps, width, height)
+
+    def _opencv_discovery_fallback(self, camera_key: str, idx, fps, width, height) -> OpenCVCamera:
+        """Find available OpenCV cameras via discovery and connect to the first one."""
+        from lerobot.cameras.opencv import OpenCVCameraConfig
         from app.core.camera_discovery import discover_cameras
         discovered = discover_cameras(opencv_only=True)
         opencv_devices = discovered.get("opencv", [])
