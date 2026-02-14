@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { X, Layers, AlertCircle, CheckCircle, Loader2, Database, GitMerge } from 'lucide-react';
-
-const API_BASE = "http://127.0.0.1:8000";
+import { datasetsApi, API_BASE } from '../lib/api';
+import { usePolling } from '../hooks/usePolling';
 
 interface MergeModalProps {
     isOpen: boolean;
@@ -69,43 +69,29 @@ export default function MergeModal({ isOpen, onClose, selectedRepos, onMergeComp
     }, [isOpen, selectedRepos]);
 
     // Poll for job status when merging
-    useEffect(() => {
-        if (status !== 'merging' || !jobId) return;
+    usePolling(async () => {
+        try {
+            const data = await datasetsApi.mergeStatus(jobId!) as any;
 
-        const interval = setInterval(async () => {
-            try {
-                const res = await fetch(`${API_BASE}/datasets/merge/status/${jobId}`);
-                const data = await res.json();
+            setProgress(data.progress);
 
-                setProgress(data.progress);
-
-                if (data.status === 'completed') {
-                    setStatus('completed');
-                    clearInterval(interval);
-                } else if (data.status === 'failed') {
-                    setStatus('error');
-                    setError(data.error || 'Merge failed');
-                    clearInterval(interval);
-                }
-            } catch (e) {
-                console.error('Failed to poll merge status:', e);
+            if (data.status === 'completed') {
+                setStatus('completed');
+            } else if (data.status === 'failed') {
+                setStatus('error');
+                setError(data.error || 'Merge failed');
             }
-        }, 1000);
-
-        return () => clearInterval(interval);
-    }, [status, jobId]);
+        } catch (e) {
+            console.error('Failed to poll merge status:', e);
+        }
+    }, 1000, status === 'merging' && !!jobId);
 
     const validateMerge = async () => {
         setStatus('validating');
         setError('');
 
         try {
-            const res = await fetch(`${API_BASE}/datasets/merge/validate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ repo_ids: selectedRepos })
-            });
-            const data: ValidationResult = await res.json();
+            const data = await datasetsApi.mergeValidate(selectedRepos) as unknown as ValidationResult;
             setValidation(data);
             setStatus('idle');
         } catch (e) {
@@ -148,6 +134,7 @@ export default function MergeModal({ isOpen, onClose, selectedRepos, onMergeComp
             setStatus('error');
         }
     };
+
 
     const handleClose = () => {
         if (status === 'merging') {

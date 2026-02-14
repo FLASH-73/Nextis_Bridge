@@ -1,7 +1,7 @@
 import time
 import threading
 from typing import List, Dict
-from app.core.intervention_controller import InterventionEngine
+from app.core.intervention import InterventionEngine
 from app.core.recorder import DataRecorder
 
 class TaskOrchestrator:

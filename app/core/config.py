@@ -1,7 +1,16 @@
 import yaml
 from pathlib import Path
 
-CONFIG_PATH = Path("app/config/settings.yaml")
+# Project paths (derived from this file's location: app/core/config.py)
+PROJECT_ROOT    = Path(__file__).resolve().parent.parent.parent
+CONFIG_PATH     = PROJECT_ROOT / "app" / "config" / "settings.yaml"
+CALIBRATION_DIR = PROJECT_ROOT / "calibration_profiles"
+GRAVITY_DIR     = PROJECT_ROOT / "calibration_gravity"
+DATASETS_DIR    = PROJECT_ROOT / "datasets"
+POLICIES_DIR    = PROJECT_ROOT / "training" / "outputs"
+MODELS_DIR      = PROJECT_ROOT / "models"
+RAW_DATA_DIR    = PROJECT_ROOT / "data" / "raw"
+LEROBOT_SRC     = PROJECT_ROOT / "lerobot" / "src"
 
 def load_config():
     if not CONFIG_PATH.exists():

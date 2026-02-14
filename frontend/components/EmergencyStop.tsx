@@ -1,10 +1,8 @@
 import React, { useState } from 'react';
+import { systemApi } from '../lib/api';
 
 export const EmergencyStop = () => {
     const [triggered, setTriggered] = useState(false);
-
-    // Config
-    const API_BASE = 'http://localhost:8000';
 
     const handleStop = async () => {
         // Optimistic UI update
@@ -13,7 +11,7 @@ export const EmergencyStop = () => {
         try {
             // Spam the request to ensure it gets through
             // We want it out FAST
-            const req = fetch(`${API_BASE}/emergency/stop`, { method: 'POST' });
+            const req = systemApi.emergencyStop();
 
             // Visual feedback
             setTimeout(() => setTriggered(false), 2000);

@@ -832,7 +832,7 @@ export default function RLTrainingModal({ isOpen, onClose, maximizedWindow, setM
                                             <AreaChart data={rlStatus.episode_rewards.map((r, i) => ({ episode: i + 1, reward: r }))}>
                                                 <XAxis dataKey="episode" tick={{ fontSize: 10 }} />
                                                 <YAxis tick={{ fontSize: 10 }} domain={[0, 'auto']} />
-                                                <Tooltip formatter={(v: number) => [v.toFixed(3), 'Reward']} />
+                                                <Tooltip formatter={(v) => [Number(v).toFixed(3), 'Reward']} />
                                                 <Area type="monotone" dataKey="reward" stroke="#f97316" fill="#fed7aa" fillOpacity={0.3} />
                                             </AreaChart>
                                         </ResponsiveContainer>
