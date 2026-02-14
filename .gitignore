@@ -149,5 +149,18 @@ __pycache__/
 training/outputs/
 frontend/node_modules/
 manual.pdf
-CLAUDE.md
 big_plan.md
+
+# Model artifacts
+*.safetensors
+*.pt
+*.onnx
+*.hdf5
+
+# Calibration artifacts
+calibration_profiles/*.yaml
+calibration_gravity/
+
+# Misc
+recording_debug.log
+.DS_Store
