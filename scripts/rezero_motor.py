@@ -15,7 +15,8 @@ Usage:
 import sys
 import time
 
-sys.path.insert(0, "lerobot/src")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lerobot" / "src"))
 
 from lerobot.motors.damiao.damiao import DamiaoMotorsBusConfig, DamiaoMotorsBus
 from lerobot.motors.damiao.tables import DEFAULT_DAMIAO_MOTORS
@@ -134,7 +135,7 @@ def main():
             print(f"  {name:8s}: {pos:+10.4f} rad{status}")
 
         print(f"\nDone. Re-zeroed {len(target_names)} motor(s).")
-        print("You can now run the position test: python test_mit_mode_position.py all")
+        print("You can now run the position test: python scripts/diagnostics/test_mit_mode_position.py all")
 
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
