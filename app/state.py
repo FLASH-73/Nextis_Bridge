@@ -1,0 +1,203 @@
+import threading
+from app.core.config import load_config, CONFIG_PATH
+from app.core.camera_service import CameraService
+from app.core.orchestrator import TaskOrchestrator
+from app.core.recorder import DataRecorder
+from app.core.calibration_service import CalibrationService
+from app.core.teleop_service import TeleoperationService
+from app.core.dataset import DatasetService
+from app.core.training import TrainingService
+
+
+class SystemState:
+    def __init__(self):
+        self.robot = None
+        self.leader = None
+        self.recorder = None
+        self.orchestrator = None
+        self.calibration_service = None
+        self.camera_service = None
+        self.teleop_service = None
+        self.dataset_service = None
+        self.training_service = None
+        self.hil_service = None
+        self.reward_classifier_service = None
+        self.gvl_reward_service = None
+        self.sarm_reward_service = None
+        self.rl_service = None
+        self.arm_registry = None  # Arm Manager Service
+        self.leader_assists = {} # {arm_prefix: LeaderAssistService}
+        self.lock = threading.Lock()
+
+        self.is_initializing = False
+        self.init_error = None
+
+
+    def initialize(self):
+        self.is_initializing = True
+        self.init_error = None
+        try:
+             self._inner_initialize()
+        except Exception as e:
+             import traceback
+             print(f"CRITICAL INIT ERROR: {e}")
+             traceback.print_exc()
+             self.init_error = str(e)
+        finally:
+             self.is_initializing = False
+             print("System Initialization Complete.")
+
+    def _inner_initialize(self):
+        print("Initializing System (Fast Startup — no hardware)...")
+
+        # 1. Lightweight services (no hardware deps)
+        self.camera_service = CameraService()
+        self.dataset_service = DatasetService()
+        self.training_service = TrainingService()
+
+        # 2. Load config
+        config_data = load_config()
+
+        # 3. Arm Registry (reads config only, no hardware)
+        try:
+            from app.core.arm_registry import ArmRegistryService
+            self.arm_registry = ArmRegistryService(config_path=str(CONFIG_PATH))
+            print(f"Arm Registry initialized: {self.arm_registry.get_status_summary()}")
+        except Exception as e:
+            print(f"Warning: Arm Registry init failed: {e}")
+            self.arm_registry = None
+
+        # 4. Data Recorder
+        self.recorder = DataRecorder(repo_id="roberto/nextis_data", robot_type="bi_umbra_follower")
+
+        # 5. CalibrationService (works with robot=None, uses arm_registry)
+        self.calibration_service = CalibrationService(
+            robot=None, leader=None, robot_lock=self.lock,
+            arm_registry=self.arm_registry
+        )
+
+        # 6. TeleoperationService (works with robot=None, uses arm_registry)
+        self.teleop_service = TeleoperationService(
+            robot=None, leader=None, robot_lock=self.lock,
+            leader_assists={}, arm_registry=self.arm_registry,
+            camera_service=self.camera_service
+        )
+
+        # 7. Orchestrator with minimal mock robot
+        from unittest.mock import MagicMock
+        mock = MagicMock()
+        mock.is_connected = False
+        mock.is_mock = True
+        mock.is_calibrated = True
+        mock.robot_type = "mock_robot"
+        mock.observation_features = {}
+        mock.action_features = {}
+        self.robot = mock
+
+        self.orchestrator = TaskOrchestrator(self.robot, self.recorder, robot_lock=self.lock)
+        self.orchestrator.start()
+
+        # 8. Reward / RL services (lightweight inits)
+        from app.core.rl.rewards import RewardClassifierService
+        self.reward_classifier_service = RewardClassifierService()
+        from app.core.rl.rewards import GVLRewardService
+        self.gvl_reward_service = GVLRewardService()
+        from app.core.rl.rewards import SARMRewardService
+        self.sarm_reward_service = SARMRewardService()
+
+        # 9. HIL Service
+        from app.core.hil import HILService
+        self.hil_service = HILService(
+            teleop_service=self.teleop_service,
+            orchestrator=self.orchestrator,
+            training_service=self.training_service,
+            robot_lock=self.lock
+        )
+
+        # NOTE: Planner is lazy-loaded on first /chat request
+        self.planner = None
+
+        print("System ready (connect arms via UI when needed)")
+
+    def reload(self):
+        print("Reloading System...")
+        # Stop Orchestrator first to stop using the robot
+        if self.orchestrator:
+            self.orchestrator.stop()
+
+        with self.lock:
+            # Disconnect Robot
+            if self.robot:
+                try:
+                    if hasattr(self.robot, 'disconnect'):
+                        self.robot.disconnect()
+                except Exception as e:
+                    print(f"Error disconnecting robot: {e}")
+
+            # Disconnect Leader
+            if self.leader:
+                try:
+                    if hasattr(self.leader, 'disconnect'):
+                        self.leader.disconnect()
+                except Exception as e:
+                    print(f"Error disconnecting leader: {e}")
+
+            # Re-initialize
+            import time
+            time.sleep(2)
+            self.initialize()
+
+    def shutdown(self):
+        print("Shutting Down System State...")
+        if self.orchestrator:
+            self.orchestrator.stop()
+
+        # Disconnect all managed cameras
+        if self.camera_service:
+            try:
+                self.camera_service.disconnect_all()
+            except Exception as e:
+                print(f"Error disconnecting cameras: {e}")
+
+        with self.lock:
+            # Disconnect Robot
+            if self.robot:
+                try:
+                    if hasattr(self.robot, 'disconnect'):
+                        self.robot.disconnect()
+                except Exception as e:
+                    print(f"Error disconnecting robot: {e}")
+
+            # Disconnect Leader
+            if self.leader:
+                try:
+                    if hasattr(self.leader, 'disconnect'):
+                        self.leader.disconnect()
+                except Exception as e:
+                    print(f"Error disconnecting leader: {e}")
+
+        # Brief pause to ensure OS releases handles
+        import time
+        time.sleep(0.5)
+
+    def restart(self):
+        print("SYSTEM RESTART REQUESTED. RESTARTING PROCESS...")
+        import sys
+        import time
+        import os
+
+        # Flush buffers
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        # Close hardware connections safely if possible
+        try:
+             self.shutdown() # Clean shutdown (no re-init)
+        except Exception as e:
+             print(f"Error during shutdown: {e}")
+
+        # os._exit(42) forces exit without cleanup/exception handling, guaranteeing the return code
+        import os
+        os._exit(42)
+
+state = SystemState()
