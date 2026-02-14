@@ -3,11 +3,13 @@ from pathlib import Path
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.robots.utils import make_robot_from_config
 
+from app.core.config import RAW_DATA_DIR
+
 class DataRecorder:
     def __init__(self, repo_id, robot_type="so100_follower"):
         self.repo_id = repo_id
         # Use timestamp to separate recording sessions
-        self.root = Path(f"data/raw/{int(time.time())}")
+        self.root = RAW_DATA_DIR / str(int(time.time()))
         self.fps = 30
         self.robot_type = robot_type
         self.dataset = None
