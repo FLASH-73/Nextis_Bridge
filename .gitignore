@@ -158,8 +158,26 @@ big_plan.md
 *.hdf5
 
 # Calibration artifacts
-calibration_profiles/*.yaml
+calibration_profiles/
 calibration_gravity/
+
+# Machine-specific data
+data/
+outputs/
+
+# Vendored third-party (use pip/submodule instead)
+DM_Control_Python-main/
+openarm_can-main/
+openarm_teleop-main/
+Papers/
+
+# AI agent scaffolding
+.agent/
+.agents/
+.gemini/
+
+# Examples/experiments
+examples_for_damiao/
 
 # Misc
 recording_debug.log
