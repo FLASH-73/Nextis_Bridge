@@ -175,9 +175,11 @@ Papers/
 .agent/
 .agents/
 .gemini/
+.claude/skills/
 
 # Examples/experiments
 examples_for_damiao/
+manifesto.md
 
 # Misc
 recording_debug.log
