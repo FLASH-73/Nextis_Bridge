@@ -24,7 +24,7 @@ class CalibrationHoming:
         self._svc = svc
 
     def perform_homing(self, arm_id: str):
-        arm, target_motors = self._svc._get_arm_context(arm_id)
+        arm, target_motors = self._svc.get_arm_context(arm_id)
         if not arm:
             logger.error(f"perform_homing: Invalid arm_id {arm_id} or arm not found.")
             return {"status": "error", "message": "Arm not found"}
@@ -183,7 +183,7 @@ class CalibrationHoming:
             json.dump(current, f, indent=2)
 
         # Reload on the target arm (follower)
-        arm, _ = self._svc._get_arm_context(target_id)
+        arm, _ = self._svc.get_arm_context(target_id)
         if arm and hasattr(arm, "reload_inversions"):
             arm.reload_inversions()
 
@@ -201,7 +201,7 @@ class CalibrationHoming:
             self._svc.disable_torque(leader_id)
             self._svc.disable_torque(follower_id)
 
-        arm, _ = self._svc._get_arm_context(arm_id)
+        arm, _ = self._svc.get_arm_context(arm_id)
         if not arm: return False
 
         # Read all raw positions
@@ -231,8 +231,8 @@ class CalibrationHoming:
         follower_id = f"{side}_follower"
 
         # Get contexts
-        l_arm, _ = self._svc._get_arm_context(leader_id)
-        f_arm, _ = self._svc._get_arm_context(follower_id)
+        l_arm, _ = self._svc.get_arm_context(leader_id)
+        f_arm, _ = self._svc.get_arm_context(follower_id)
 
         if not l_arm or not f_arm:
              logger.error("AutoAlign: Could not find both Leader and Follower arms.")

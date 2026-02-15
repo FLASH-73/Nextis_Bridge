@@ -37,7 +37,7 @@ class CalibrationDiscovery:
         if not arm_id:
              return
 
-        arm, target_motors = self._svc._get_arm_context(arm_id)
+        arm, target_motors = self._svc.get_arm_context(arm_id)
         if not arm:
              return
 
@@ -101,7 +101,7 @@ class CalibrationDiscovery:
         self._svc.is_discovering = False
 
         # Automatically update the robot's calibration with the discovered ranges
-        arm, _ = self._svc._get_arm_context(arm_id)
+        arm, _ = self._svc.get_arm_context(arm_id)
 
         if not arm:
             return {"status": "error", "message": f"Arm '{arm_id}' not found", "warnings": []}
@@ -113,7 +113,7 @@ class CalibrationDiscovery:
         if self._svc._is_damiao_arm(arm_id):
             logger.info(f"[{arm_id}] Damiao — ending discovery: re-enabling motors, unblocking writes")
             arm.bus._discovery_mode = False
-            _, target_motors = self._svc._get_arm_context(arm_id)
+            _, target_motors = self._svc.get_arm_context(arm_id)
             if target_motors:
                 # Use bus-level enable_torque() which handles safe MIT enable
                 # (sends limp frames after enable to prevent torque spikes)
@@ -153,7 +153,7 @@ class CalibrationDiscovery:
         return {"status": "success", "message": msg, "warnings": warnings}
 
     def get_calibration_state(self, arm_id: str) -> List[Dict[str, Any]]:
-        arm, target_motors = self._svc._get_arm_context(arm_id)
+        arm, target_motors = self._svc.get_arm_context(arm_id)
         if not arm:
             return []
 
@@ -205,7 +205,7 @@ class CalibrationDiscovery:
         return state
 
     def set_calibration_limit(self, arm_id: str, motor_name: str, limit_type: str, value):
-        arm, _ = self._svc._get_arm_context(arm_id)
+        arm, _ = self._svc.get_arm_context(arm_id)
         if not arm:
             return
 

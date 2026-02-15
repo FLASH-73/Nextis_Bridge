@@ -57,7 +57,7 @@ class CalibrationProfiles:
             self.load_calibration_file(arm_id, filename)
 
     def list_calibration_files(self, arm_id: str) -> List[Dict[str, Any]]:
-        arm, _ = self._svc._get_arm_context(arm_id)
+        arm, _ = self._svc.get_arm_context(arm_id)
         if not arm:
             return []
 
@@ -92,7 +92,7 @@ class CalibrationProfiles:
         return files
 
     def load_calibration_file(self, arm_id: str, filename: str):
-        arm, _ = self._svc._get_arm_context(arm_id)
+        arm, _ = self._svc.get_arm_context(arm_id)
         if not arm:
             return False
 
@@ -143,7 +143,7 @@ class CalibrationProfiles:
         return False
 
     def save_calibration(self, arm_id: str, name: str = None):
-        arm, _ = self._svc._get_arm_context(arm_id)
+        arm, _ = self._svc.get_arm_context(arm_id)
         if not arm:
             return
 

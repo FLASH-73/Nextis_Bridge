@@ -64,14 +64,14 @@ def get_calibration_arms():
     system = get_state()
     if not system.calibration_service:
         return {"arms": []}
-    return {"arms": system.calibration_service.get_calibration_arms()}
+    return {"arms": system.calibration_service.get_arms()}
 
 @router.get("/calibration/{arm_id}/state")
 def get_calibration_state(arm_id: str):
     system = get_state()
     if not system.calibration_service:
         return {}
-    return system.calibration_service.get_state(arm_id)
+    return system.calibration_service.get_calibration_state(arm_id)
 
 @router.post("/calibration/{arm_id}/torque")
 async def set_torque(arm_id: str, request: Request):
@@ -239,7 +239,7 @@ def get_inversions(arm_id: str):
     if not system.calibration_service:
         return {"inversions": {}, "motors": []}
     inversions = system.calibration_service.get_inversions(arm_id)
-    _, motors = system.calibration_service._get_arm_context(arm_id)
+    _, motors = system.calibration_service.get_arm_context(arm_id)
     return {"inversions": inversions, "motors": motors}
 
 @router.post("/calibration/{arm_id}/inversions")

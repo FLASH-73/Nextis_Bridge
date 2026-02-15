@@ -279,7 +279,7 @@ class ArmRegistryService:
         self.pairings.append(pairing)
 
         # Save to config
-        self._save_config()
+        self.save_config()
 
         return {"success": True, "warning": warning, "pairing": pairing.to_dict()}
 
@@ -288,7 +288,7 @@ class ArmRegistryService:
         for i, p in enumerate(self.pairings):
             if p.leader_id == leader_id and p.follower_id == follower_id:
                 self.pairings.pop(i)
-                self._save_config()
+                self.save_config()
                 return {"success": True}
         return {"success": False, "error": "Pairing not found"}
 
@@ -313,7 +313,7 @@ class ArmRegistryService:
             )
             self.arms[arm_id] = arm
             self.arm_status[arm_id] = ConnectionStatus.DISCONNECTED
-            self._save_config()
+            self.save_config()
             return {"success": True, "arm": arm.to_dict()}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -337,7 +337,7 @@ class ArmRegistryService:
         if "config" in kwargs:
             arm.config.update(kwargs["config"])
 
-        self._save_config()
+        self.save_config()
         return {"success": True, "arm": arm.to_dict()}
 
     def remove_arm(self, arm_id: str) -> Dict:
@@ -358,7 +358,7 @@ class ArmRegistryService:
         if arm_id in self.arm_instances:
             del self.arm_instances[arm_id]
 
-        self._save_config()
+        self.save_config()
         return {"success": True}
 
     def connect_arm(self, arm_id: str) -> Dict:
@@ -1115,7 +1115,7 @@ class ArmRegistryService:
 
         return followers
 
-    def _save_config(self):
+    def save_config(self):
         """Save current configuration to settings.yaml"""
         # Build arms section
         arms_config = {}

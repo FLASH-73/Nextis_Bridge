@@ -150,7 +150,7 @@ class CalibrationService:
 
         return arms
 
-    def _get_arm_context(self, arm_id: str):
+    def get_arm_context(self, arm_id: str):
         """Returns (robot_instance, motor_list_filter)"""
         parts = arm_id.split("_")
 
@@ -207,7 +207,7 @@ class CalibrationService:
                 target_motors = list(instance.bus.motors.keys())
                 return instance, target_motors
 
-        logger.warning(f"_get_arm_context: No robot instance found for {arm_id}")
+        logger.warning(f"get_arm_context: No robot instance found for {arm_id}")
         return None, []
 
     def _is_dynamixel_arm(self, arm_id: str) -> bool:
@@ -230,7 +230,7 @@ class CalibrationService:
         return False
 
     def disable_torque(self, arm_id: str):
-        arm, _ = self._get_arm_context(arm_id)
+        arm, _ = self.get_arm_context(arm_id)
         if arm:
             logger.info(f"Disabling torque for COMPONENT {arm_id} (All motors on bus)")
             is_damiao = self._is_damiao_arm(arm_id)
@@ -264,7 +264,7 @@ class CalibrationService:
                 _do_disable()
 
     def enable_torque(self, arm_id: str):
-        arm, _ = self._get_arm_context(arm_id)
+        arm, _ = self.get_arm_context(arm_id)
         if arm:
             logger.info(f"Enabling torque for {arm_id} (All motors on bus)")
             is_damiao = self._is_damiao_arm(arm_id)
@@ -286,7 +286,7 @@ class CalibrationService:
                 _do_enable()
 
     def move_motor(self, arm_id: str, motor_name: str, value):
-        arm, _ = self._get_arm_context(arm_id)
+        arm, _ = self.get_arm_context(arm_id)
         if arm:
             if self._is_damiao_arm(arm_id):
                 # Damiao: use sync_write (CAN protocol, no single-motor write())

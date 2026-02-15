@@ -176,7 +176,7 @@ async def clear_home_position(arm_id: str):
     if not arm:
         return JSONResponse(status_code=404, content={"error": f"Arm '{arm_id}' not found"})
     arm.config.pop("home_position", None)
-    system.arm_registry._save_config()
+    system.arm_registry.save_config()
     return {"success": True}
 
 @router.get("/arms/{arm_id}/motors/diagnostics")

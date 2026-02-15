@@ -254,7 +254,7 @@ def test_save_config_roundtrip(registry, registry_config):
         "motor_type": "damiao",
         "port": "/dev/can0",
     })
-    registry._save_config()
+    registry.save_config()
 
     # Reload
     new_reg = ArmRegistryService(config_path=registry_config)
