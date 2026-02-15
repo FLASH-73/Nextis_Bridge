@@ -1,50 +1,24 @@
-# AURA — Autonomous Universal Robotic Assembly
+# Nextis Bridge
 
-Upload a CAD file, robot builds it. Teaching a new assembly takes hours, not months.
+Hardware control, teleoperation, and training platform for Nextis robotic arms.
 
-<!-- TODO: Add demo GIF or architecture diagram showing CAD → Plan → Teach → Learn → Run pipeline -->
+## What It Does
 
-## The Problem
-
-Industrial robots require months of programming for every new product — fixture design,
-motion planning, force tuning, error handling. Small-batch and custom manufacturing can't
-justify that setup cost, so it stays manual.
-
-Assembly is fundamentally harder than pick-and-place: it requires contact reasoning,
-compliance control, and recovery from partial insertions and misalignments. Current
-approaches either need end-to-end foundation models trained on millions of demonstrations,
-or brittle scripted motion that breaks on the slightest variation. Neither scales to the
-long tail of real manufacturing tasks.
-
-## How It Works
-
-1. **Parse** — Upload a STEP file. Extract parts, contact surfaces, and geometry.
-   Export meshes for 3D visualization.
-   `PythonOCC contact graph → GLB export → Three.js viewer` *(planned)*
-
-2. **Plan** — Generate an assembly sequence from contact analysis and geometric
-   heuristics. Human can reorder or override any step.
-   `Topological sort on contact graph, size-based ordering, pick/place/insert primitives` *(planned)*
-
-3. **Teach** — Teleoperate the hard steps with force feedback at 60 Hz. Record
-   demonstrations as HDF5 episodes with synchronized multi-camera video.
-   `Dynamixel leader → Damiao follower, MIT impedance control, 50 Hz recording`
-
-4. **Learn** — Train per-step manipulation policies from demonstrations. Fine-tune
-   on failure cases with human-in-the-loop RL.
-   `ACT / Diffusion Policy / SmolVLA via LeRobot, HIL-SERL for online improvement`
-
-5. **Run** — Execute the assembly autonomously. Retry failed steps with learned
-   recovery behaviors. Escalate to human when stuck.
-   `State machine sequencer, per-step policy router, step-level analytics` *(in development)*
+Nextis Bridge is an operator workstation for robotic manipulation research. It manages the
+full workflow from hardware bring-up to trained policy: connect and configure arms (mixed
+motor types on CAN and serial buses), calibrate joints interactively, teleoperate with
+force feedback at 60 Hz, record demonstration episodes with synchronized multi-camera
+video, train manipulation policies from those demonstrations, then deploy policies and
+improve them online with human-in-the-loop intervention capture. Everything is accessed
+through a web dashboard — no terminal required for day-to-day operation.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/FLASH-73/AURA.git && cd AURA
+git clone https://github.com/FLASH-73/Nextis_Bridge.git && cd Nextis_Bridge
 
 # Python environment
-conda create -n aura python=3.11 -y && conda activate aura
+conda create -n nextis python=3.11 -y && conda activate nextis
 pip install -r requirements.txt
 pip install -e lerobot
 
@@ -58,39 +32,70 @@ python run_backend.py                      # FastAPI on http://localhost:8000
 cd frontend && npm install && npm run dev  # Next.js on http://localhost:3000
 ```
 
-Open `http://localhost:3000` to access the AURA dashboard. From there you can manage
-arm connections, run joint calibration, start teleoperation with force feedback, record
-demonstration episodes, browse datasets, and launch policy training jobs.
+Open `http://localhost:3000` to access the dashboard. Hardware is optional — the
+dashboard, dataset tools, and training pipeline all work without connected arms.
 
-Hardware is optional — the dashboard, dataset tools, and training pipeline run without
-connected arms.
+## What You Can Do
+
+- **Multi-arm management** — Damiao (CAN bus), Dynamixel (USB serial), and Feetech (USB serial) motors in the same session. Hot-plug connect/disconnect from the UI.
+- **Joint calibration** — Interactive range discovery, homing procedures, motor inversion tracking, and persistent calibration profiles.
+- **Dual-arm teleoperation at 60 Hz** — Leader-to-follower mapping with MIT impedance control. Each leader-follower pair gets isolated state (`PairingContext`) so mixed motor types don't interfere.
+- **Force feedback** — Follower gripper torque is fed back to the leader via EMA filtering. Joint-level force feedback uses a virtual spring in current-position mode.
+- **Episode recording** — Parallel capture thread records joint states + camera frames into LeRobot v3 format (HDF5 + MP4 video). Start/stop/discard episodes from the UI.
+- **Dataset management** — Browse recorded datasets, review individual episodes with video playback, merge compatible datasets.
+- **Policy training** — ACT, Diffusion Policy, SmolVLA, and PI0.5 with configurable presets (quick/standard/full). Dataset validation, GPU detection, real-time log streaming, and checkpoint management — all from the browser.
+- **Human-in-the-loop fine-tuning** — During autonomous policy execution, velocity-based intervention detection captures when the human takes over. The corrective trajectory becomes training data for online policy improvement (HIL-SERL).
+- **RL training** — SAC-based actor-learner architecture with dual replay buffers. Reward sources: SARM (learned from demos), GVL (Gemini vision), or trained classifiers.
+- **Safety monitoring** — Per-motor torque limits with debounced violation detection, joint bounds, and emergency stop that broadcasts to all buses.
+- **Camera management** — Auto-discovery of USB and RealSense cameras, independent connect/disconnect, MJPEG streaming at 60 FPS.
+- **LLM task planning** — Chat interface for task decomposition via Gemini or local Qwen2.5.
 
 ## Architecture
 
 ```
 app/
 ├── core/
-│   ├── hardware/       # Arm registry, motor control (Damiao + Dynamixel + Feetech), safety layer
-│   ├── teleop/         # 60 Hz control loop, force feedback, multi-pair leader-follower mapping
-│   ├── calibration/    # Joint calibration, homing procedures, profile persistence
+│   ├── hardware/       # Arm registry, motor control (Damiao + Dynamixel + Feetech), safety
+│   ├── teleop/         # 60 Hz control loop, force feedback, multi-pair mapping, recording
+│   ├── calibration/    # Joint calibration, homing, range discovery, profile persistence
 │   ├── cameras/        # Camera lifecycle, MJPEG streaming, device discovery
 │   ├── dataset/        # Episode browsing, dataset merge (LeRobot v3 format)
-│   ├── training/       # Job management, policy presets (ACT, Diffusion, SmolVLA, PI0)
-│   ├── hil/            # Human-in-the-loop training (DAgger-style intervention capture)
-│   ├── rl/             # Gym environment, reward classifiers (SARM, GVL)
-│   ├── intervention.py # Human override detection during policy execution
+│   ├── training/       # Job management, policy presets, GPU detection, log streaming
+│   ├── hil/            # Human-in-the-loop (DAgger-style intervention capture)
+│   ├── rl/             # SAC policy, Gym environment, reward classifiers (SARM, GVL)
+│   ├── intervention.py # Velocity-based human override detection
 │   └── orchestrator.py # Policy deployment and task routing
-├── routes/             # FastAPI REST API — one file per domain (14 route modules)
-├── state.py            # Service initialization singleton
+├── routes/             # 14 FastAPI route modules — one file per domain
+├── state.py            # Service initialization singleton (no hardware needed at startup)
 └── config/             # YAML-based arm definitions, pairings, camera config
-frontend/               # Next.js 16 + React 19 + Tailwind CSS + TypeScript
-scripts/                # Motor configuration, calibration, diagnostics
+frontend/               # Next.js + React + TypeScript + Tailwind CSS
+scripts/                # Motor configuration, encoder calibration, diagnostics
 lerobot/                # Vendored LeRobot fork (policy training + motor drivers)
 ```
 
-Services initialize without hardware — the system degrades gracefully when arms aren't
-connected. The arm registry, calibration profiles, and camera connections are all managed
-independently so any subsystem can be tested in isolation.
+All services initialize without hardware. The arm registry, calibration profiles, cameras,
+datasets, and training pipeline are independent subsystems that can be used in isolation.
+
+### API Surface
+
+The backend exposes 14 route groups via FastAPI:
+
+| Prefix | Purpose |
+|--------|---------|
+| `/status`, `/config`, `/system/*` | System status, restart, emergency stop |
+| `/arms/*` | Arm CRUD, connect/disconnect, motor scanning, pairings |
+| `/motors/*` | Motor diagnostics, ID configuration, recovery |
+| `/calibration/*` | Joint calibration, homing, gravity compensation, profiles |
+| `/teleop/*` | Start/stop teleoperation, force feedback tuning |
+| `/cameras/*` | Camera connect/disconnect, MJPEG streaming, scanning |
+| `/recording/*` | Session/episode lifecycle, recording options |
+| `/datasets/*` | Dataset browsing, episode review, merge, video streaming |
+| `/training/*` | Job management, validation, presets, hardware detection |
+| `/policies/*` | Policy listing, deployment, deletion, resume training |
+| `/hil/*` | HIL session management, intervention episodes, retraining |
+| `/rl/*` | RL training, SARM/GVL reward services, classifiers |
+| `/chat` | LLM task planning |
+| `/debug/*` | Observation inspection |
 
 ## Hardware
 
@@ -117,42 +122,21 @@ kp=15/kd=0.25) are tuned to stay within torque saturation limits.
 | Safety layer (torque limits, joint bounds, E-STOP) | Working |
 | Joint calibration + homing profiles | Working |
 | Camera management + MJPEG streaming | Working |
-| Episode recording (HDF5, multi-camera video) | Working |
-| Policy training — ACT, Diffusion Policy, SmolVLA | Working (via LeRobot) |
-| Dataset merge + browsing | Working |
-| Human-in-the-loop fine-tuning | In progress |
-| RL training (SERL-style, Gym environment) | In progress |
+| Episode recording (HDF5 + multi-camera video) | Working |
+| Dataset browsing + merge | Working |
+| Policy training — ACT, Diffusion Policy, SmolVLA, PI0.5 | Working (via LeRobot) |
+| Policy deployment + autonomous execution | Working |
+| Human-in-the-loop fine-tuning (HIL-SERL) | In progress |
+| RL training (SAC, Gym environment) | In progress |
 | Reward classifiers (SARM, GVL) | In progress |
-| CAD parsing + assembly sequence generation | Planned |
-| 3D assembly visualization | Planned |
-| Autonomous assembly execution | Target milestone |
+| LLM task planning | In progress |
 
-## Technical Approach
+## Relationship to AURA
 
-Most robotics systems treat manipulation tasks as monolithic — one policy, one task,
-train until it works. AURA decomposes assembly into a graph of discrete steps, each
-with its own control strategy. Easy steps (pick up a bolt, move to a fixture) get
-scripted motion primitives. Hard steps (thread insertion, snap-fit engagement, compliant
-alignment) get learned policies trained on small, focused demonstration datasets. This
-means the system doesn't need a generalist foundation model. It needs 10-50
-demonstrations per hard step and a way to improve from failures.
-
-That improvement mechanism is human-in-the-loop SERL. When a learned step fails during
-autonomous execution, a human takes over via teleoperation. The intervention — the
-moment of takeover, the corrective trajectory, and the successful completion — becomes
-training data. The policy for that step improves with every assembly run, converging
-on robustness without requiring offline data collection campaigns. The intervention
-engine tracks force signatures and position divergence to detect when the human
-overrides, so the boundary between autonomous and human control is captured automatically.
-
-Assembly is the right problem to solve because it's where the economics are most
-compelling. Pick-and-place is largely solved. Locomotion is impressive but the market is
-diffuse. Assembly — inserting pins, threading fasteners, routing cables, snapping
-housings — requires contact reasoning, force control, and sequential planning that
-current systems can't handle without extensive per-product engineering. The metric that
-matters is setup time: how long it takes to go from a new CAD file to a running assembly
-cell. The target is days, not months. That's what makes small-batch manufacturing
-automation economically viable.
+Nextis Bridge handles hardware control, teleoperation, and training.
+[AURA](https://github.com/FLASH-73/AURA) handles assembly planning, CAD parsing, and
+task sequencing. They are separate systems that will integrate — Bridge provides the
+low-level control and learning pipeline that AURA's assembly sequencer will invoke.
 
 ## Testing
 
@@ -163,9 +147,3 @@ ruff check app/ tests/                  # Lint
 
 Tests mock all hardware interfaces via `sys.modules` patching in `tests/conftest.py`.
 Fixtures provide a FastAPI `TestClient` with mocked `SystemState` for endpoint testing.
-
-## Vision
-
-AURA is the software platform. AIRA is the arm. Together, they're building toward robots
-that can assemble anything — starting with industrial assembly because that's where the
-economics work today.
