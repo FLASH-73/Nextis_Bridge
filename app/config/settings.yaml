@@ -73,3 +73,13 @@ training:
   offline_steps: 10000
   policy: diffusion
   steps: 5000
+tools:
+  screwdriver_1:
+    name: Main Screwdriver
+    motor_type: sts3215
+    port: /dev/ttyUSB1
+    motor_id: 8
+    tool_type: screwdriver
+    enabled: true
+triggers: {}
+tool_pairings: []

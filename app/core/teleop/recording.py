@@ -40,6 +40,11 @@ def filter_observation_features(
     filtered = {}
 
     for key, feat in obs_features.items():
+        # Always include tool/trigger features
+        if key.startswith("tool.") or key.startswith("trigger."):
+            filtered[key] = feat
+            continue
+
         # Check if this is a camera feature (tuple shape like (H, W, 3))
         is_camera = isinstance(feat, tuple) and len(feat) == 3
 
@@ -78,6 +83,11 @@ def filter_action_features(
     filtered = {}
 
     for key, feat in action_features.items():
+        # Always include tool/trigger features
+        if key.startswith("tool.") or key.startswith("trigger."):
+            filtered[key] = feat
+            continue
+
         if selected_arms is None:
             filtered[key] = feat
         elif key.startswith("left_") and "left" in selected_arms:
@@ -240,6 +250,12 @@ def recording_capture_loop(svc):
                         except Exception as cam_err:
                             if svc._recording_frame_counter == 0:
                                 print(f"[REC CAPTURE] Camera {cam_key} error: {cam_err}")
+
+                # SOURCE 3: Tool/trigger state
+                from app.core.hardware.tool_state import get_tool_observations
+                from app.state import state
+                tool_obs = get_tool_observations(state.tool_registry, state.trigger_listener)
+                obs.update(tool_obs)
 
                 # Check data availability
                 has_motor_data = any('.pos' in k for k in obs.keys())
@@ -414,6 +430,13 @@ def start_recording_session(
             svc.robot.action_features,
             selected_arms
         )
+
+        # Add tool/trigger features to observation schema
+        from app.core.hardware.tool_state import get_tool_action_features
+        from app.state import state
+        tool_features = get_tool_action_features(state.tool_registry)
+        if tool_features:
+            filtered_obs_features.update(tool_features)
 
         print(f"[START_SESSION] Filtered obs features: {list(filtered_obs_features.keys())}")
         print(f"[START_SESSION] Filtered action features: {list(filtered_action_features.keys())}")

@@ -2,20 +2,23 @@
 
 import React, { useState, useEffect } from 'react';
 import { X, Settings, AlertTriangle } from 'lucide-react';
-import { armsApi, motorsApi, teleopApi, apiFetch } from '@/lib/api';
-import type { Arm, Pairing, Port } from '@/lib/api/types';
+import { armsApi, motorsApi, teleopApi, toolsApi, triggersApi, toolPairingsApi, apiFetch } from '@/lib/api';
+import type { Arm, Pairing, Port, Tool, Trigger, ToolPairing } from '@/lib/api/types';
 import ArmsTab from './ArmsTab';
 import PairingsTab from './PairingsTab';
 import AddArmTab from './AddArmTab';
 import MotorSetupTab from './MotorSetupTab';
 import HapticsTab from './HapticsTab';
+import ToolsTab from './ToolsTab';
+import AddToolTab from './AddToolTab';
+import ToolPairingsTab from './ToolPairingsTab';
 
 interface ArmManagerModalProps {
     isOpen: boolean;
     onClose: () => void;
 }
 
-type Tab = 'arms' | 'pairings' | 'add' | 'motor_setup' | 'haptics';
+type Tab = 'arms' | 'pairings' | 'add' | 'motor_setup' | 'haptics' | 'tools' | 'add_tool' | 'tool_pairings';
 
 export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('arms');
@@ -85,11 +88,27 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
     const [ffJoint, setFfJoint] = useState(true);
     const [ffLoading, setFfLoading] = useState(false);
 
+    // Tool state
+    const [tools, setTools] = useState<Tool[]>([]);
+    const [triggers, setTriggers] = useState<Trigger[]>([]);
+    const [toolPairings, setToolPairings] = useState<ToolPairing[]>([]);
+    const [listenerRunning, setListenerRunning] = useState(false);
+    const [newTool, setNewTool] = useState({
+        id: '', name: '', tool_type: 'screwdriver', motor_type: 'sts3215', port: '', motor_id: 1,
+    });
+    const [newToolPairing, setNewToolPairing] = useState({
+        trigger_id: '', tool_id: '', name: '', action: 'toggle',
+    });
+
     // Fetch data on open
     useEffect(() => {
         if (isOpen) {
             fetchArms();
             fetchPairings();
+            fetchTools();
+            fetchTriggers();
+            fetchToolPairings();
+            fetchListenerStatus();
         }
     }, [isOpen]);
 
@@ -270,6 +289,163 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
         }
     };
 
+    // Tool functions
+    const fetchTools = async () => {
+        try {
+            const data = await toolsApi.list();
+            setTools(data || []);
+        } catch (e) {
+            console.error('Failed to fetch tools:', e);
+        }
+    };
+
+    const fetchTriggers = async () => {
+        try {
+            const data = await triggersApi.list();
+            setTriggers(data || []);
+        } catch (e) {
+            console.error('Failed to fetch triggers:', e);
+        }
+    };
+
+    const fetchToolPairings = async () => {
+        try {
+            const data = await toolPairingsApi.list();
+            setToolPairings(data || []);
+        } catch (e) {
+            console.error('Failed to fetch tool pairings:', e);
+        }
+    };
+
+    const fetchListenerStatus = async () => {
+        try {
+            const data = await toolPairingsApi.listenerStatus();
+            setListenerRunning(data.running);
+        } catch (e) {
+            console.error('Failed to fetch listener status:', e);
+        }
+    };
+
+    const connectTool = async (toolId: string) => {
+        try {
+            const data = await toolsApi.connect(toolId);
+            if (!data.success) {
+                setError(data.error || null);
+            }
+            fetchTools();
+        } catch (e) {
+            console.error('Failed to connect tool:', e);
+        }
+    };
+
+    const disconnectTool = async (toolId: string) => {
+        try {
+            await toolsApi.disconnect(toolId);
+            fetchTools();
+        } catch (e) {
+            console.error('Failed to disconnect tool:', e);
+        }
+    };
+
+    const activateTool = async (toolId: string) => {
+        try {
+            await toolsApi.activate(toolId);
+        } catch (e) {
+            console.error('Failed to activate tool:', e);
+        }
+    };
+
+    const deactivateTool = async (toolId: string) => {
+        try {
+            await toolsApi.deactivate(toolId);
+        } catch (e) {
+            console.error('Failed to deactivate tool:', e);
+        }
+    };
+
+    const removeTool = async (toolId: string) => {
+        if (!confirm(`Are you sure you want to remove tool "${toolId}"?`)) return;
+        try {
+            await toolsApi.remove(toolId);
+            fetchTools();
+            fetchToolPairings();
+        } catch (e) {
+            console.error('Failed to remove tool:', e);
+        }
+    };
+
+    const addTool = async () => {
+        if (!newTool.id || !newTool.name || !newTool.port) {
+            setError('Please fill in all required fields');
+            return;
+        }
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await toolsApi.create(newTool);
+            if (!data.success) {
+                setError(data.error || null);
+            } else {
+                setNewTool({ id: '', name: '', tool_type: 'screwdriver', motor_type: 'sts3215', port: '', motor_id: 1 });
+                setActiveTab('tools');
+                fetchTools();
+            }
+        } catch (e) {
+            setError('Failed to add tool');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const createToolPairing = async () => {
+        if (!newToolPairing.trigger_id || !newToolPairing.tool_id) {
+            setError('Please select a trigger and tool');
+            return;
+        }
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await toolPairingsApi.create(newToolPairing);
+            if (!data.success) {
+                setError(data.error || null);
+            } else {
+                setNewToolPairing({ trigger_id: '', tool_id: '', name: '', action: 'toggle' });
+                fetchToolPairings();
+            }
+        } catch (e) {
+            setError('Failed to create tool pairing');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const removeToolPairing = async (triggerId: string, toolId: string) => {
+        try {
+            await toolPairingsApi.remove(triggerId, toolId);
+            fetchToolPairings();
+        } catch (e) {
+            console.error('Failed to remove tool pairing:', e);
+        }
+    };
+
+    const startListener = async () => {
+        try {
+            await toolPairingsApi.startListener();
+            fetchListenerStatus();
+        } catch (e) {
+            console.error('Failed to start listener:', e);
+        }
+    };
+
+    const stopListener = async () => {
+        try {
+            await toolPairingsApi.stopListener();
+            fetchListenerStatus();
+        } catch (e) {
+            console.error('Failed to stop listener:', e);
+        }
+    };
+
     // Motor setup functions
     const scanMotors = async () => {
         if (!motorSetup.port) {
@@ -402,6 +578,9 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                         { id: 'add', label: 'Add Arm' },
                         { id: 'motor_setup', label: 'Motor Setup' },
                         { id: 'haptics', label: 'Haptics' },
+                        { id: 'tools', label: 'Tools' },
+                        { id: 'add_tool', label: 'Add Tool' },
+                        { id: 'tool_pairings', label: 'Tool Pairings' },
                     ].map(tab => (
                         <button
                             key={tab.id}
@@ -497,6 +676,46 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                             ffJoint={ffJoint}
                             ffLoading={ffLoading}
                             onToggleForceFeedback={toggleForceFeedback}
+                        />
+                    )}
+
+                    {activeTab === 'tools' && (
+                        <ToolsTab
+                            tools={tools}
+                            loading={loading}
+                            onConnect={connectTool}
+                            onDisconnect={disconnectTool}
+                            onActivate={activateTool}
+                            onDeactivate={deactivateTool}
+                            onRemove={removeTool}
+                            onRefresh={fetchTools}
+                        />
+                    )}
+
+                    {activeTab === 'add_tool' && (
+                        <AddToolTab
+                            newTool={newTool}
+                            setNewTool={setNewTool}
+                            ports={ports}
+                            loading={loading}
+                            onScanPorts={scanPorts}
+                            onAddTool={addTool}
+                        />
+                    )}
+
+                    {activeTab === 'tool_pairings' && (
+                        <ToolPairingsTab
+                            tools={tools}
+                            triggers={triggers}
+                            toolPairings={toolPairings}
+                            newToolPairing={newToolPairing}
+                            setNewToolPairing={setNewToolPairing}
+                            loading={loading}
+                            listenerRunning={listenerRunning}
+                            onCreateToolPairing={createToolPairing}
+                            onRemoveToolPairing={removeToolPairing}
+                            onStartListener={startListener}
+                            onStopListener={stopListener}
                         />
                     )}
                 </div>

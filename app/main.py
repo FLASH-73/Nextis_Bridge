@@ -17,7 +17,7 @@ from app.state import state
 from app.routes import (
     system, arms, motors, calibration, teleop,
     cameras, recording, datasets, training,
-    policies, hil, rl, chat, debug,
+    policies, hil, rl, chat, debug, tools,
 )
 
 app = FastAPI(title="Nextis Robotics API")
@@ -31,7 +31,7 @@ app.add_middleware(
 )
 
 for r in [system, arms, motors, calibration, teleop, cameras,
-          recording, datasets, training, policies, hil, rl, chat, debug]:
+          recording, datasets, training, policies, hil, rl, chat, debug, tools]:
     app.include_router(r.router)
 
 

@@ -309,3 +309,36 @@ export interface ResizableModalProps extends BaseModalProps {
   maximizedWindow: string | null;
   setMaximizedWindow: (window: string | null) => void;
 }
+
+// ─── Tools ──────────────────────────────────────────────────────────────────
+
+export interface Tool {
+  id: string;
+  name: string;
+  motor_type: string;
+  port: string;
+  motor_id: number;
+  tool_type: string;
+  enabled: boolean;
+  status: "connected" | "disconnected" | "error";
+  config: Record<string, unknown>;
+}
+
+export interface Trigger {
+  id: string;
+  name: string;
+  trigger_type: string;
+  port: string;
+  pin: number;
+  active_low: boolean;
+  enabled: boolean;
+  config: Record<string, unknown>;
+}
+
+export interface ToolPairing {
+  trigger_id: string;
+  tool_id: string;
+  name: string;
+  action: "toggle" | "hold" | "pulse";
+  config: Record<string, unknown>;
+}

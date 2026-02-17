@@ -82,7 +82,11 @@ class CalibrationService:
             if isinstance(self.robot, DamiaoFollowerRobot):
                 # Damiao uses absolute encoders, always "calibrated"
                 damiao_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
-                damiao_calibrated = self.robot.is_calibrated
+                try:
+                    damiao_calibrated = self.robot.is_calibrated
+                except Exception as e:
+                    logger.warning(f"Could not check calibration for damiao_follower: {e}")
+                    damiao_calibrated = False
                 arms.append({
                     "id": "damiao_follower",
                     "name": "Damiao Follower",
@@ -93,7 +97,11 @@ class CalibrationService:
 
         # Check for Damiao robot passed separately (e.g., as damiao_robot attribute)
         if hasattr(self, 'damiao_robot') and self.damiao_robot is not None:
-            damiao_calibrated = self.damiao_robot.is_calibrated if hasattr(self.damiao_robot, 'is_calibrated') else True
+            try:
+                damiao_calibrated = self.damiao_robot.is_calibrated if hasattr(self.damiao_robot, 'is_calibrated') else True
+            except Exception as e:
+                logger.warning(f"Could not check calibration for damiao_follower (damiao_robot): {e}")
+                damiao_calibrated = False
             arms.append({
                 "id": "damiao_follower",
                 "name": "Damiao Follower",
@@ -139,7 +147,11 @@ class CalibrationService:
                 instance = self.arm_registry.arm_instances.get(arm_id)
                 calibrated = False
                 if instance and hasattr(instance, 'is_calibrated'):
-                    calibrated = instance.is_calibrated
+                    try:
+                        calibrated = instance.is_calibrated
+                    except Exception as e:
+                        logger.warning(f"Could not check calibration for {arm_id}: {e}")
+                        calibrated = False
                 arms.append({
                     "id": arm_id,
                     "name": arm_def.name,

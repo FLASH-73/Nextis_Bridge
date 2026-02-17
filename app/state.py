@@ -26,6 +26,8 @@ class SystemState:
         self.sarm_reward_service = None
         self.rl_service = None
         self.arm_registry = None  # Arm Manager Service
+        self.tool_registry = None
+        self.trigger_listener = None
         self.leader_assists = {} # {arm_prefix: LeaderAssistService}
         self.lock = threading.Lock()
 
@@ -66,6 +68,23 @@ class SystemState:
         except Exception as e:
             print(f"Warning: Arm Registry init failed: {e}")
             self.arm_registry = None
+
+        # 3b. Tool Registry (reads config only, no hardware)
+        try:
+            from app.core.hardware.tool_registry import ToolRegistryService
+            self.tool_registry = ToolRegistryService(config_path=str(CONFIG_PATH))
+            print(f"Tool Registry initialized: {len(self.tool_registry.tools)} tools, {len(self.tool_registry.triggers)} triggers")
+        except Exception as e:
+            print(f"Warning: Tool Registry init failed: {e}")
+            self.tool_registry = None
+
+        # 3c. Trigger Listener (not started until explicitly requested)
+        try:
+            from app.core.hardware.trigger_listener import TriggerListenerService
+            self.trigger_listener = TriggerListenerService(self.tool_registry) if self.tool_registry else None
+        except Exception as e:
+            print(f"Warning: Trigger Listener init failed: {e}")
+            self.trigger_listener = None
 
         # 4. Data Recorder
         self.recorder = DataRecorder(repo_id="roberto/nextis_data", robot_type="bi_umbra_follower")
@@ -151,6 +170,13 @@ class SystemState:
         print("Shutting Down System State...")
         if self.orchestrator:
             self.orchestrator.stop()
+
+        # Stop trigger listener
+        if self.trigger_listener:
+            try:
+                self.trigger_listener.stop()
+            except Exception as e:
+                print(f"Error stopping trigger listener: {e}")
 
         # Disconnect all managed cameras
         if self.camera_service:

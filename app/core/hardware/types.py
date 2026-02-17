@@ -68,3 +68,92 @@ class Pairing:
             "follower_id": self.follower_id,
             "name": self.name,
         }
+
+
+# ---------------------------------------------------------------------------
+# Tool support types (single-actuator devices controlled by triggers)
+# ---------------------------------------------------------------------------
+
+class ToolType(str, Enum):
+    """Type of tool attached to the system"""
+    SCREWDRIVER = "screwdriver"
+    GRIPPER = "gripper"
+    PUMP = "pump"
+    CUSTOM = "custom"
+
+
+class TriggerType(str, Enum):
+    """How a tool is activated"""
+    GPIO_SWITCH = "gpio_switch"
+    LEADER_BUTTON = "leader_button"
+    SOFTWARE = "software"
+    CUSTOM = "custom"
+
+
+@dataclass
+class ToolDefinition:
+    """Definition of a single-actuator tool"""
+    id: str
+    name: str
+    motor_type: MotorType
+    port: str
+    motor_id: int
+    tool_type: ToolType
+    enabled: bool = True
+    config: Dict = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "motor_type": self.motor_type.value,
+            "port": self.port,
+            "motor_id": self.motor_id,
+            "tool_type": self.tool_type.value,
+            "enabled": self.enabled,
+            "config": self.config,
+        }
+
+
+@dataclass
+class TriggerDefinition:
+    """Definition of a trigger input (GPIO switch, button, etc.)"""
+    id: str
+    name: str
+    trigger_type: TriggerType
+    port: str
+    pin: int
+    active_low: bool = True
+    enabled: bool = True
+    config: Dict = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "trigger_type": self.trigger_type.value,
+            "port": self.port,
+            "pin": self.pin,
+            "active_low": self.active_low,
+            "enabled": self.enabled,
+            "config": self.config,
+        }
+
+
+@dataclass
+class ToolPairing:
+    """Trigger-to-tool pairing definition"""
+    trigger_id: str
+    tool_id: str
+    name: str
+    action: str = "toggle"
+    config: Dict = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return {
+            "trigger_id": self.trigger_id,
+            "tool_id": self.tool_id,
+            "name": self.name,
+            "action": self.action,
+            "config": self.config,
+        }

@@ -43,7 +43,8 @@ nextis_app/
 │   │   ├── hil.py              # Human-in-the-loop sessions
 │   │   ├── rl.py               # RL training, reward classifiers
 │   │   ├── chat.py             # LLM task planning
-│   │   └── debug.py            # Debug endpoints
+│   │   ├── debug.py            # Debug endpoints
+│   │   └── tools.py            # Tool/trigger CRUD, pairings, listener
 │   └── core/                   # Backend services
 │       ├── config.py           # Path constants + YAML config I/O
 │       ├── hardware/           # Motor control, arm registry, safety
@@ -54,7 +55,9 @@ nextis_app/
 │       │   ├── gravity_comp.py
 │       │   ├── connection.py   # create_arm_instance() factory
 │       │   ├── types.py        # MotorType, ArmRole, ArmDefinition, Pairing
-│       │   └── tables.py       # DAMIAO_TORQUE_LIMITS
+│       │   ├── tables.py       # DAMIAO_TORQUE_LIMITS
+│       │   ├── tool_registry.py  # ToolRegistryService — tool/trigger CRUD
+│       │   └── trigger_listener.py # TriggerListenerService — GPIO polling
 │       ├── teleop/             # Teleoperation system
 │       │   ├── service.py      # TeleoperationService — multi-pair control
 │       │   ├── pairing.py      # PairingContext — isolated per-pair state
@@ -133,6 +136,8 @@ nextis_app/
 1. Lightweight services: CameraService, DatasetService, TrainingService
 2. Load config from `app/config/settings.yaml`
 3. ArmRegistryService (reads config, no hardware)
+3b. ToolRegistryService (reads config, no hardware)
+3c. TriggerListenerService (created but not started)
 4. DataRecorder
 5. CalibrationService, TeleoperationService (robot=None)
 6. TaskOrchestrator (mock robot)
@@ -157,6 +162,7 @@ nextis_app/
 | `/hil/*` | hil.py | Human-in-the-loop sessions |
 | `/rl/*` | rl.py | RL training, reward classifiers |
 | `/chat` | chat.py | LLM task planning |
+| `/tools/*`, `/triggers/*`, `/tool-pairings/*` | tools.py | Tool/trigger management, listener |
 
 ## Key Design Decisions
 
