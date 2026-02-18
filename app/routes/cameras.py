@@ -362,31 +362,44 @@ async def update_camera_config(request: Request, background_tasks: BackgroundTas
             config_dict[cam_id] = config_entry
         data = config_dict
 
-    # Check if only use_depth changed (no need to reload for depth-only changes)
-    # Compare camera assignments (video_device_id, type) - ignore use_depth
-    needs_reload = False
+    system.camera_service.update_camera_config(data)
 
-    # Check for new/removed cameras or changed assignments
+    # Determine what changed per camera
+    cameras_needing_reconnect = []
+    needs_full_reload = False
+
     if set(data.keys()) != set(existing_config.keys()):
-        needs_reload = True
+        # Cameras added or removed — full reload needed
+        needs_full_reload = True
     else:
         for cam_id, new_cfg in data.items():
             old_cfg = existing_config.get(cam_id, {})
-            # Compare assignment-critical fields (not use_depth)
+            # Device assignment changed (different physical camera) — full reload
             if (new_cfg.get("video_device_id") != old_cfg.get("video_device_id") or
-                new_cfg.get("type") != old_cfg.get("type") or
-                new_cfg.get("width") != old_cfg.get("width") or
+                new_cfg.get("type") != old_cfg.get("type")):
+                needs_full_reload = True
+                break
+            # Resolution or FPS changed — only reconnect THIS camera
+            if (new_cfg.get("width") != old_cfg.get("width") or
                 new_cfg.get("height") != old_cfg.get("height") or
                 new_cfg.get("fps") != old_cfg.get("fps")):
-                needs_reload = True
-                break
+                cameras_needing_reconnect.append(cam_id)
 
-    system.camera_service.update_camera_config(data)
-
-    if needs_reload:
-        # Trigger System Reload in Background (only for camera assignment changes)
+    if needs_full_reload:
         background_tasks.add_task(system.reload)
         return {"status": "success", "message": "Camera config updated. System reloading..."}
+    elif cameras_needing_reconnect:
+        def reconnect_changed():
+            import time as _time
+            for cid in cameras_needing_reconnect:
+                try:
+                    system.camera_service.disconnect_camera(cid)
+                    _time.sleep(0.5)
+                    system.camera_service.connect_camera(cid)
+                except Exception as exc:
+                    import logging
+                    logging.getLogger(__name__).error(f"Failed to reconnect {cid} after resolution change: {exc}")
+        background_tasks.add_task(reconnect_changed)
+        return {"status": "success", "message": f"Resolution updated. Reconnecting: {', '.join(cameras_needing_reconnect)}"}
     else:
-        # Just a depth toggle or other non-critical change - no reload needed
         return {"status": "success", "message": "Camera config updated (no reload needed)."}

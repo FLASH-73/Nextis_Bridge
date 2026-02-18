@@ -4,6 +4,7 @@ import CameraGrid from './CameraGrid';
 import { usePolling } from '../../../hooks/usePolling';
 import type { CameraConfig, CameraDevice } from './CameraGrid';
 import type { CameraStatusEntry, CameraCapabilities } from '../../../lib/api/types';
+import { API_BASE } from '../../../lib/api/client';
 
 interface CameraModalProps {
     isOpen: boolean;
@@ -50,7 +51,7 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
 
     const fetchCameraStatus = async () => {
         try {
-            const res = await fetch('http://127.0.0.1:8000/cameras/status');
+            const res = await fetch(`${API_BASE}/cameras/status`);
             if (res.ok) {
                 const data = await res.json();
                 setCameraStatus(prev => {
@@ -75,7 +76,7 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
     const connectCamera = async (cameraKey: string) => {
         setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'connecting', error: '' } }));
         try {
-            const res = await fetch(`http://127.0.0.1:8000/cameras/${cameraKey}/connect`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/cameras/${cameraKey}/connect`, { method: 'POST' });
             const data = await res.json();
             if (data.status === 'connected') {
                 setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'connected', error: '' } }));
@@ -90,20 +91,20 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
     const disconnectCamera = async (cameraKey: string) => {
         setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnecting', error: '' } }));
         try {
-            await fetch(`http://127.0.0.1:8000/cameras/${cameraKey}/disconnect`, { method: 'POST' });
+            await fetch(`${API_BASE}/cameras/${cameraKey}/disconnect`, { method: 'POST' });
             setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnected', error: '' } }));
         } catch {
             setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnected', error: '' } }));
         }
     };
 
-    const fetchCapabilities = async (deviceType: string, deviceId: string | number) => {
+    const fetchCapabilities = async (deviceType: string, deviceId: string | number, forceRefresh = false) => {
         const key = `${deviceType}:${deviceId}`;
-        if (capabilitiesCache[key]) return capabilitiesCache[key];
+        if (!forceRefresh && capabilitiesCache[key]) return capabilitiesCache[key];
 
         setLoadingCapabilities(prev => ({ ...prev, [key]: true }));
         try {
-            const res = await fetch(`http://127.0.0.1:8000/cameras/capabilities/${deviceType}/${deviceId}`);
+            const res = await fetch(`${API_BASE}/cameras/capabilities/${deviceType}/${encodeURIComponent(String(deviceId))}`);
             const data: CameraCapabilities = await res.json();
             setCapabilitiesCache(prev => ({ ...prev, [key]: data }));
 
@@ -135,7 +136,7 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
         setIsScanning(true);
         setScanError('');
         try {
-            const res = await fetch('http://127.0.0.1:8000/cameras/scan');
+            const res = await fetch(`${API_BASE}/cameras/scan`);
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}`);
             }
@@ -179,7 +180,7 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
 
     const loadConfigs = async () => {
         try {
-            const res = await fetch('http://127.0.0.1:8000/cameras/config');
+            const res = await fetch(`${API_BASE}/cameras/config`);
             const data = await res.json();
             const loaded = Array.isArray(data) ? data : [];
             setConfigs(loaded);
@@ -197,7 +198,7 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
 
     const saveConfig = async (newConfigs: CameraConfig[]) => {
         try {
-            await fetch('http://127.0.0.1:8000/cameras/config', {
+            await fetch(`${API_BASE}/cameras/config`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(newConfigs)
@@ -308,6 +309,23 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
     };
 
     const updateResolution = (cameraId: string, width: number, height: number, fps: number) => {
+        const cam = configs.find(c => c.id === cameraId);
+
+        // Invalidate capabilities cache for this device so we get fresh data after reconnect
+        if (cam && cam.type) {
+            const capKey = `${cam.type}:${cam.video_device_id}`;
+            setCapabilitiesCache(prev => {
+                const next = { ...prev };
+                delete next[capKey];
+                return next;
+            });
+
+            // Re-fetch capabilities after backend has time to reconnect (~4s)
+            setTimeout(() => {
+                fetchCapabilities(cam.type!, cam.video_device_id, true);
+            }, 4000);
+        }
+
         const newConfigs = configs.map(c =>
             c.id === cameraId ? { ...c, width, height, fps } : c
         );

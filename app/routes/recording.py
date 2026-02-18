@@ -11,41 +11,46 @@ router = APIRouter(tags=["recording"])
 
 @router.get("/recording/options")
 def get_recording_options():
-    """Returns available cameras and arm pairs for recording selection."""
+    """Returns available cameras and arms for recording selection."""
     system = get_state()
     cameras = []
     arms = []
 
-    # Get cameras from robot or camera config
-    if system.robot and system.robot.is_connected:
-        if hasattr(system.robot, 'cameras') and system.robot.cameras:
-            for cam_key in sorted(system.robot.cameras.keys()):
-                cameras.append({
-                    "id": cam_key,
-                    "name": cam_key.replace("_", " ").title()
-                })
-
-        # Get arm pairs - check for bi-arm setup
-        if hasattr(system.robot, 'left_arm') or hasattr(system.robot, 'right_arm'):
-            if hasattr(system.robot, 'left_arm') and system.robot.left_arm:
-                arms.append({"id": "left", "name": "Left Arm", "joints": 7})
-            if hasattr(system.robot, 'right_arm') and system.robot.right_arm:
-                arms.append({"id": "right", "name": "Right Arm", "joints": 7})
-        else:
-            # Single arm or default setup
-            arms.append({"id": "default", "name": "Robot Arm", "joints": 7})
-    else:
-        # Fallback: try to get cameras from config
+    # 1. Cameras: always read from CameraService config (independent of robot mock)
+    if system.camera_service:
         try:
-            camera_service = system.camera_service
-            cam_configs = camera_service.get_camera_config()
-            for cam in cam_configs:
+            cam_configs = system.camera_service.get_camera_config()
+            # cam_configs is Dict[str, Dict] — iterate .items() not just keys
+            for cam_id, cam_cfg in cam_configs.items():
                 cameras.append({
-                    "id": cam.get("id", "unknown"),
-                    "name": cam.get("id", "unknown").replace("_", " ").title()
+                    "id": cam_id,
+                    "name": cam_id.replace("_", " ").title()
                 })
-        except:
+        except Exception:
             pass
+
+    # 2. Arms: read from ArmRegistry (the real source of truth)
+    if system.arm_registry:
+        try:
+            for arm in system.arm_registry.get_followers():
+                joints = len(arm.get("config", {}).get("home_position", {})) or 7
+                arms.append({
+                    "id": arm["id"],
+                    "name": arm.get("name", arm["id"]),
+                    "joints": joints,
+                    "status": arm.get("status", "disconnected"),
+                })
+        except Exception:
+            pass
+
+    # 3. Legacy fallback: real robot (not mock) with left_arm/right_arm
+    if not arms and system.robot and getattr(system.robot, 'is_connected', False) and not getattr(system.robot, 'is_mock', False):
+        if hasattr(system.robot, 'left_arm') and system.robot.left_arm:
+            arms.append({"id": "left", "name": "Left Arm", "joints": 7})
+        if hasattr(system.robot, 'right_arm') and system.robot.right_arm:
+            arms.append({"id": "right", "name": "Right Arm", "joints": 7})
+        if not arms:
+            arms.append({"id": "default", "name": "Robot Arm", "joints": 7})
 
     return {"cameras": cameras, "arms": arms}
 

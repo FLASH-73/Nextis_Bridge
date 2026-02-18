@@ -84,6 +84,13 @@ class CameraService:
                 self._camera_status[camera_key] = "connected"
                 self._camera_errors[camera_key] = ""
                 self._reconnect_attempts.pop(camera_key, None)
+                # Invalidate capabilities cache so frontend re-probes at new resolution
+                cam_cfg_for_cache = config[camera_key]
+                for prefix in ("opencv", "intelrealsense"):
+                    for field in ("index_or_path", "serial_number_or_name", "video_device_id"):
+                        val = cam_cfg_for_cache.get(field)
+                        if val is not None:
+                            self._capabilities_cache.pop(f"{prefix}:{val}", None)
                 if attempt > 0:
                     logger.info(f"Camera '{camera_key}' ({cam_type}) connected on retry {attempt}.")
                 else:
