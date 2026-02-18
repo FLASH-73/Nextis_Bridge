@@ -1,6 +1,7 @@
 import React from 'react';
 import { Play, StopCircle, User, Bot, RefreshCw, Loader2, SkipForward, Pause } from 'lucide-react';
 import { HILStatus } from './types';
+import CameraFeed from '../../ui/CameraFeed';
 import { camerasApi } from '../../../lib/api';
 
 interface HILRunningViewProps {
@@ -32,17 +33,16 @@ export default function HILRunningView({
             {/* Left: Camera Feed - Only show policy-relevant cameras */}
             <div className="flex-1 flex flex-col gap-4">
                 <div className="flex-1 bg-black rounded-2xl overflow-hidden relative min-h-0">
-                    <div className={`grid h-full ${activeCameras.length > 1 ? 'grid-cols-2' : 'grid-cols-1'} ${activeCameras.length > 2 ? 'grid-rows-2' : ''}`}>
+                    <div className="grid h-full gap-0.5" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${activeCameras.length <= 1 ? '100%' : '300px'}, 1fr))` }}>
                         {activeCameras.map(cam => (
-                            <div key={cam.id} className="relative w-full h-full border-r border-white/10 last:border-0 overflow-hidden">
-                                <img
-                                    src={camerasApi.videoFeedUrl(cam.id)}
-                                    className="w-full h-full object-cover"
-                                    alt={cam.id}
+                            <div key={cam.id} className="relative w-full h-full overflow-hidden">
+                                <CameraFeed
+                                    cameraId={cam.id}
+                                    maxStreamWidth={1280}
+                                    quality={90}
+                                    mode="contain"
+                                    className="rounded-none border-0"
                                 />
-                                <div className="absolute bottom-2 left-2 bg-black/50 px-2 py-1 rounded text-xs text-white/80">
-                                    {cam.id}
-                                </div>
                             </div>
                         ))}
                         {activeCameras.length === 0 && (

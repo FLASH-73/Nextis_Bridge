@@ -2,15 +2,21 @@ import time
 
 import cv2
 
-from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Request, HTTPException, BackgroundTasks, Query
+from fastapi.responses import StreamingResponse, Response
 from app.dependencies import get_state
 
 router = APIRouter(tags=["cameras"])
 
 
-def generate_frames(camera_key: str):
+def generate_frames(camera_key: str, max_width: int | None = None, quality: int = 85, target_fps: int = 30):
+    import numpy as np
+    import torch
+
     system = get_state()
+    sleep_interval = 1.0 / target_fps
+    encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
+
     while True:
         frame = None
 
@@ -55,33 +61,88 @@ def generate_frames(camera_key: str):
                 frame = snapshot
 
         if frame is None:
-            # Yield placeholder
-            import numpy as np
-            blank_image = np.zeros((480, 640, 3), np.uint8)
-            cv2.putText(blank_image, f"Waiting for {camera_key}...", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            # Yield placeholder matching camera's actual/configured aspect ratio
+            pw, ph = 640, 480
+            if system.camera_service:
+                pw, ph = system.camera_service.get_camera_resolution(camera_key)
+            blank_image = np.zeros((ph, pw, 3), np.uint8)
+            cv2.putText(blank_image, f"Waiting for {camera_key}...", (50, ph // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             frame = blank_image
         else:
             # Convert PyTorch tensor to numpy if needed
-            import torch
             if isinstance(frame, torch.Tensor):
                 frame = frame.permute(1, 2, 0).cpu().numpy() * 255
                 frame = frame.astype("uint8")
                 # RGB to BGR for OpenCV encoding
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # Encode to JPEG
-        ret, buffer = cv2.imencode('.jpg', frame)
+        # Downscale for UI preview if max_width is set
+        if max_width and frame.shape[1] > max_width:
+            scale = max_width / frame.shape[1]
+            new_h = int(frame.shape[0] * scale)
+            frame = cv2.resize(frame, (max_width, new_h), interpolation=cv2.INTER_AREA)
+
+        # Encode to JPEG with explicit quality
+        ret, buffer = cv2.imencode('.jpg', frame, encode_params)
         frame_bytes = buffer.tobytes()
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-        time.sleep(0.016)  # ~60 FPS streaming for lower latency
+        time.sleep(sleep_interval)
 
 
 @router.get("/video_feed/{camera_key}")
-def video_feed(camera_key: str):
-    return StreamingResponse(generate_frames(camera_key), media_type="multipart/x-mixed-replace; boundary=frame")
+def video_feed(
+    camera_key: str,
+    max_width: int | None = Query(default=None, ge=160, le=3840),
+    quality: int = Query(default=85, ge=1, le=100),
+    target_fps: int = Query(default=30, ge=1, le=60),
+):
+    return StreamingResponse(
+        generate_frames(camera_key, max_width=max_width, quality=quality, target_fps=target_fps),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@router.get("/cameras/{camera_key}/snapshot")
+def camera_snapshot(camera_key: str):
+    """Return a single full-resolution JPEG frame (for AI/training capture)."""
+    import numpy as np
+    import torch
+
+    system = get_state()
+    if not system.camera_service:
+        raise HTTPException(status_code=503, detail="Camera service not initialized")
+
+    # Try connected camera first (fast path)
+    frame = None
+    cam = system.camera_service.cameras.get(camera_key)
+    if cam and getattr(cam, 'is_connected', False):
+        try:
+            frame = cam.async_read(blocking=False)
+        except Exception:
+            pass
+
+    # Fallback to one-shot capture
+    if frame is None:
+        frame = system.camera_service.capture_snapshot(camera_key)
+
+    if frame is None:
+        raise HTTPException(status_code=404, detail=f"No frame available for '{camera_key}'")
+
+    # Convert tensor if needed
+    if isinstance(frame, torch.Tensor):
+        frame = frame.permute(1, 2, 0).cpu().numpy() * 255
+        frame = frame.astype("uint8")
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    if not ret:
+        raise HTTPException(status_code=500, detail="JPEG encoding failed")
+
+    return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
 
 @router.post("/cameras/{camera_key}/connect")
@@ -106,6 +167,33 @@ def disconnect_camera(camera_key: str):
         raise HTTPException(status_code=503, detail="Camera service not initialized")
     result = system.camera_service.disconnect_camera(camera_key)
     return result
+
+@router.post("/cameras/{camera_key}/reconnect")
+def reconnect_camera(camera_key: str):
+    """Disconnect then reconnect a camera with retry logic.
+    Uses def (not async) so FastAPI runs it in a thread pool.
+    """
+    system = get_state()
+    if not system.camera_service:
+        raise HTTPException(status_code=503, detail="Camera service not initialized")
+    # connect_camera already handles disconnect-existing + retry with backoff
+    result = system.camera_service.connect_camera(camera_key)
+    return result
+
+
+@router.post("/cameras/reconnect-all")
+def reconnect_all_cameras():
+    """Disconnect all cameras then reconnect sequentially with retry logic.
+    Uses def (not async) — can take 30+ seconds for multiple cameras.
+    """
+    system = get_state()
+    if not system.camera_service:
+        raise HTTPException(status_code=503, detail="Camera service not initialized")
+    system.camera_service.disconnect_all()
+    time.sleep(1.0)
+    result = system.camera_service.connect_all_cameras()
+    return result
+
 
 @router.get("/cameras/status")
 def get_camera_status():
@@ -196,6 +284,27 @@ def scan_cameras():
         "realsense": final_realsense,
         "note": "Merged active and available cameras."
     }
+
+@router.get("/cameras/capabilities/{device_type}/{device_id:path}")
+def get_camera_capabilities(device_type: str, device_id: str):
+    """Probe supported resolutions for a camera device.
+    Non-destructive: if camera is already connected, returns actual resolution only.
+    Results cached for 60s per device.
+    Uses def (not async) so FastAPI runs it in a thread pool — probing can take seconds.
+    """
+    system = get_state()
+    if not system.camera_service:
+        raise HTTPException(status_code=503, detail="Camera service not initialized")
+
+    if device_type not in ("opencv", "intelrealsense"):
+        raise HTTPException(status_code=400, detail=f"Unsupported device type: {device_type}")
+
+    try:
+        result = system.camera_service.get_capabilities(device_type, device_id)
+        return result
+    except Exception as e:
+        return {"resolutions": [], "native": None, "error": str(e)}
+
 
 @router.get("/cameras/config")
 def get_camera_config():

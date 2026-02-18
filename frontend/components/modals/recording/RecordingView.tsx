@@ -1,5 +1,6 @@
 import React from 'react';
 import { StopCircle, Loader2, Save, Folder, Trash2 } from 'lucide-react';
+import CameraFeed from '../../ui/CameraFeed';
 import { recordingApi, camerasApi } from '../../../lib/api';
 
 interface RecordingViewProps {
@@ -57,16 +58,14 @@ export default function RecordingView({
                                 {camerasToDisplay.map(cam => (
                                     <div
                                         key={cam.id}
-                                        className="relative bg-black flex items-center justify-center overflow-hidden"
+                                        className="relative bg-black overflow-hidden"
                                     >
-                                        <img
-                                            src={camerasApi.videoFeedUrl(cam.id)}
-                                            className="max-w-full max-h-full object-contain"
-                                            alt={cam.id}
+                                        <CameraFeed
+                                            cameraId={cam.id}
+                                            maxStreamWidth={800}
+                                            mode="contain"
+                                            className="rounded-none border-0"
                                         />
-                                        <div className="absolute bottom-4 left-4 text-[10px] font-bold text-white/50 uppercase tracking-widest bg-black/40 px-2 py-1 rounded backdrop-blur-md">
-                                            {cam.id}
-                                        </div>
                                     </div>
                                 ))}
                             </div>

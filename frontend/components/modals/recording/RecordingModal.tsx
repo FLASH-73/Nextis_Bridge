@@ -4,6 +4,7 @@ import { motion, useDragControls } from 'framer-motion';
 import { useResizable } from '../../../hooks/useResizable';
 import { EmergencyStop } from '../../EmergencyStop';
 import RecordingView from './RecordingView';
+import CameraFeed from '../../ui/CameraFeed';
 import { recordingApi, camerasApi, teleopApi } from '../../../lib/api';
 
 interface RecordingModalProps {
@@ -327,13 +328,18 @@ export default function RecordingModal({ isOpen, onClose, maximizedWindow, setMa
                                                     >
                                                         {/* Camera Preview */}
                                                         <div className="h-20 bg-neutral-900 relative">
-                                                            <img
-                                                                src={camerasApi.videoFeedUrl(cam.id)}
-                                                                className="w-full h-full object-cover"
-                                                                alt={cam.name}
+                                                            <CameraFeed
+                                                                cameraId={cam.id}
+                                                                maxStreamWidth={320}
+                                                                quality={60}
+                                                                showOverlay={false}
+                                                                showFullscreenButton={false}
+                                                                aspectRatio="16/9"
+                                                                mode="cover"
+                                                                className="rounded-none border-0"
                                                             />
                                                             {isSelected && (
-                                                                <div className="absolute top-2 right-2 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center">
+                                                                <div className="absolute top-2 right-2 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center z-30">
                                                                     <Check className="w-3 h-3 text-white" />
                                                                 </div>
                                                             )}

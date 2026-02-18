@@ -4,7 +4,6 @@ import { useState } from "react";
 import { User, LogOut } from "lucide-react";
 import TaskGraph from "../components/TaskGraph";
 import CalibrationModal from "../components/modals/calibration";
-import CameraModal from "../components/modals/cameras";
 import ArmManagerModal from "../components/modals/arms";
 import MotorMonitorModal from "../components/MotorMonitorModal";
 import TeleopModal from "../components/modals/teleop";
@@ -28,7 +27,6 @@ export default function Dashboard() {
 
   // Modal States
   const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
-  const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [isTeleopOpen, setIsTeleopOpen] = useState(false);
   const [isRecordingOpen, setIsRecordingOpen] = useState(false);
   const [isDatasetViewerOpen, setIsDatasetViewerOpen] = useState(false);
@@ -53,10 +51,6 @@ export default function Dashboard() {
         isOpen={isCalibrationOpen}
         onClose={() => setIsCalibrationOpen(false)}
         language="en"
-      />
-      <CameraModal
-        isOpen={isCameraOpen}
-        onClose={() => setIsCameraOpen(false)}
       />
       <TeleopModal
         isOpen={isTeleopOpen}
@@ -199,7 +193,6 @@ export default function Dashboard() {
             isHILOpen,
             isRLTrainingOpen,
             isChatOpen,
-            isCameraOpen,
             isArmManagerOpen,
             isMotorMonitorOpen,
             isCalibrationOpen,
@@ -212,7 +205,6 @@ export default function Dashboard() {
           setIsHILOpen={setIsHILOpen}
           setIsRLTrainingOpen={setIsRLTrainingOpen}
           setIsChatOpen={setIsChatOpen}
-          setIsCameraOpen={setIsCameraOpen}
           setIsArmManagerOpen={setIsArmManagerOpen}
           setIsMotorMonitorOpen={setIsMotorMonitorOpen}
           setIsCalibrationOpen={setIsCalibrationOpen}

@@ -10,6 +10,7 @@ import {
   Settings,
   Cpu,
   Cloud,
+  Camera,
 } from "lucide-react";
 import StatusMenu from "./StatusMenu";
 
@@ -21,7 +22,6 @@ interface ModalStates {
   isHILOpen: boolean;
   isRLTrainingOpen: boolean;
   isChatOpen: boolean;
-  isCameraOpen: boolean;
   isArmManagerOpen: boolean;
   isMotorMonitorOpen: boolean;
   isCalibrationOpen: boolean;
@@ -37,7 +37,6 @@ interface ControlDockProps {
   setIsHILOpen: (open: boolean) => void;
   setIsRLTrainingOpen: (open: boolean) => void;
   setIsChatOpen: (open: boolean) => void;
-  setIsCameraOpen: (open: boolean) => void;
   setIsArmManagerOpen: (open: boolean) => void;
   setIsMotorMonitorOpen: (open: boolean) => void;
   setIsCalibrationOpen: (open: boolean) => void;
@@ -53,7 +52,6 @@ export default function ControlDock({
   setIsHILOpen,
   setIsRLTrainingOpen,
   setIsChatOpen,
-  setIsCameraOpen,
   setIsArmManagerOpen,
   setIsMotorMonitorOpen,
   setIsCalibrationOpen,
@@ -136,11 +134,12 @@ export default function ControlDock({
           () => setIsChatOpen(true),
           "Assistant"
         )}
-        {dockBtn(
-          modalStates.isCameraOpen,
-          () => setIsCameraOpen(true),
-          "Cameras"
-        )}
+        <button
+          onClick={() => router.push("/cameras")}
+          className="px-4 py-2 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 hover:bg-neutral-100/50 dark:hover:bg-zinc-800/50 text-neutral-600 dark:text-zinc-400 hover:text-black dark:hover:text-white"
+        >
+          <Camera className="w-3 h-3" /> Cameras
+        </button>
         {dockBtn(
           modalStates.isArmManagerOpen,
           () => setIsArmManagerOpen(true),

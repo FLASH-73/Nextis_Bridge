@@ -7,6 +7,7 @@ import { EmergencyStop } from '../../EmergencyStop';
 import ControlGroupSelector from './ControlGroupSelector';
 import TelemetryGraph from './TelemetryGraph';
 import SettingsOverlay from './SettingsOverlay';
+import CameraFeed from '../../ui/CameraFeed';
 import { teleopApi, armsApi, calibrationApi, camerasApi, systemApi } from '../../../lib/api';
 
 interface Pairing {
@@ -352,16 +353,13 @@ export default function TeleopModal({ isOpen, onClose, maximizedWindow, setMaxim
                             </div>
                         )}
                         {cameraConfigs.map((cam) => (
-                            <div key={cam.id} className="w-80 h-60 bg-neutral-100/50 dark:bg-zinc-800/50 rounded-2xl overflow-hidden relative border border-white/50 dark:border-zinc-700/50 shadow-inner group flex-none">
-                                <img
-                                    src={camerasApi.videoFeedUrl(cam.id)}
-                                    alt={cam.id}
-                                    className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
-                                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                            <div key={cam.id} className="flex-1 min-w-[280px] max-w-[50%] aspect-video">
+                                <CameraFeed
+                                    cameraId={cam.id}
+                                    maxStreamWidth={800}
+                                    mode="contain"
+                                    quality={85}
                                 />
-                                <div className="absolute bottom-3 left-3 text-white text-[10px] font-medium bg-black/40 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10">
-                                    {cam.id}
-                                </div>
                             </div>
                         ))}
                     </div>

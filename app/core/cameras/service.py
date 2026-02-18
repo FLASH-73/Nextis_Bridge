@@ -1,5 +1,7 @@
+import gc
 import logging
 import threading
+import time
 from typing import List, Dict, Any
 from pathlib import Path
 import yaml
@@ -11,12 +13,25 @@ logger = logging.getLogger(__name__)
 
 
 class CameraService:
+    _MAX_CONNECT_RETRIES = 3
+    _BACKOFF_DELAYS = [1.0, 3.0, 7.0]   # seconds between retries
+    _USB_SETTLE_DELAY = 0.5              # seconds for USB stack to release handles
+    _HEALTH_CHECK_INTERVAL = 10.0        # seconds between health checks
+    _MAX_AUTO_RECONNECT = 2              # max consecutive auto-reconnect attempts per camera
+
     def __init__(self):
         self._cameras: Dict[str, Any] = {}          # Connected camera instances (Camera objects)
         self._camera_status: Dict[str, str] = {}    # "connected" | "disconnected" | "error"
         self._camera_errors: Dict[str, str] = {}    # Last error message per camera
+        self._camera_actual_res: Dict[str, Dict[str, Any]] = {}  # Actual connected resolution
+        self._capabilities_cache: Dict[str, Dict[str, Any]] = {}  # "{type}:{device_id}" -> {data, timestamp}
         self._lock = threading.Lock()
         self._connect_lock = threading.Lock()        # Serializes connect attempts (USB contention)
+
+        # Health monitor
+        self._health_stop_event = threading.Event()
+        self._health_thread: threading.Thread | None = None
+        self._reconnect_attempts: Dict[str, int] = {}  # camera_key -> consecutive failure count
 
     @property
     def cameras(self) -> Dict[str, Any]:
@@ -27,54 +42,103 @@ class CameraService:
     def connect_camera(self, camera_key: str) -> Dict[str, Any]:
         """
         Connect a single camera by its config key (e.g. 'camera_1').
-        Creates the appropriate LeRobot camera instance, connects it,
-        and starts the background read thread for streaming.
+        Retries up to 3 times with exponential backoff on transient failures.
         Serialized via _connect_lock to prevent USB contention.
         """
         with self._connect_lock:
-            config = self.get_camera_config()
-            if camera_key not in config:
-                return {"status": "error", "message": f"Camera '{camera_key}' not found in config."}
+            return self._connect_camera_inner(camera_key)
 
-            # Disconnect existing instance if any
-            if camera_key in self._cameras:
-                try:
-                    self._cameras[camera_key].disconnect()
-                except Exception:
-                    pass
-                with self._lock:
-                    del self._cameras[camera_key]
+    def _connect_camera_inner(self, camera_key: str) -> Dict[str, Any]:
+        """Inner connection logic with retry. Caller MUST hold _connect_lock."""
+        config = self.get_camera_config()
+        if camera_key not in config:
+            return {"status": "error", "message": f"Camera '{camera_key}' not found in config."}
 
-            cam_cfg = config[camera_key]
-            cam_type = cam_cfg.get("type", "opencv")
+        # Disconnect existing instance if any
+        if camera_key in self._cameras:
+            try:
+                self._cameras[camera_key].disconnect()
+            except Exception:
+                pass
+            with self._lock:
+                del self._cameras[camera_key]
 
+        cam_cfg = config[camera_key]
+        cam_type = cam_cfg.get("type", "opencv")
+
+        if cam_type not in ("opencv", "intelrealsense"):
+            self._camera_status[camera_key] = "error"
+            self._camera_errors[camera_key] = f"Unsupported camera type: {cam_type}"
+            return {"status": "error", "message": f"Unsupported camera type: {cam_type}"}
+
+        last_error = None
+        for attempt in range(1 + self._MAX_CONNECT_RETRIES):
             try:
                 if cam_type == "opencv":
                     camera = self._connect_opencv_camera(camera_key, cam_cfg)
-                elif cam_type == "intelrealsense":
-                    camera = self._connect_realsense_camera(camera_key, cam_cfg)
                 else:
-                    self._camera_status[camera_key] = "error"
-                    self._camera_errors[camera_key] = f"Unsupported camera type: {cam_type}"
-                    return {"status": "error", "message": f"Unsupported camera type: {cam_type}"}
+                    camera = self._connect_realsense_camera(camera_key, cam_cfg)
 
                 with self._lock:
                     self._cameras[camera_key] = camera
                 self._camera_status[camera_key] = "connected"
                 self._camera_errors[camera_key] = ""
-                logger.info(f"Camera '{camera_key}' ({cam_type}) connected successfully.")
+                self._reconnect_attempts.pop(camera_key, None)
+                if attempt > 0:
+                    logger.info(f"Camera '{camera_key}' ({cam_type}) connected on retry {attempt}.")
+                else:
+                    logger.info(f"Camera '{camera_key}' ({cam_type}) connected successfully.")
                 return {"status": "connected", "camera_key": camera_key}
 
+            except (ConnectionError, RuntimeError) as e:
+                last_error = e
+                if attempt < self._MAX_CONNECT_RETRIES:
+                    delay = self._BACKOFF_DELAYS[attempt]
+                    logger.warning(
+                        f"Camera '{camera_key}' connect attempt {attempt + 1} failed: {e}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    gc.collect()
+                    time.sleep(self._USB_SETTLE_DELAY)
+                    time.sleep(delay)
             except Exception as e:
-                self._camera_status[camera_key] = "error"
-                self._camera_errors[camera_key] = str(e)
-                logger.error(f"Failed to connect camera '{camera_key}': {e}")
-                return {"status": "error", "message": str(e)}
+                # Non-retryable error
+                last_error = e
+                break
+
+        # All retries exhausted
+        error_msg = self._enrich_error_message(str(last_error), cam_type)
+        self._camera_status[camera_key] = "error"
+        self._camera_errors[camera_key] = error_msg
+        logger.error(
+            f"Failed to connect camera '{camera_key}' after "
+            f"{min(attempt + 1, self._MAX_CONNECT_RETRIES + 1)} attempt(s): {error_msg}"
+        )
+        return {"status": "error", "message": error_msg}
+
+    @staticmethod
+    def _enrich_error_message(error: str, cam_type: str) -> str:
+        """Append actionable suggestions to common camera error messages."""
+        error_lower = error.lower()
+
+        if cam_type == "intelrealsense":
+            if "resolve requests" in error_lower or "couldn't resolve" in error_lower:
+                return (
+                    f"{error} | Suggestion: Try reducing resolution to 640x480 "
+                    "or disconnecting other USB3 devices to free bandwidth."
+                )
+        if cam_type == "opencv":
+            if "can't open camera" in error_lower or "failed to open" in error_lower:
+                return (
+                    f"{error} | Suggestion: Camera device may be in use by another "
+                    "process. Run `lsof /dev/video0` to check."
+                )
+
+        return error
 
     def _connect_opencv_camera(self, camera_key: str, cam_cfg: dict) -> OpenCVCamera:
         """Connect an OpenCV camera, with fps/resolution auto-detect and discovery fallbacks."""
         from lerobot.cameras.opencv import OpenCVCameraConfig
-        import gc
 
         idx = cam_cfg.get("index_or_path")
         fps = cam_cfg.get("fps", 30)
@@ -91,6 +155,9 @@ class CameraService:
             )
             camera = OpenCVCamera(c_conf)
             camera.connect(warmup=True)
+            self._camera_actual_res[camera_key] = {
+                "width": camera.width, "height": camera.height, "fps": camera.fps,
+            }
             return camera
         except RuntimeError as fps_err:
             # FPS or resolution validation failed — camera opened but can't match settings
@@ -119,6 +186,9 @@ class CameraService:
             )
             camera = OpenCVCamera(c_conf)
             camera.connect(warmup=True)
+            self._camera_actual_res[camera_key] = {
+                "width": camera.width, "height": camera.height, "fps": camera.fps,
+            }
             logger.info(
                 f"Camera '{camera_key}': auto-detect connected at "
                 f"{camera.width}x{camera.height}@{camera.fps}fps"
@@ -173,6 +243,9 @@ class CameraService:
         )
         camera = OpenCVCamera(c_conf)
         camera.connect(warmup=True)
+        self._camera_actual_res[camera_key] = {
+            "width": camera.width, "height": camera.height, "fps": camera.fps,
+        }
 
         # Update settings.yaml with the correct path so next time it works directly
         self._update_camera_path(camera_key, new_path)
@@ -182,7 +255,6 @@ class CameraService:
     def _connect_realsense_camera(self, camera_key: str, cam_cfg: dict) -> RealSenseCamera:
         """Connect a RealSense camera by serial number, with resolution auto-detect fallback."""
         from lerobot.cameras.realsense import RealSenseCameraConfig
-        import gc
 
         serial = cam_cfg.get("serial_number_or_name")
         fps = cam_cfg.get("fps", 30)
@@ -201,6 +273,9 @@ class CameraService:
             )
             camera = RealSenseCamera(c_conf)
             camera.connect(warmup=True)
+            self._camera_actual_res[camera_key] = {
+                "width": camera.width, "height": camera.height, "fps": camera.fps,
+            }
 
             # Prime the frame cache
             try:
@@ -233,6 +308,9 @@ class CameraService:
         )
         camera = RealSenseCamera(c_conf)
         camera.connect(warmup=True)
+        self._camera_actual_res[camera_key] = {
+            "width": camera.width, "height": camera.height, "fps": camera.fps,
+        }
 
         logger.info(
             f"Camera '{camera_key}': auto-detect connected at "
@@ -261,7 +339,11 @@ class CameraService:
             logger.warning(f"Failed to update settings.yaml for {camera_key}: {e}")
 
     def disconnect_camera(self, camera_key: str) -> Dict[str, Any]:
-        """Disconnect a single camera by key."""
+        """Disconnect a single camera by key (public API)."""
+        return self._disconnect_camera_internal(camera_key)
+
+    def _disconnect_camera_internal(self, camera_key: str) -> Dict[str, Any]:
+        """Inner disconnect logic. Callable by health monitor without extra locking."""
         with self._lock:
             camera = self._cameras.pop(camera_key, None)
 
@@ -274,6 +356,7 @@ class CameraService:
 
         self._camera_status[camera_key] = "disconnected"
         self._camera_errors[camera_key] = ""
+        self._camera_actual_res.pop(camera_key, None)
         return {"status": "disconnected", "camera_key": camera_key}
 
     def disconnect_all(self):
@@ -281,6 +364,328 @@ class CameraService:
         keys = list(self._cameras.keys())
         for key in keys:
             self.disconnect_camera(key)
+
+    def connect_all_cameras(self) -> Dict[str, Any]:
+        """
+        Connect all configured cameras sequentially.
+        Order: OpenCV cameras first, then RealSense sorted by serial number.
+        Inserts a 2s gap between each camera to avoid USB contention.
+        """
+        config = self.get_camera_config()
+        if not config:
+            return {"status": "ok", "message": "No cameras configured.", "results": {}}
+
+        # Partition into OpenCV and RealSense, sort RealSense by serial
+        opencv_keys = []
+        realsense_keys = []
+        for key, cfg in config.items():
+            cam_type = cfg.get("type", "opencv")
+            if cam_type == "intelrealsense":
+                realsense_keys.append(key)
+            else:
+                opencv_keys.append(key)
+
+        realsense_keys.sort(key=lambda k: config[k].get("serial_number_or_name", ""))
+        ordered_keys = opencv_keys + realsense_keys
+        results = {}
+
+        for i, camera_key in enumerate(ordered_keys):
+            logger.info(f"connect_all_cameras: [{i+1}/{len(ordered_keys)}] connecting '{camera_key}'...")
+            result = self.connect_camera(camera_key)
+            results[camera_key] = result
+
+            # Inter-camera gap (skip after the last one)
+            if i < len(ordered_keys) - 1:
+                time.sleep(2.0)
+
+        connected = sum(1 for r in results.values() if r.get("status") == "connected")
+        failed = len(results) - connected
+        return {
+            "status": "ok" if failed == 0 else "partial",
+            "message": f"{connected}/{len(results)} cameras connected.",
+            "results": results,
+        }
+
+    # ── Health Monitor ────────────────────────────────────────────────────
+
+    def start_health_monitor(self):
+        """Start the background health monitor thread."""
+        if self._health_thread is not None and self._health_thread.is_alive():
+            logger.warning("Camera health monitor already running.")
+            return
+        self._health_stop_event.clear()
+        self._health_thread = threading.Thread(
+            target=self._health_monitor_loop,
+            daemon=True,
+            name="CameraHealthMonitor",
+        )
+        self._health_thread.start()
+        logger.info("Camera health monitor started.")
+
+    def stop_health_monitor(self):
+        """Signal the health monitor thread to stop and wait for it."""
+        self._health_stop_event.set()
+        if self._health_thread is not None:
+            self._health_thread.join(timeout=15.0)
+            if self._health_thread.is_alive():
+                logger.warning("Camera health monitor did not stop within timeout.")
+            self._health_thread = None
+        self._reconnect_attempts.clear()
+        logger.info("Camera health monitor stopped.")
+
+    def _health_monitor_loop(self):
+        """Periodically check all connected cameras and auto-reconnect stale ones."""
+        logger.info("Camera health monitor thread running.")
+        while not self._health_stop_event.is_set():
+            if self._health_stop_event.wait(timeout=self._HEALTH_CHECK_INTERVAL):
+                break  # stop requested
+            try:
+                self._health_check_cycle()
+            except Exception as e:
+                logger.error(f"Health monitor cycle error: {e}")
+        logger.info("Camera health monitor thread exiting.")
+
+    def _health_check_cycle(self):
+        """Single health check pass over all connected cameras."""
+        for camera_key in list(self._cameras.keys()):
+            status = self._camera_status.get(camera_key, "disconnected")
+            if status != "connected":
+                continue
+
+            cam = self._cameras.get(camera_key)
+            if cam is None:
+                continue
+
+            if self._is_camera_healthy(camera_key, cam):
+                self._reconnect_attempts.pop(camera_key, None)
+                continue
+
+            # Camera is unhealthy — attempt auto-reconnect
+            attempts = self._reconnect_attempts.get(camera_key, 0)
+            if attempts >= self._MAX_AUTO_RECONNECT:
+                self._camera_status[camera_key] = "error"
+                self._camera_errors[camera_key] = (
+                    "Auto-reconnect failed. Manual reconnect required."
+                )
+                logger.error(
+                    f"Camera '{camera_key}': auto-reconnect exhausted "
+                    f"({self._MAX_AUTO_RECONNECT} attempts). Manual reconnect required."
+                )
+                continue
+
+            # Try to acquire _connect_lock without blocking
+            acquired = self._connect_lock.acquire(blocking=False)
+            if not acquired:
+                logger.debug(
+                    f"Camera '{camera_key}': skipping auto-reconnect, "
+                    "manual operation in progress."
+                )
+                continue
+
+            try:
+                self._reconnect_attempts[camera_key] = attempts + 1
+                logger.warning(
+                    f"Camera '{camera_key}': unhealthy, auto-reconnect "
+                    f"attempt {attempts + 1}/{self._MAX_AUTO_RECONNECT}..."
+                )
+                self._disconnect_camera_internal(camera_key)
+                gc.collect()
+                time.sleep(1.0)
+                self._connect_camera_inner(camera_key)
+            except Exception as e:
+                logger.error(f"Auto-reconnect failed for '{camera_key}': {e}")
+                self._camera_status[camera_key] = "error"
+                self._camera_errors[camera_key] = f"Auto-reconnect failed: {e}"
+            finally:
+                self._connect_lock.release()
+
+    def _is_camera_healthy(self, camera_key: str, cam) -> bool:
+        """Check if a camera is still operational."""
+        if not getattr(cam, 'is_connected', False):
+            logger.warning(f"Camera '{camera_key}': is_connected=False")
+            return False
+
+        if hasattr(cam, 'thread') and cam.thread is not None:
+            if not cam.thread.is_alive():
+                logger.warning(f"Camera '{camera_key}': background thread dead")
+                return False
+
+        try:
+            frame = cam.async_read(blocking=False)
+            if frame is None:
+                logger.warning(f"Camera '{camera_key}': async_read returned None")
+                return False
+        except Exception as e:
+            logger.warning(f"Camera '{camera_key}': async_read failed: {e}")
+            return False
+
+        return True
+
+    # ── Capabilities Probing ─────────────────────────────────────────────
+
+    _COMMON_RESOLUTIONS = [
+        (3840, 2160, "4K"),
+        (1920, 1080, "1080p"),
+        (1280, 720, "720p"),
+        (640, 480, "480p"),
+        (320, 240, "QVGA"),
+    ]
+
+    def get_capabilities(self, device_type: str, device_id: str) -> Dict[str, Any]:
+        """
+        Probe supported resolutions for a camera device.
+        If the camera is already connected, returns its actual resolution without
+        re-opening the device (non-destructive). Results cached for 60s.
+        """
+        cache_key = f"{device_type}:{device_id}"
+        cached = self._capabilities_cache.get(cache_key)
+        if cached and (time.time() - cached["timestamp"]) < 60.0:
+            return cached["data"]
+
+        # Check if camera is already connected — return actual resolution only
+        config = self.get_camera_config()
+        for cam_key, cam_cfg in config.items():
+            matches = False
+            if device_type == "opencv" and cam_cfg.get("type") == "opencv":
+                matches = str(cam_cfg.get("index_or_path")) == str(device_id) or \
+                          str(cam_cfg.get("video_device_id")) == str(device_id)
+            elif device_type == "intelrealsense" and cam_cfg.get("type") == "intelrealsense":
+                matches = str(cam_cfg.get("serial_number_or_name")) == str(device_id)
+
+            if matches and cam_key in self._cameras:
+                actual = self._camera_actual_res.get(cam_key, {})
+                if actual:
+                    result = {
+                        "resolutions": [{
+                            "width": actual["width"],
+                            "height": actual["height"],
+                            "fps": [actual.get("fps", 30)],
+                        }],
+                        "native": {"width": actual["width"], "height": actual["height"]},
+                        "connected": True,
+                    }
+                    self._capabilities_cache[cache_key] = {"data": result, "timestamp": time.time()}
+                    return result
+
+        # Probe device
+        if device_type == "opencv":
+            result = self._probe_opencv_capabilities(device_id)
+        elif device_type == "intelrealsense":
+            result = self._probe_realsense_capabilities(device_id)
+        else:
+            result = {"resolutions": [], "native": None, "connected": False}
+
+        self._capabilities_cache[cache_key] = {"data": result, "timestamp": time.time()}
+        return result
+
+    def _probe_opencv_capabilities(self, device_id: str) -> Dict[str, Any]:
+        """Open cv2.VideoCapture, try common resolutions, report which ones work."""
+        import cv2
+
+        try:
+            idx = device_id if device_id.startswith('/') else int(device_id)
+        except ValueError:
+            idx = device_id
+
+        cap = cv2.VideoCapture(idx)
+        if not cap.isOpened():
+            return {"resolutions": [], "native": None, "connected": False}
+
+        try:
+            # Get native resolution (camera default)
+            native_w = int(round(cap.get(cv2.CAP_PROP_FRAME_WIDTH)))
+            native_h = int(round(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            native = {"width": native_w, "height": native_h}
+
+            supported = []
+            for w, h, label in self._COMMON_RESOLUTIONS:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                actual_w = int(round(cap.get(cv2.CAP_PROP_FRAME_WIDTH)))
+                actual_h = int(round(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+                if actual_w == w and actual_h == h:
+                    # Probe FPS at this resolution
+                    fps_list = []
+                    for target_fps in [15, 30, 60]:
+                        cap.set(cv2.CAP_PROP_FPS, target_fps)
+                        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+                        if abs(actual_fps - target_fps) < 2:
+                            fps_list.append(target_fps)
+                    if not fps_list:
+                        fps_list = [30]
+                    supported.append({"width": w, "height": h, "fps": fps_list, "label": label})
+
+            # Add native if not in common list
+            if not any(r["width"] == native_w and r["height"] == native_h for r in supported):
+                supported.append({"width": native_w, "height": native_h, "fps": [30], "label": "Native"})
+
+            return {"resolutions": supported, "native": native, "connected": False}
+        except Exception as e:
+            logger.warning(f"OpenCV capabilities probe failed: {e}")
+            return {"resolutions": [], "native": None, "connected": False}
+        finally:
+            cap.release()
+
+    def _probe_realsense_capabilities(self, serial: str) -> Dict[str, Any]:
+        """Query RealSense stream profiles for supported color resolutions."""
+        try:
+            import pyrealsense2 as rs
+        except ImportError:
+            return {"resolutions": [], "native": None, "connected": False}
+
+        ctx = rs.context()
+        devices = ctx.query_devices()
+        device = None
+        for dev in devices:
+            try:
+                if dev.get_info(rs.camera_info.serial_number) == str(serial):
+                    device = dev
+                    break
+            except Exception:
+                continue
+
+        if device is None:
+            return {"resolutions": [], "native": None, "connected": False}
+
+        res_fps_map: Dict[tuple, set] = {}
+        native = None
+
+        try:
+            sensors = device.query_sensors()
+            for sensor in sensors:
+                profiles = sensor.get_stream_profiles()
+                for profile in profiles:
+                    if not profile.is_video_stream_profile():
+                        continue
+                    vp = profile.as_video_stream_profile()
+                    if vp.stream_type() != rs.stream.color:
+                        continue
+                    fmt = vp.format()
+                    if fmt != rs.format.rgb8 and fmt != rs.format.bgr8 and fmt != rs.format.yuyv:
+                        continue
+                    w, h, fps = vp.width(), vp.height(), vp.fps()
+                    key = (w, h)
+                    if key not in res_fps_map:
+                        res_fps_map[key] = set()
+                    res_fps_map[key].add(fps)
+
+                    if profile.is_default() and native is None:
+                        native = {"width": w, "height": h}
+        except Exception as e:
+            logger.warning(f"RealSense capabilities probe failed: {e}")
+            return {"resolutions": [], "native": None, "connected": False}
+
+        supported = []
+        for (w, h), fps_set in sorted(res_fps_map.items(), key=lambda x: x[0][0] * x[0][1], reverse=True):
+            supported.append({
+                "width": w,
+                "height": h,
+                "fps": sorted(fps_set),
+            })
+
+        return {"resolutions": supported, "native": native, "connected": False}
+
+    # ── Status & Resolution ────────────────────────────────────────────
 
     def get_status(self) -> Dict[str, Any]:
         """
@@ -291,21 +696,50 @@ class CameraService:
         status = {}
         for camera_key in config:
             cam = self._cameras.get(camera_key)
+            res = self._camera_actual_res.get(camera_key, {})
             if cam and getattr(cam, 'is_connected', False):
                 # Check if background thread is still alive
                 thread_alive = hasattr(cam, 'thread') and cam.thread is not None and cam.thread.is_alive()
                 if thread_alive:
-                    status[camera_key] = {"status": "connected", "error": ""}
+                    status[camera_key] = {
+                        "status": "connected", "error": "",
+                        "actual_width": res.get("width"),
+                        "actual_height": res.get("height"),
+                        "actual_fps": res.get("fps"),
+                    }
                 else:
-                    status[camera_key] = {"status": "error", "error": "Background read thread stopped"}
+                    status[camera_key] = {
+                        "status": "error", "error": "Background read thread stopped",
+                        "actual_width": res.get("width"),
+                        "actual_height": res.get("height"),
+                        "actual_fps": res.get("fps"),
+                    }
                     self._camera_status[camera_key] = "error"
                     self._camera_errors[camera_key] = "Background read thread stopped"
             else:
                 status[camera_key] = {
                     "status": self._camera_status.get(camera_key, "disconnected"),
                     "error": self._camera_errors.get(camera_key, ""),
+                    "actual_width": None,
+                    "actual_height": None,
+                    "actual_fps": None,
                 }
+        # Health monitor info
+        status["_health_monitor"] = {
+            "running": self._health_thread is not None and self._health_thread.is_alive(),
+            "reconnect_attempts": dict(self._reconnect_attempts),
+        }
         return status
+
+    def get_camera_resolution(self, camera_key: str) -> tuple:
+        """Return (width, height) — actual if connected, configured otherwise, 640x480 fallback."""
+        res = self._camera_actual_res.get(camera_key)
+        if res and res.get("width") and res.get("height"):
+            return res["width"], res["height"]
+        config = self.get_camera_config()
+        if camera_key in config:
+            return config[camera_key].get("width", 640), config[camera_key].get("height", 480)
+        return 640, 480
 
     # ── Legacy methods (unchanged) ────────────────────────────────────────
 

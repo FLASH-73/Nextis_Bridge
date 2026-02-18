@@ -54,6 +54,7 @@ class SystemState:
 
         # 1. Lightweight services (no hardware deps)
         self.camera_service = CameraService()
+        self.camera_service.start_health_monitor()
         self.dataset_service = DatasetService()
         self.training_service = TrainingService()
 
@@ -179,9 +180,10 @@ class SystemState:
             except Exception as e:
                 print(f"Error stopping trigger listener: {e}")
 
-        # Disconnect all managed cameras
+        # Stop camera health monitor, then disconnect all managed cameras
         if self.camera_service:
             try:
+                self.camera_service.stop_health_monitor()
                 self.camera_service.disconnect_all()
             except Exception as e:
                 print(f"Error disconnecting cameras: {e}")

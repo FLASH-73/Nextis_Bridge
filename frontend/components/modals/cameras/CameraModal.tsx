@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { X, Camera } from 'lucide-react';
 import CameraGrid from './CameraGrid';
 import { usePolling } from '../../../hooks/usePolling';
-import type { CameraConfig, CameraDevice, CameraStatusEntry } from './CameraGrid';
+import type { CameraConfig, CameraDevice } from './CameraGrid';
+import type { CameraStatusEntry, CameraCapabilities } from '../../../lib/api/types';
 
 interface CameraModalProps {
     isOpen: boolean;
@@ -22,6 +23,11 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
 
     // Camera connection status
     const [cameraStatus, setCameraStatus] = useState<Record<string, CameraStatusEntry>>({});
+
+    // Resolution capabilities
+    const [capabilitiesCache, setCapabilitiesCache] = useState<Record<string, CameraCapabilities>>({});
+    const [loadingCapabilities, setLoadingCapabilities] = useState<Record<string, boolean>>({});
+    const [selectedResolutions, setSelectedResolutions] = useState<Record<string, { width: number; height: number; fps: number }>>({});
 
     useEffect(() => {
         if (isOpen) {
@@ -88,6 +94,40 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
             setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnected', error: '' } }));
         } catch {
             setCameraStatus(prev => ({ ...prev, [cameraKey]: { status: 'disconnected', error: '' } }));
+        }
+    };
+
+    const fetchCapabilities = async (deviceType: string, deviceId: string | number) => {
+        const key = `${deviceType}:${deviceId}`;
+        if (capabilitiesCache[key]) return capabilitiesCache[key];
+
+        setLoadingCapabilities(prev => ({ ...prev, [key]: true }));
+        try {
+            const res = await fetch(`http://127.0.0.1:8000/cameras/capabilities/${deviceType}/${deviceId}`);
+            const data: CameraCapabilities = await res.json();
+            setCapabilitiesCache(prev => ({ ...prev, [key]: data }));
+
+            // Pre-select default: 1280x720@30 if available, else native, else first
+            const resolutions = data.resolutions || [];
+            const default720 = resolutions.find(r => r.width === 1280 && r.height === 720);
+            const nativeRes = data.native
+                ? resolutions.find(r => r.width === data.native!.width && r.height === data.native!.height)
+                : null;
+            const selected = default720 || nativeRes || resolutions[0];
+
+            if (selected) {
+                const fps = selected.fps.includes(30) ? 30 : selected.fps[0];
+                setSelectedResolutions(prev => ({
+                    ...prev,
+                    [key]: { width: selected.width, height: selected.height, fps }
+                }));
+            }
+
+            return data;
+        } catch {
+            return null;
+        } finally {
+            setLoadingCapabilities(prev => ({ ...prev, [key]: false }));
         }
     };
 
@@ -220,16 +260,24 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
         setEditingRole(null);
     };
 
-    const assignCamera = (deviceId: number | string, cameraName: string, deviceType: 'opencv' | 'intelrealsense') => {
+    const assignCamera = (
+        deviceId: number | string,
+        cameraName: string,
+        deviceType: 'opencv' | 'intelrealsense',
+        resolution?: { width: number; height: number; fps: number }
+    ) => {
+        const key = `${deviceType}:${deviceId}`;
+        const res = resolution || selectedResolutions[key] || { width: 1280, height: 720, fps: 30 };
+
         const newConfigs = [...configs];
         const existingIndex = newConfigs.findIndex(c => c.id === cameraName);
 
         const newEntry: CameraConfig = {
             id: cameraName,
             video_device_id: deviceId,
-            width: 1280,
-            height: 720,
-            fps: 30,
+            width: res.width,
+            height: res.height,
+            fps: res.fps,
             type: deviceType,
             // Default use_depth to false for RealSense cameras (user can toggle it)
             ...(deviceType === 'intelrealsense' ? { use_depth: false } : {})
@@ -264,7 +312,7 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
     return (
         <div className="fixed inset-0 flex items-center justify-center z-[60]">
             <div className="absolute inset-0 bg-white/30 dark:bg-black/30 backdrop-blur-sm" onClick={onClose} />
-            <div className="bg-white/90 dark:bg-zinc-900/90 backdrop-blur-2xl border border-white/60 dark:border-zinc-700/60 rounded-3xl w-[900px] h-[650px] flex flex-col shadow-2xl overflow-hidden relative animate-in zoom-in-95 duration-200">
+            <div className="bg-white/90 dark:bg-zinc-900/90 backdrop-blur-2xl border border-white/60 dark:border-zinc-700/60 rounded-3xl w-[90vw] max-w-[1100px] h-[85vh] max-h-[800px] flex flex-col shadow-2xl overflow-hidden relative animate-in zoom-in-95 duration-200">
 
                 {/* Header */}
                 <div className="flex items-center justify-between px-8 py-6 border-b border-black/5 dark:border-white/5 bg-white/40 dark:bg-zinc-800/40">
@@ -319,6 +367,11 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
                     cameraStatus={cameraStatus}
                     connectCamera={connectCamera}
                     disconnectCamera={disconnectCamera}
+                    capabilitiesCache={capabilitiesCache}
+                    loadingCapabilities={loadingCapabilities}
+                    selectedResolutions={selectedResolutions}
+                    fetchCapabilities={fetchCapabilities}
+                    setSelectedResolutions={setSelectedResolutions}
                 />
             </div>
         </div>

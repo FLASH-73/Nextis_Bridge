@@ -232,6 +232,23 @@ export type CameraConnectionStatus =
 export interface CameraStatusEntry {
   status: CameraConnectionStatus;
   error: string;
+  actual_width?: number | null;
+  actual_height?: number | null;
+  actual_fps?: number | null;
+}
+
+export interface CameraResolutionOption {
+  width: number;
+  height: number;
+  fps: number[];
+  label?: string;
+}
+
+export interface CameraCapabilities {
+  resolutions: CameraResolutionOption[];
+  native: { width: number; height: number } | null;
+  connected?: boolean;
+  error?: string;
 }
 
 // ─── Motor Diagnostics ──────────────────────────────────────────────────────
