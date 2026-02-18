@@ -1,8 +1,8 @@
 "use client";
 
-import React from 'react';
-import { Link2, Unlink, Play, Square } from 'lucide-react';
-import type { Tool, Trigger, ToolPairing } from '@/lib/api/types';
+import React, { useState } from 'react';
+import { Link2, Unlink, Play, Square, AlertTriangle, Plus } from 'lucide-react';
+import type { Tool, Trigger, ToolPairing, Port } from '@/lib/api/types';
 
 interface ToolPairingsTabProps {
     tools: Tool[];
@@ -12,10 +12,16 @@ interface ToolPairingsTabProps {
     setNewToolPairing: (pairing: { trigger_id: string; tool_id: string; name: string; action: string }) => void;
     loading: boolean;
     listenerRunning: boolean;
+    ports: Port[];
     onCreateToolPairing: () => void;
     onRemoveToolPairing: (triggerId: string, toolId: string) => void;
     onStartListener: () => void;
     onStopListener: () => void;
+    onAddTrigger: (trigger: {
+        id: string; name: string; trigger_type: string;
+        port: string; pin: number; active_low: boolean;
+    }) => void;
+    onScanPorts: () => void;
 }
 
 export default function ToolPairingsTab({
@@ -26,11 +32,23 @@ export default function ToolPairingsTab({
     setNewToolPairing,
     loading,
     listenerRunning,
+    ports,
     onCreateToolPairing,
     onRemoveToolPairing,
     onStartListener,
     onStopListener,
+    onAddTrigger,
+    onScanPorts,
 }: ToolPairingsTabProps) {
+    const [newTrigger, setNewTrigger] = useState({
+        id: '', name: '', trigger_type: 'gpio_switch', port: '', pin: 0, active_low: true,
+    });
+
+    const handleAddTrigger = () => {
+        onAddTrigger(newTrigger);
+        setNewTrigger({ id: '', name: '', trigger_type: 'gpio_switch', port: '', pin: 0, active_low: true });
+    };
+
     return (
         <div className="space-y-6">
             {/* Listener Control */}
@@ -52,13 +70,30 @@ export default function ToolPairingsTab({
                 ) : (
                     <button
                         onClick={onStartListener}
-                        disabled={loading}
-                        className="px-4 py-2 text-sm font-medium text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/50 hover:bg-green-100 dark:hover:bg-green-950 rounded-lg transition-colors flex items-center gap-2"
+                        disabled={loading || triggers.length === 0}
+                        className="px-4 py-2 text-sm font-medium text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/50 hover:bg-green-100 dark:hover:bg-green-950 rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50"
                     >
                         <Play className="w-3.5 h-3.5" /> Start
                     </button>
                 )}
             </div>
+
+            {/* Prerequisites Warning */}
+            {!listenerRunning && (triggers.length === 0 || toolPairings.length === 0) && (
+                <div className="p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl">
+                    <div className="flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                        <div className="text-sm text-amber-700 dark:text-amber-300 space-y-1">
+                            {triggers.length === 0 && (
+                                <p>No trigger devices registered. Add a trigger below to use the listener.</p>
+                            )}
+                            {triggers.length > 0 && toolPairings.length === 0 && (
+                                <p>No tool pairings configured. Create a pairing below to link a trigger to a tool.</p>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Active Tool Pairings */}
             <div>
@@ -162,6 +197,89 @@ export default function ToolPairingsTab({
                     className="w-full py-2 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium text-sm disabled:opacity-50 hover:bg-neutral-800 dark:hover:bg-zinc-200 transition-colors flex items-center justify-center gap-2"
                 >
                     <Link2 className="w-4 h-4" /> Create Tool Pairing
+                </button>
+            </div>
+
+            {/* Add Trigger Device */}
+            <div className="p-4 bg-neutral-50 dark:bg-zinc-800/50 rounded-xl border border-neutral-100 dark:border-zinc-700">
+                <h4 className="font-medium text-black dark:text-white mb-4">Add Trigger Device</h4>
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label className="block text-xs font-medium text-neutral-500 dark:text-zinc-400 mb-1">Trigger ID *</label>
+                        <input
+                            type="text"
+                            value={newTrigger.id}
+                            onChange={(e) => setNewTrigger({ ...newTrigger, id: e.target.value.replace(/\s+/g, '_').toLowerCase() })}
+                            placeholder="e.g., button_1"
+                            className="w-full px-3 py-2 bg-white dark:bg-zinc-900 border border-neutral-200 dark:border-zinc-700 rounded-lg text-sm"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-xs font-medium text-neutral-500 dark:text-zinc-400 mb-1">Display Name *</label>
+                        <input
+                            type="text"
+                            value={newTrigger.name}
+                            onChange={(e) => setNewTrigger({ ...newTrigger, name: e.target.value })}
+                            placeholder="e.g., Foot Pedal"
+                            className="w-full px-3 py-2 bg-white dark:bg-zinc-900 border border-neutral-200 dark:border-zinc-700 rounded-lg text-sm"
+                        />
+                    </div>
+                </div>
+                <div className="grid grid-cols-3 gap-4 mb-4">
+                    <div>
+                        <label className="block text-xs font-medium text-neutral-500 dark:text-zinc-400 mb-1">
+                            Port *
+                            <button
+                                onClick={onScanPorts}
+                                disabled={loading}
+                                className="ml-2 text-blue-500 hover:text-blue-600 text-xs"
+                            >
+                                {loading ? 'Scanning...' : 'Scan'}
+                            </button>
+                        </label>
+                        <select
+                            value={newTrigger.port}
+                            onChange={(e) => setNewTrigger({ ...newTrigger, port: e.target.value })}
+                            className="w-full px-3 py-2 bg-white dark:bg-zinc-900 border border-neutral-200 dark:border-zinc-700 rounded-lg text-sm"
+                        >
+                            <option value="">Select port...</option>
+                            {ports.map(p => (
+                                <option key={p.device} value={p.device} disabled={p.in_use}>
+                                    {p.device} - {p.description}{p.in_use ? ' (in use)' : ''}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-xs font-medium text-neutral-500 dark:text-zinc-400 mb-1">GPIO Pin *</label>
+                        <input
+                            type="number"
+                            min={0}
+                            max={28}
+                            value={newTrigger.pin}
+                            onChange={(e) => setNewTrigger({ ...newTrigger, pin: parseInt(e.target.value) || 0 })}
+                            className="w-full px-3 py-2 bg-white dark:bg-zinc-900 border border-neutral-200 dark:border-zinc-700 rounded-lg text-sm"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-xs font-medium text-neutral-500 dark:text-zinc-400 mb-1">Active Low</label>
+                        <label className="flex items-center gap-2 mt-2">
+                            <input
+                                type="checkbox"
+                                checked={newTrigger.active_low}
+                                onChange={(e) => setNewTrigger({ ...newTrigger, active_low: e.target.checked })}
+                                className="rounded"
+                            />
+                            <span className="text-xs text-neutral-500 dark:text-zinc-400">Pin LOW = pressed</span>
+                        </label>
+                    </div>
+                </div>
+                <button
+                    onClick={handleAddTrigger}
+                    disabled={!newTrigger.id || !newTrigger.name || !newTrigger.port || loading}
+                    className="w-full py-2 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium text-sm disabled:opacity-50 hover:bg-neutral-800 dark:hover:bg-zinc-200 transition-colors flex items-center justify-center gap-2"
+                >
+                    <Plus className="w-4 h-4" /> Add Trigger
                 </button>
             </div>
         </div>

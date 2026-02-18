@@ -1,5 +1,11 @@
 arms:
   aira_zero:
+    name: Aira Zero Follower
+    role: follower
+    motor_type: damiao
+    port: can0
+    enabled: true
+    structural_design: damiao_7dof
     config:
       home_position:
         base: -0.01697566186007471
@@ -9,39 +15,33 @@ arms:
         link3: -0.9512092774853134
         link4: 0.05092698558022413
         link5: 0.029564354924849212
-    enabled: true
-    motor_type: damiao
-    name: Aira Zero Follower
-    port: can0
-    role: follower
-    structural_design: damiao_7dof
   aira_zero_leader:
-    enabled: true
-    motor_type: dynamixel_xl330
     name: Aira Zero Leader
-    port: /dev/ttyACM0
     role: leader
+    motor_type: dynamixel_xl330
+    port: /dev/ttyACM0
+    enabled: true
     structural_design: umbra_7dof
   umbra_follower:
-    enabled: true
-    motor_type: sts3215
     name: 'Umbra Follower '
-    port: /dev/ttyUSB1
     role: follower
+    motor_type: sts3215
+    port: /dev/ttyUSB0
+    enabled: true
     structural_design: umbra_7dof
   umbra_leader:
-    enabled: true
-    motor_type: dynamixel_xl330
     name: Umbra Leader
-    port: /dev/ttyACM1
     role: leader
+    motor_type: dynamixel_xl330
+    port: /dev/ttyACM1
+    enabled: true
     structural_design: umbra_7dof
 pairings:
-- follower: aira_zero
-  leader: aira_zero_leader
+- leader: aira_zero_leader
+  follower: aira_zero
   name: Aira Zero Leader -> Aira Zero Follower
-- follower: umbra_follower
-  leader: umbra_leader
+- leader: umbra_leader
+  follower: umbra_follower
   name: 'Umbra Leader -> Umbra Follower '
 robot:
   cameras:
@@ -81,5 +81,20 @@ tools:
     motor_id: 8
     tool_type: screwdriver
     enabled: true
-triggers: {}
-tool_pairings: []
+    config:
+      speed: 2000
+      direction: -1
+triggers:
+  button1:
+    name: Screwdriver Trigger
+    trigger_type: gpio_switch
+    port: /dev/ttyACM2
+    pin: 0
+    active_low: true
+    enabled: true
+tool_pairings:
+- trigger_id: button1
+  tool_id: screwdriver_1
+  name: Screwdriver Trigger -> Main Screwdriver
+  action: toggle
+  config: {}

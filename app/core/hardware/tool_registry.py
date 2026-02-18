@@ -328,7 +328,7 @@ class ToolRegistryService:
     # ── Tool Activation ─────────────────────────────────────────────────
 
     def activate_tool(
-        self, tool_id: str, speed: int = 500, direction: int = 1
+        self, tool_id: str, speed: int | None = None, direction: int | None = None
     ) -> Dict:
         with self._lock:
             if tool_id not in self.tools:
@@ -339,7 +339,10 @@ class ToolRegistryService:
                 return {"success": False, "error": f"No bus instance for tool '{tool_id}'"}
 
             try:
+                tool = self.tools[tool_id]
                 bus = self.tool_instances[tool_id]
+                speed = speed if speed is not None else tool.config.get("speed", 500)
+                direction = direction if direction is not None else tool.config.get("direction", 1)
                 velocity = speed * direction
                 bus.write("Goal_Velocity", "tool", velocity, normalize=False)
                 self._tool_active[tool_id] = True

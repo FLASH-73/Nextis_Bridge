@@ -56,6 +56,19 @@ def scan_tool_motors(request: Request):
 # ── Tools (parameterized routes) ─────────────────────────────────────
 
 
+@router.put("/tools/{tool_id}")
+async def update_tool(tool_id: str, request: Request):
+    """Update a tool's settings (name, config, etc.)."""
+    system = get_state()
+    if not system.tool_registry:
+        return _no_registry()
+    data = await request.json()
+    result = system.tool_registry.update_tool(tool_id, **data)
+    if not result.get("success"):
+        return JSONResponse(status_code=400, content=result)
+    return result
+
+
 @router.delete("/tools/{tool_id}")
 async def remove_tool(tool_id: str):
     system = get_state()
@@ -221,8 +234,13 @@ def start_listener():
     system = get_state()
     if not system.trigger_listener:
         return _no_listener()
-    system.trigger_listener.start()
-    return {"success": True, "message": "Trigger listener started"}
+    result = system.trigger_listener.start()
+    if not result.get("success"):
+        return JSONResponse(
+            status_code=400,
+            content={**result, "detail": result.get("error", "Failed to start listener")},
+        )
+    return result
 
 
 @router.post("/tool-pairings/listener/stop")
@@ -243,11 +261,18 @@ async def listener_status():
             "running": False,
             "trigger_states": {},
             "tool_states": {},
+            "trigger_count": 0,
+            "tool_pairing_count": 0,
+            "ports": [],
         }
     listener = system.trigger_listener
+    registry = system.tool_registry
     running = any(t.is_alive() for t in listener._port_threads.values())
     return {
         "running": running,
         "trigger_states": listener.get_trigger_states(),
         "tool_states": listener.get_tool_states(),
+        "trigger_count": len(registry.triggers) if registry else 0,
+        "tool_pairing_count": len(registry.tool_pairings) if registry else 0,
+        "ports": list(listener._port_threads.keys()),
     }

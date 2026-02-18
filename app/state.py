@@ -99,7 +99,8 @@ class SystemState:
         self.teleop_service = TeleoperationService(
             robot=None, leader=None, robot_lock=self.lock,
             leader_assists={}, arm_registry=self.arm_registry,
-            camera_service=self.camera_service
+            camera_service=self.camera_service,
+            trigger_listener=self.trigger_listener,
         )
 
         # 7. Orchestrator with minimal mock robot

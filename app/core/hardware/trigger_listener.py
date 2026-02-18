@@ -35,18 +35,40 @@ class TriggerListenerService:
 
     # ── Public API ───────────────────────────────────────────────────
 
-    def start(self):
-        """Start a reader thread for each unique trigger port."""
+    @property
+    def is_running(self) -> bool:
+        """True if any port reader thread is alive."""
+        return any(t.is_alive() for t in self._port_threads.values())
+
+    def start(self) -> dict:
+        """Start a reader thread for each unique trigger port.
+
+        Returns a result dict with ``success``, optional ``error``/``warning``,
+        ``started_threads`` count and ``ports`` list.
+        """
+        all_triggers = self._registry.triggers
+        if not all_triggers:
+            logger.info("No triggers registered — listener idle")
+            return {
+                "success": False,
+                "error": "No triggers registered. Add a trigger device first.",
+            }
+
         # Group enabled triggers by port
         port_triggers: Dict[str, List[TriggerDefinition]] = defaultdict(list)
-        for trigger in self._registry.triggers.values():
+        for trigger in all_triggers.values():
             if trigger.enabled:
                 port_triggers[trigger.port].append(trigger)
 
         if not port_triggers:
-            logger.info("No enabled triggers configured — listener idle")
-            return
+            logger.info("All %d trigger(s) disabled — listener idle", len(all_triggers))
+            return {
+                "success": False,
+                "error": f"All {len(all_triggers)} trigger(s) are disabled. Enable at least one trigger.",
+            }
 
+        started = 0
+        ports_started: List[str] = []
         for port, triggers in port_triggers.items():
             if port in self._port_threads and self._port_threads[port].is_alive():
                 continue  # Already running
@@ -64,6 +86,23 @@ class TriggerListenerService:
             thread.start()
             trigger_names = ", ".join(t.name for t in triggers)
             logger.info(f"Started trigger listener on {port}: [{trigger_names}]")
+            started += 1
+            ports_started.append(port)
+
+        result: dict = {
+            "success": True,
+            "message": "Trigger listener started",
+            "started_threads": started,
+            "ports": ports_started,
+        }
+
+        if not self._registry.tool_pairings:
+            result["warning"] = (
+                "Listener started but no tool pairings configured. "
+                "Triggers will be detected but no tools will activate."
+            )
+
+        return result
 
     def stop(self):
         """Signal all port threads to stop, join them, close serial ports."""

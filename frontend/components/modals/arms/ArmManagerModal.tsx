@@ -363,6 +363,17 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
         }
     };
 
+    const updateToolConfig = async (toolId: string, config: Record<string, unknown>) => {
+        try {
+            const tool = tools.find(t => t.id === toolId);
+            const merged = { ...tool?.config, ...config };
+            await toolsApi.update(toolId, { config: merged });
+            fetchTools();
+        } catch (e: any) {
+            setError(e.message || 'Failed to update tool config');
+        }
+    };
+
     const removeTool = async (toolId: string) => {
         if (!confirm(`Are you sure you want to remove tool "${toolId}"?`)) return;
         try {
@@ -430,10 +441,13 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
 
     const startListener = async () => {
         try {
-            await toolPairingsApi.startListener();
+            const data = await toolPairingsApi.startListener();
+            if (data.warning) {
+                setError(data.warning);
+            }
             fetchListenerStatus();
-        } catch (e) {
-            console.error('Failed to start listener:', e);
+        } catch (e: any) {
+            setError(e.message || 'Failed to start trigger listener');
         }
     };
 
@@ -443,6 +457,26 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
             fetchListenerStatus();
         } catch (e) {
             console.error('Failed to stop listener:', e);
+        }
+    };
+
+    const addTrigger = async (trigger: {
+        id: string; name: string; trigger_type: string;
+        port: string; pin: number; active_low: boolean;
+    }) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await triggersApi.create(trigger);
+            if (!data.success) {
+                setError(data.error || 'Failed to add trigger');
+            } else {
+                fetchTriggers();
+            }
+        } catch (e: any) {
+            setError(e.message || 'Failed to add trigger');
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -689,6 +723,7 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                             onDeactivate={deactivateTool}
                             onRemove={removeTool}
                             onRefresh={fetchTools}
+                            onUpdateConfig={updateToolConfig}
                         />
                     )}
 
@@ -712,10 +747,13 @@ export default function ArmManagerModal({ isOpen, onClose }: ArmManagerModalProp
                             setNewToolPairing={setNewToolPairing}
                             loading={loading}
                             listenerRunning={listenerRunning}
+                            ports={ports}
                             onCreateToolPairing={createToolPairing}
                             onRemoveToolPairing={removeToolPairing}
                             onStartListener={startListener}
                             onStopListener={stopListener}
+                            onAddTrigger={addTrigger}
+                            onScanPorts={scanPorts}
                         />
                     )}
                 </div>

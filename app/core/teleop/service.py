@@ -24,12 +24,14 @@ class TeleoperationService:
         leader_assists: dict | None = None,
         arm_registry: Any | None = None,
         camera_service: Any | None = None,
+        trigger_listener: Any | None = None,
     ) -> None:
         self.robot = robot
         self.leader = leader
         self.robot_lock = robot_lock
         self.arm_registry = arm_registry  # For pairing-based mapping
         self.camera_service = camera_service  # Standalone camera manager
+        self.trigger_listener = trigger_listener  # Auto-start/stop with teleop
 
         self.safety = SafetyLayer(robot_lock) # Initialize Safety Layer
 
@@ -411,6 +413,12 @@ class TeleoperationService:
             self._teleop_threads = [t]
             t.start()
 
+        # Auto-start trigger listener if tools are configured
+        if self.trigger_listener and not self.trigger_listener.is_running:
+            tl_result = self.trigger_listener.start()
+            if tl_result.get("success"):
+                logger.info("Trigger listener auto-started with teleop")
+
     def _enable_torque_for_active_arms(self):
         """Legacy helper — delegates to _enable_torque_for_robot with self._active_robot."""
         active_robot = getattr(self, '_active_robot', None) or self.robot
@@ -466,6 +474,14 @@ class TeleoperationService:
             return
         logger.info("Stopping teleoperation...")
         self.is_running = False
+
+        # Auto-stop trigger listener
+        if self.trigger_listener and self.trigger_listener.is_running:
+            try:
+                self.trigger_listener.stop()
+                logger.info("Trigger listener auto-stopped with teleop")
+            except Exception as e:
+                logger.warning(f"Failed to stop trigger listener: {e}")
 
         # Join all per-pairing teleop threads
         current = threading.current_thread()

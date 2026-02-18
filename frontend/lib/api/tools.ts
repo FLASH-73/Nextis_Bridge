@@ -15,6 +15,9 @@ export const toolsApi = {
     config?: Record<string, unknown>;
   }) => api.post<{ success: boolean; tool?: Tool; error?: string }>("/tools", tool),
 
+  update: (toolId: string, data: Partial<Pick<Tool, 'name' | 'config' | 'enabled'>>) =>
+    api.put<{ success: boolean; tool?: Tool; error?: string }>(`/tools/${toolId}`, data),
+
   remove: (toolId: string) =>
     api.delete<{ success: boolean; error?: string }>(`/tools/${toolId}`),
 
@@ -79,13 +82,25 @@ export const toolPairingsApi = {
     }),
 
   startListener: () =>
-    api.post<{ success: boolean; message?: string }>("/tool-pairings/listener/start"),
+    api.post<{
+      success: boolean;
+      message?: string;
+      warning?: string;
+      error?: string;
+      started_threads?: number;
+      ports?: string[];
+    }>("/tool-pairings/listener/start"),
 
   stopListener: () =>
     api.post<{ success: boolean; message?: string }>("/tool-pairings/listener/stop"),
 
   listenerStatus: () =>
-    api.get<{ running: boolean; trigger_states: Record<string, boolean>; tool_states: Record<string, boolean> }>(
-      "/tool-pairings/listener/status"
-    ),
+    api.get<{
+      running: boolean;
+      trigger_states: Record<string, boolean>;
+      tool_states: Record<string, boolean>;
+      trigger_count: number;
+      tool_pairing_count: number;
+      ports: string[];
+    }>("/tool-pairings/listener/status"),
 };
