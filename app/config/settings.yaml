@@ -1,11 +1,5 @@
 arms:
   aira_zero:
-    name: Aira Zero Follower
-    role: follower
-    motor_type: damiao
-    port: can0
-    enabled: true
-    structural_design: damiao_7dof
     config:
       home_position:
         base: -0.01697566186007471
@@ -15,43 +9,49 @@ arms:
         link3: -0.9512092774853134
         link4: 0.05092698558022413
         link5: 0.029564354924849212
-  aira_zero_leader:
-    name: Aira Zero Leader
-    role: leader
-    motor_type: dynamixel_xl330
-    port: /dev/ttyACM0
     enabled: true
+    motor_type: damiao
+    name: Aira Zero Follower
+    port: can0
+    role: follower
+    structural_design: damiao_7dof
+  aira_zero_leader:
+    enabled: true
+    motor_type: dynamixel_xl330
+    name: Aira Zero Leader
+    port: /dev/ttyACM0
+    role: leader
     structural_design: umbra_7dof
   umbra_follower:
-    name: 'Umbra Follower '
-    role: follower
-    motor_type: sts3215
-    port: /dev/ttyUSB0
     enabled: true
+    motor_type: sts3215
+    name: 'Umbra Follower '
+    port: /dev/ttyUSB0
+    role: follower
     structural_design: umbra_7dof
   umbra_leader:
-    name: Umbra Leader
-    role: leader
-    motor_type: dynamixel_xl330
-    port: /dev/ttyACM1
     enabled: true
+    motor_type: dynamixel_xl330
+    name: Umbra Leader
+    port: /dev/ttyACM1
+    role: leader
     structural_design: umbra_7dof
 pairings:
-- leader: aira_zero_leader
-  follower: aira_zero
+- follower: aira_zero
+  leader: aira_zero_leader
   name: Aira Zero Leader -> Aira Zero Follower
-- leader: umbra_leader
-  follower: umbra_follower
+- follower: umbra_follower
+  leader: umbra_leader
   name: 'Umbra Leader -> Umbra Follower '
 robot:
   cameras:
     camera_1:
       fps: 30
-      height: 720
+      height: 480
       index_or_path: /dev/video0
       type: opencv
       video_device_id: /dev/video0
-      width: 1280
+      width: 640
     camera_2:
       fps: 30
       height: 720
@@ -61,40 +61,40 @@ robot:
       video_device_id: '218622275492'
       width: 1280
     camera_3:
-      fps: 30
-      height: 720
+      fps: 15
+      height: 480
       serial_number_or_name: '336222072963'
       type: intelrealsense
       use_depth: false
       video_device_id: '336222072963'
-      width: 1280
+      width: 640
+tool_pairings:
+- action: toggle
+  config: {}
+  name: Screwdriver Trigger -> Main Screwdriver
+  tool_id: screwdriver_1
+  trigger_id: button1
+tools:
+  screwdriver_1:
+    config:
+      direction: -1
+      speed: 2000
+    enabled: true
+    motor_id: 8
+    motor_type: sts3215
+    name: Main Screwdriver
+    port: /dev/ttyUSB1
+    tool_type: screwdriver
 training:
   batch_size: 8
   offline_steps: 10000
   policy: diffusion
   steps: 5000
-tools:
-  screwdriver_1:
-    name: Main Screwdriver
-    motor_type: sts3215
-    port: /dev/ttyUSB1
-    motor_id: 8
-    tool_type: screwdriver
-    enabled: true
-    config:
-      speed: 2000
-      direction: -1
 triggers:
   button1:
-    name: Screwdriver Trigger
-    trigger_type: gpio_switch
-    port: /dev/ttyACM2
-    pin: 0
     active_low: true
     enabled: true
-tool_pairings:
-- trigger_id: button1
-  tool_id: screwdriver_1
-  name: Screwdriver Trigger -> Main Screwdriver
-  action: toggle
-  config: {}
+    name: Screwdriver Trigger
+    pin: 0
+    port: /dev/ttyACM2
+    trigger_type: gpio_switch

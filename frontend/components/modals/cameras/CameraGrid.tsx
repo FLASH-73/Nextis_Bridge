@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { RefreshCw, Camera, Check, Plus, Pencil, Layers, Power, Loader2, AlertCircle, ArrowRight, Trash2, Image as ImageIcon, ChevronDown } from 'lucide-react';
 import CameraFeed from '../../../components/ui/CameraFeed';
 import type { CameraCapabilities, CameraStatusEntry } from '../../../lib/api/types';
@@ -60,6 +60,7 @@ interface CameraGridProps {
     selectedResolutions: Record<string, { width: number; height: number; fps: number }>;
     fetchCapabilities: (deviceType: string, deviceId: string | number) => Promise<any>;
     setSelectedResolutions: React.Dispatch<React.SetStateAction<Record<string, { width: number; height: number; fps: number }>>>;
+    updateResolution: (cameraId: string, width: number, height: number, fps: number) => void;
 }
 
 // ── Component ─────────────────────────────────────────────────────────
@@ -90,6 +91,7 @@ export default function CameraGrid({
     selectedResolutions,
     fetchCapabilities,
     setSelectedResolutions,
+    updateResolution,
 }: CameraGridProps) {
 
     // Track which device is being configured per role (for resolution selector)
@@ -115,6 +117,18 @@ export default function CameraGrid({
     };
 
     const getCapabilitiesKey = (deviceType: string, deviceId: string | number) => `${deviceType}:${deviceId}`;
+
+    // Auto-fetch capabilities for assigned cameras
+    useEffect(() => {
+        configs.forEach(cfg => {
+            if (cfg.type && cfg.video_device_id != null) {
+                const capKey = getCapabilitiesKey(cfg.type, cfg.video_device_id);
+                if (!capabilitiesCache[capKey] && !loadingCapabilities[capKey]) {
+                    fetchCapabilities(cfg.type, cfg.video_device_id);
+                }
+            }
+        });
+    }, [configs]);
 
     return (
         <div className="flex-1 overflow-hidden relative">
@@ -203,10 +217,105 @@ export default function CameraGrid({
                                                     <span className="truncate max-w-[150px]">Assigned to <strong>{typeof assigned.video_device_id === 'number' ? `/dev/video${assigned.video_device_id}` : assigned.video_device_id}</strong></span>
                                                     <Check className="w-3 h-3 text-green-500" />
                                                 </div>
-                                                {/* Show configured resolution */}
-                                                <div className="text-[10px] text-neutral-400 dark:text-zinc-500 px-2">
-                                                    {assigned.width}x{assigned.height} @ {assigned.fps}fps
-                                                </div>
+                                                {/* Resolution selector */}
+                                                {(() => {
+                                                    const capKey = assigned.type ? getCapabilitiesKey(assigned.type, assigned.video_device_id) : '';
+                                                    const caps = capKey ? capabilitiesCache[capKey] : undefined;
+                                                    const isLoadingCaps = capKey ? loadingCapabilities[capKey] : false;
+                                                    const resolutions = caps?.resolutions || [];
+
+                                                    // Find current resolution in capabilities
+                                                    const currentInList = resolutions.find(r => r.width === assigned.width && r.height === assigned.height);
+                                                    const fpsOptions = currentInList?.fps || [assigned.fps];
+
+                                                    if (isLoadingCaps) {
+                                                        return (
+                                                            <div className="p-2 bg-white/30 dark:bg-zinc-900/30 rounded-lg border border-black/5 dark:border-white/5 flex items-center gap-2">
+                                                                <Loader2 className="w-3 h-3 animate-spin text-neutral-400" />
+                                                                <span className="text-[10px] text-neutral-400 dark:text-zinc-500">Detecting resolutions...</span>
+                                                            </div>
+                                                        );
+                                                    }
+
+                                                    if (caps && resolutions.length > 0) {
+                                                        return (
+                                                            <div className="p-2 bg-white/30 dark:bg-zinc-900/30 rounded-lg border border-black/5 dark:border-white/5 space-y-1.5">
+                                                                <label className="text-[10px] uppercase tracking-wider text-neutral-400 dark:text-zinc-500 font-semibold">Resolution</label>
+                                                                <div className="flex gap-2">
+                                                                    <div className="flex-1 relative">
+                                                                        <select
+                                                                            value={`${assigned.width}x${assigned.height}`}
+                                                                            onChange={(e) => {
+                                                                                const [w, h] = e.target.value.split('x').map(Number);
+                                                                                const matchingRes = resolutions.find(r => r.width === w && r.height === h);
+                                                                                const fps = matchingRes?.fps.includes(assigned.fps) ? assigned.fps : (matchingRes?.fps[0] || 30);
+                                                                                updateResolution(assigned.id, w, h, fps);
+                                                                            }}
+                                                                            className="w-full text-xs bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 rounded-lg px-2 py-1.5 text-black dark:text-white appearance-none pr-6 outline-none focus:ring-1 focus:ring-black/20 dark:focus:ring-white/20"
+                                                                        >
+                                                                            {!currentInList && (
+                                                                                <option value={`${assigned.width}x${assigned.height}`}>
+                                                                                    {assigned.width}x{assigned.height} (current)
+                                                                                </option>
+                                                                            )}
+                                                                            {resolutions.map(r => {
+                                                                                const isNative = caps.native && r.width === caps.native.width && r.height === caps.native.height;
+                                                                                const isRecommended = r.width === 1280 && r.height === 720;
+                                                                                let suffix = '';
+                                                                                if (isNative && isRecommended) suffix = ' (Native, Recommended)';
+                                                                                else if (isNative) suffix = ' (Native)';
+                                                                                else if (isRecommended) suffix = ' (Recommended)';
+                                                                                return (
+                                                                                    <option key={`${r.width}x${r.height}`} value={`${r.width}x${r.height}`}>
+                                                                                        {r.width}x{r.height}{suffix}
+                                                                                    </option>
+                                                                                );
+                                                                            })}
+                                                                        </select>
+                                                                        <ChevronDown className="w-3 h-3 absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
+                                                                    </div>
+                                                                    <div className="w-20 relative">
+                                                                        <select
+                                                                            value={assigned.fps}
+                                                                            onChange={(e) => {
+                                                                                updateResolution(assigned.id, assigned.width, assigned.height, Number(e.target.value));
+                                                                            }}
+                                                                            className="w-full text-xs bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 rounded-lg px-2 py-1.5 text-black dark:text-white appearance-none pr-6 outline-none focus:ring-1 focus:ring-black/20 dark:focus:ring-white/20"
+                                                                        >
+                                                                            {!fpsOptions.includes(assigned.fps) && (
+                                                                                <option value={assigned.fps}>{assigned.fps} fps</option>
+                                                                            )}
+                                                                            {fpsOptions.map(f => (
+                                                                                <option key={f} value={f}>{f} fps</option>
+                                                                            ))}
+                                                                        </select>
+                                                                        <ChevronDown className="w-3 h-3 absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" />
+                                                                    </div>
+                                                                </div>
+                                                                {caps.native && (
+                                                                    <div className="text-[10px] text-neutral-400 dark:text-zinc-500 flex items-center gap-1">
+                                                                        Native: {caps.native.width}x{caps.native.height}
+                                                                        {assigned.width === caps.native.width && assigned.height === caps.native.height && (
+                                                                            <Check className="w-3 h-3 text-green-500" />
+                                                                        )}
+                                                                    </div>
+                                                                )}
+                                                                {caps.connected && (
+                                                                    <p className="text-[10px] text-blue-500 dark:text-blue-400">
+                                                                        Camera is connected. Disconnect to probe all resolutions.
+                                                                    </p>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    }
+
+                                                    // Fallback: no capabilities available — show static text
+                                                    return (
+                                                        <div className="text-[10px] text-neutral-400 dark:text-zinc-500 px-2">
+                                                            {assigned.width}x{assigned.height} @ {assigned.fps}fps
+                                                        </div>
+                                                    );
+                                                })()}
                                                 {/* Depth toggle - only for RealSense cameras */}
                                                 {assigned.type === 'intelrealsense' && (
                                                     <button

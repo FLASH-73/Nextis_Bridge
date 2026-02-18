@@ -307,6 +307,13 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
         saveConfig(newConfigs);
     };
 
+    const updateResolution = (cameraId: string, width: number, height: number, fps: number) => {
+        const newConfigs = configs.map(c =>
+            c.id === cameraId ? { ...c, width, height, fps } : c
+        );
+        saveConfig(newConfigs);
+    };
+
     if (!isOpen) return null;
 
     return (
@@ -372,6 +379,7 @@ export default function CameraModal({ isOpen, onClose }: CameraModalProps) {
                     selectedResolutions={selectedResolutions}
                     fetchCapabilities={fetchCapabilities}
                     setSelectedResolutions={setSelectedResolutions}
+                    updateResolution={updateResolution}
                 />
             </div>
         </div>
