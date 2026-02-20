@@ -53,13 +53,13 @@ robot:
       video_device_id: /dev/video0
       width: 640
     camera_2:
-      fps: 30
-      height: 720
+      fps: 10
+      height: 480
       serial_number_or_name: '218622275492'
       type: intelrealsense
       use_depth: false
       video_device_id: '218622275492'
-      width: 1280
+      width: 848
     camera_3:
       fps: 15
       height: 480

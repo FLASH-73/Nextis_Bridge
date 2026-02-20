@@ -3,8 +3,6 @@ import logging
 import time
 import threading
 
-from app.core.hardware.tables import DAMIAO_TORQUE_LIMITS
-
 logger = logging.getLogger(__name__)
 
 class SafetyLayer:
@@ -25,6 +23,13 @@ class SafetyLayer:
 
         # Track if we have a Damiao robot
         self._is_damiao_robot = None
+
+        # Fail-closed: consecutive check-level failures trigger unsafe
+        # A single transient CAN error won't kill the system, but persistent
+        # failures indicate a broken safety monitor.
+        self.CHECK_FAILURE_LIMIT = 5
+        self._check_failure_count = 0
+        self._damiao_check_failure_count = 0
 
     def check_limits(self, robot):
         """
@@ -88,9 +93,14 @@ class SafetyLayer:
                     # Silent fail for single read error to robustify
                     pass
 
+            self._check_failure_count = 0
             return True
 
         except Exception as e:
+            self._check_failure_count += 1
+            if self._check_failure_count >= self.CHECK_FAILURE_LIMIT:
+                logger.error(f"Safety check failed {self._check_failure_count} times consecutively: {e} — treating as UNSAFE")
+                return False
             logger.error(f"Safety Check Failed: {e}")
             return True
 
@@ -130,11 +140,16 @@ class SafetyLayer:
                 else:
                     self.violation_counts[motor_name] = 0
 
+            self._damiao_check_failure_count = 0
             return True
 
         except Exception as e:
+            self._damiao_check_failure_count += 1
+            if self._damiao_check_failure_count >= self.CHECK_FAILURE_LIMIT:
+                logger.error(f"Damiao safety check failed {self._damiao_check_failure_count} times consecutively: {e} — treating as UNSAFE")
+                return False
             logger.error(f"Damiao safety check failed: {e}")
-            return True  # Don't block on check errors
+            return True
 
     def check_all_limits(self, robot):
         """Check all applicable safety limits for the robot.
@@ -152,19 +167,84 @@ class SafetyLayer:
 
         return True
 
-    def emergency_stop(self, robot):
-        logger.error("!!! EMERGENCY STOP TRIGGERED !!!")
-        if not robot: return
+    def emergency_stop(self, robot, motor_type=None):
+        """Emergency stop: freeze Damiao at current position, then release.
 
-        # Use the lock to ensure we interrupt any other thread
-        # Note: If we are called FROM the thread holding the lock, this re-entry is fine (RLock)
-        # If standard Lock, we might block if we try to acquire.
-        # Assuming robot_lock is passed from SystemState which should be RLock or carefully managed.
-        # But E-Stop should probably just blast the bus.
+        For Damiao arms: command current positions for 500ms using MIT kp/kd
+        to prevent gravity drop, then disconnect.
+
+        For Feetech/Dynamixel: disconnect immediately (stall under load
+        risks gear damage, and lower inertia makes gravity drop less dangerous).
+
+        Does NOT acquire self.lock — E-STOP may be called from the thread
+        holding the lock (state.lock is threading.Lock, not reentrant).
+        """
+        logger.error("!!! EMERGENCY STOP TRIGGERED !!!")
+        if not robot:
+            return
 
         try:
             timestamp = time.strftime("%H:%M:%S")
-            logger.critical(f"Cutting Power at {timestamp}")
-            robot.disconnect() # Disconnect usually disables torque
+            logger.critical(f"E-STOP at {timestamp}")
+
+            # Determine if this is a Damiao robot
+            is_damiao = motor_type == "damiao"
+            if not is_damiao and hasattr(robot, 'bus'):
+                try:
+                    from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+                    is_damiao = isinstance(robot.bus, DamiaoMotorsBus)
+                except ImportError:
+                    pass
+
+            if is_damiao:
+                self._estop_damiao(robot)
+            else:
+                self._estop_generic(robot)
+
         except Exception as e:
-             logger.error(f"E-Stop failed to disconnect cleanly: {e}")
+            logger.error(f"E-Stop failed: {e} — forcing disconnect")
+            try:
+                robot.disconnect()
+            except Exception:
+                pass
+
+    def _estop_damiao(self, robot):
+        """Damiao E-STOP: hold current position for 500ms, then release.
+
+        Reads last known positions from the bus and sends them as hold commands
+        using the normal MIT kp/kd gains. This prevents gravity drop on loaded
+        arms (e.g. 35Nm J8009P holding a payload).
+        """
+        try:
+            # Build hold action from last known positions
+            hold_action = {}
+            if hasattr(robot, 'bus') and hasattr(robot.bus, '_last_positions'):
+                for motor_name, pos in robot.bus._last_positions.items():
+                    hold_action[f"{motor_name}.pos"] = pos
+
+            if hold_action:
+                logger.critical(f"Damiao HOLD phase: holding {len(hold_action)} joints for 500ms")
+                hold_end = time.time() + 0.5
+                while time.time() < hold_end:
+                    try:
+                        robot.send_action(hold_action)
+                    except Exception:
+                        break  # If send fails, proceed to disconnect
+                    time.sleep(0.016)  # ~60Hz hold rate
+            else:
+                logger.warning("Damiao E-STOP: no last positions available, skipping hold phase")
+        except Exception as e:
+            logger.error(f"E-STOP hold phase failed: {e} — proceeding to disconnect")
+
+        # Release: disconnect disables torque
+        try:
+            robot.disconnect()
+        except Exception as e:
+            logger.error(f"E-STOP disconnect failed: {e}")
+
+    def _estop_generic(self, robot):
+        """Generic E-STOP: immediate disconnect (Feetech, Dynamixel, etc.)."""
+        try:
+            robot.disconnect()
+        except Exception as e:
+            logger.error(f"E-STOP disconnect failed: {e}")

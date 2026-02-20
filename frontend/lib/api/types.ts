@@ -359,3 +359,38 @@ export interface ToolPairing {
   action: "toggle" | "hold" | "pulse";
   config: Record<string, unknown>;
 }
+
+// ─── Recording ──────────────────────────────────────────────────────────────
+
+export interface RecordingStatus {
+  session_active: boolean;
+  episode_active: boolean;
+  episode_count: number;
+}
+
+export interface EpisodeRecord {
+  index: number;
+  duration: number;
+  status: "saved" | "discarded";
+}
+
+export interface RecordingSessionConfig {
+  repo_id: string;
+  task: string;
+  selected_cameras: string[] | null;
+  selected_arms: string[] | null;
+}
+
+export interface RecordingOptions {
+  cameras: { id: string; name: string }[];
+  arms: { id: string; name: string; joints: number; status: string }[];
+}
+
+export interface ListenerStatus {
+  running: boolean;
+  trigger_states: Record<string, boolean>;
+  tool_states: Record<string, boolean>;
+  trigger_count: number;
+  tool_pairing_count: number;
+  ports: string[];
+}

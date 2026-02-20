@@ -227,6 +227,17 @@ class ArmRegistryService:
         """Return all follower arms"""
         return [a for a in self.get_all_arms() if a["role"] == "follower"]
 
+    def get_pairing_by_follower(self, follower_id: str) -> Optional["Pairing"]:
+        """Find the pairing that contains this follower arm.
+
+        Each follower has at most one pairing, so follower_id uniquely
+        identifies a pairing.  Returns the raw Pairing dataclass or None.
+        """
+        for p in self.pairings:
+            if p.follower_id == follower_id:
+                return p
+        return None
+
     def get_pairings(self) -> List[Dict]:
         """Return all leader-follower pairings"""
         return [p.to_dict() for p in self.pairings]

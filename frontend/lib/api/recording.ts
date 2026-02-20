@@ -1,22 +1,34 @@
 import { api } from "./client";
+import type {
+  RecordingSessionConfig,
+  RecordingStatus,
+  RecordingOptions,
+} from "./types";
 
 export const recordingApi = {
-  status: () => api.get<Record<string, unknown>>("/recording/status"),
+  status: () => api.get<RecordingStatus>("/recording/status"),
 
-  options: () => api.get<Record<string, unknown>>("/recording/options"),
+  options: () => api.get<RecordingOptions>("/recording/options"),
 
-  startSession: (opts: Record<string, unknown>) =>
-    api.post<{ success: boolean; error?: string }>(
+  startSession: (opts: RecordingSessionConfig) =>
+    api.post<{ status: string; message: string; episode_count?: number }>(
       "/recording/session/start",
       opts
     ),
 
-  stopSession: () => api.post<void>("/recording/session/stop"),
+  stopSession: () =>
+    api.post<{ status: string; message: string }>("/recording/session/stop"),
 
   startEpisode: () =>
-    api.post<{ success: boolean; error?: string }>("/recording/episode/start"),
+    api.post<{ status: string; message: string }>("/recording/episode/start"),
 
-  stopEpisode: () => api.post<void>("/recording/episode/stop"),
+  stopEpisode: () =>
+    api.post<{ status: string; message: string; episode_count?: number }>(
+      "/recording/episode/stop"
+    ),
 
-  deleteLastEpisode: () => api.delete<void>("/recording/episode/last"),
+  deleteLastEpisode: () =>
+    api.delete<{ status: string; message: string; episode_count?: number }>(
+      "/recording/episode/last"
+    ),
 };

@@ -125,8 +125,9 @@ class TeleoperationService:
         self.data_queue = deque(maxlen=1) # For UI data streaming if needed, though get_data uses history
 
         # Recording selections (which cameras/arms to record)
-        self._selected_cameras = None  # None = all cameras
-        self._selected_arms = None     # None = all arms
+        self._selected_cameras = None   # None = all cameras
+        self._selected_pairing_ids = None  # None = all followers (follower arm IDs)
+        self._selected_arms = None      # Legacy prefix filter ("left", "right")
 
         # Recording frame rate control
         # Record at 30fps to match dataset fps, not teleop rate (60Hz)
@@ -605,10 +606,14 @@ class TeleoperationService:
         fps: int = 30,
         root: str | None = None,
         selected_cameras: list[str] | None = None,
+        selected_pairing_ids: list[str] | None = None,
         selected_arms: list[str] | None = None,
     ) -> dict:
         from app.core.teleop.recording import start_recording_session
-        return start_recording_session(self, repo_id, task, fps, root, selected_cameras, selected_arms)
+        return start_recording_session(
+            self, repo_id, task, fps, root,
+            selected_cameras, selected_pairing_ids, selected_arms,
+        )
 
     def stop_recording_session(self) -> dict:
         from app.core.teleop.recording import stop_recording_session
@@ -634,10 +639,18 @@ class TeleoperationService:
         from app.core.teleop.recording import delete_last_episode
         return delete_last_episode(self)
 
-    def _filter_observation_features(self, obs_features, selected_cameras=None, selected_arms=None):
+    def _filter_observation_features(
+        self, obs_features,
+        selected_cameras=None, selected_pairing_ids=None, selected_arms=None,
+    ):
         from app.core.teleop.recording import filter_observation_features
-        return filter_observation_features(obs_features, selected_cameras, selected_arms)
+        return filter_observation_features(
+            obs_features, selected_cameras, selected_pairing_ids, selected_arms,
+        )
 
-    def _filter_action_features(self, action_features, selected_arms=None):
+    def _filter_action_features(
+        self, action_features,
+        selected_pairing_ids=None, selected_arms=None,
+    ):
         from app.core.teleop.recording import filter_action_features
-        return filter_action_features(action_features, selected_arms)
+        return filter_action_features(action_features, selected_pairing_ids, selected_arms)

@@ -1,8 +1,9 @@
 import logging
 
+from app.core.hardware.types import ArmRole, ConnectionStatus
+from app.dependencies import get_state
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from app.dependencies import get_state
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,17 @@ def connect_arm(arm_id: str):
     result = system.arm_registry.connect_arm(arm_id)
     if not result.get("success"):
         return JSONResponse(status_code=400, content=result)
+
+    # Start safety watchdog if a follower arm just connected
+    if system.safety_watchdog and not system.safety_watchdog.is_running:
+        for aid, status in system.arm_registry.arm_status.items():
+            arm_def = system.arm_registry.arms.get(aid)
+            if (status == ConnectionStatus.CONNECTED
+                    and arm_def and arm_def.role == ArmRole.FOLLOWER):
+                system.safety_watchdog.start()
+                logger.info("Safety watchdog started (follower arm connected)")
+                break
+
     return result
 
 @router.post("/arms/{arm_id}/disconnect")
@@ -139,6 +151,20 @@ def disconnect_arm(arm_id: str):
     if not system.arm_registry:
         return JSONResponse(status_code=400, content={"error": "Arm registry not initialized"})
     result = system.arm_registry.disconnect_arm(arm_id)
+
+    # Stop safety watchdog if no follower arms remain connected
+    if system.safety_watchdog and system.safety_watchdog.is_running:
+        has_connected_follower = False
+        for aid, status in system.arm_registry.arm_status.items():
+            arm_def = system.arm_registry.arms.get(aid)
+            if (status == ConnectionStatus.CONNECTED
+                    and arm_def and arm_def.role == ArmRole.FOLLOWER):
+                has_connected_follower = True
+                break
+        if not has_connected_follower:
+            system.safety_watchdog.stop()
+            logger.info("Safety watchdog stopped (no follower arms connected)")
+
     return result
 
 @router.post("/arms/{arm_id}/set-home")

@@ -82,6 +82,17 @@ class HILLoopMixin(HILObservationMixin):
                     # Just wait for user to click Resume or Stop Episode
                     pass
 
+                # 3. Safety check (every 3rd frame = ~10Hz at 30Hz loop)
+                self._safety_frame_count = getattr(self, '_safety_frame_count', 0) + 1
+                if self._safety_frame_count % 3 == 0 and hasattr(self.teleop, 'safety'):
+                    robot = self.teleop.robot if hasattr(self.teleop, 'robot') else None
+                    if robot and hasattr(robot, 'is_connected') and robot.is_connected:
+                        if not self.teleop.safety.check_all_limits(robot):
+                            logger.error("[HIL] SAFETY: Limit exceeded — stopping")
+                            print("[HIL] SAFETY: Limit exceeded — EMERGENCY STOP", flush=True)
+                            self._stop_event.set()
+                            break
+
             except Exception as e:
                 # Suppress frequent errors during normal operation
                 if "has no calibration registered" not in str(e):

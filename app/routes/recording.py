@@ -52,7 +52,21 @@ def get_recording_options():
         if not arms:
             arms.append({"id": "default", "name": "Robot Arm", "joints": 7})
 
-    return {"cameras": cameras, "arms": arms}
+    # 4. Pairings: return follower-based pairing info for recording selection
+    pairings = []
+    if system.arm_registry:
+        try:
+            for p in system.arm_registry.get_pairings():
+                pairings.append({
+                    "id": p["follower_id"],  # follower_id is the pairing key
+                    "name": p.get("name", f"{p['leader_id']} → {p['follower_id']}"),
+                    "leader_id": p["leader_id"],
+                    "follower_id": p["follower_id"],
+                })
+        except Exception:
+            pass
+
+    return {"cameras": cameras, "arms": arms, "pairings": pairings}
 
 @router.post("/recording/session/start")
 async def start_recording_session(request: Request):
@@ -64,10 +78,11 @@ async def start_recording_session(request: Request):
     data = await request.json()
     repo_id = data.get("repo_id")
     task = data.get("task")
-    selected_cameras = data.get("selected_cameras")  # list of camera IDs or None (all)
-    selected_arms = data.get("selected_arms")        # list of arm IDs ("left", "right") or None (all)
-    print(f"    repo_id={repo_id}, task={task}, cameras={selected_cameras}, arms={selected_arms}")
-    _recording_logger.info(f"  repo_id={repo_id}, task={task}, cameras={selected_cameras}, arms={selected_arms}")
+    selected_cameras = data.get("selected_cameras")        # list of camera IDs or None (all)
+    selected_pairing_ids = data.get("selected_pairing_ids")  # list of follower arm IDs or None (all)
+    selected_arms = data.get("selected_arms")              # legacy: list of arm prefixes or None (all)
+    print(f"    repo_id={repo_id}, task={task}, cameras={selected_cameras}, pairings={selected_pairing_ids}, arms={selected_arms}")
+    _recording_logger.info(f"  repo_id={repo_id}, task={task}, cameras={selected_cameras}, pairings={selected_pairing_ids}, arms={selected_arms}")
 
     if not repo_id or not task:
         print("    ERROR: Missing repo_id or task")
@@ -84,7 +99,8 @@ async def start_recording_session(request: Request):
         system.teleop_service.start_recording_session(
             repo_id, task,
             selected_cameras=selected_cameras,
-            selected_arms=selected_arms
+            selected_pairing_ids=selected_pairing_ids,
+            selected_arms=selected_arms,
         )
         episode_count = system.teleop_service.episode_count
         print(f"    SUCCESS: Session started (episode_count={episode_count})")

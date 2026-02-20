@@ -22,38 +22,110 @@ except ImportError:
         time.sleep(max(0, dt))
 
 
+def _get_effective_robot(svc):
+    """Return the active robot instance (arm_registry or legacy).
+
+    In arm_registry mode, svc.robot is None; svc._active_robot holds the
+    first pairing's follower instance.
+    """
+    return getattr(svc, '_active_robot', None) or svc.robot
+
+
+def _build_allowed_motor_keys(
+    selected_pairing_ids: list[str] | None,
+) -> tuple[set[str], set[str]]:
+    """Build leader-exclusion and follower-allowlist key sets.
+
+    SAFETY: Leader motor keys are ALWAYS excluded from recordings.
+    Follower motor keys are only included for selected pairings.
+
+    Returns:
+        (leader_keys, allowed_follower_keys) — sets of motor key base names
+        (e.g. "base", "link1", "shoulder_pan").  If allowed_follower_keys is
+        None, all non-leader keys are allowed.
+    """
+    from app.state import state
+
+    leader_keys: set[str] = set()
+    allowed_keys: set[str] | None = None
+
+    if not state.arm_registry:
+        return leader_keys, allowed_keys
+
+    # Build leader exclusion set from ALL leaders (regardless of selection)
+    for arm_dict in state.arm_registry.get_leaders():
+        inst = state.arm_registry.get_arm_instance(arm_dict["id"])
+        if inst and hasattr(inst, 'observation_features'):
+            for k in inst.observation_features:
+                base = k.split(".")[0] if "." in k else k
+                leader_keys.add(base)
+
+    # Build follower allowlist from selected pairings
+    if selected_pairing_ids is not None:
+        allowed_keys = set()
+        for fid in selected_pairing_ids:
+            pairing = state.arm_registry.get_pairing_by_follower(fid)
+            if not pairing:
+                continue
+            inst = state.arm_registry.get_arm_instance(pairing.follower_id)
+            if inst and hasattr(inst, 'observation_features'):
+                for k in inst.observation_features:
+                    base = k.split(".")[0] if "." in k else k
+                    allowed_keys.add(base)
+
+    return leader_keys, allowed_keys
+
+
+def _is_camera_feature(feat) -> bool:
+    """Check if a feature value represents a camera (tuple shape like (H, W, C))."""
+    return isinstance(feat, tuple) and len(feat) in (1, 3)
+
+
 def filter_observation_features(
     obs_features: dict,
-    selected_cameras: list = None,
-    selected_arms: list = None
+    selected_cameras: list[str] | None = None,
+    selected_pairing_ids: list[str] | None = None,
+    selected_arms: list[str] | None = None,
 ) -> dict:
-    """Filter observation features based on camera and arm selections.
+    """Filter observation features to only include selected follower arms and cameras.
+
+    SAFETY: Leader arm data is NEVER included.  Only follower arms from
+    selected pairings are recorded.  Tool/trigger data is always included.
+
+    Uses pairing-based filtering when selected_pairing_ids is provided,
+    falling back to legacy prefix filtering (selected_arms) otherwise.
 
     Args:
         obs_features: Full robot observation features dict
-        selected_cameras: List of camera IDs to include (None = all)
-        selected_arms: List of arm IDs ("left", "right") to include (None = all)
-
-    Returns:
-        Filtered observation features dict
+        selected_cameras: Camera IDs to include (None = all)
+        selected_pairing_ids: Follower arm IDs identifying pairings (None = all)
+        selected_arms: Legacy arm prefixes ("left", "right") (None = all)
     """
-    filtered = {}
+    leader_keys, allowed_keys = _build_allowed_motor_keys(selected_pairing_ids)
+    use_pairing_filter = bool(leader_keys) or allowed_keys is not None
 
+    filtered = {}
     for key, feat in obs_features.items():
         # Always include tool/trigger features
         if key.startswith("tool.") or key.startswith("trigger."):
             filtered[key] = feat
             continue
 
-        # Check if this is a camera feature (tuple shape like (H, W, 3))
-        is_camera = isinstance(feat, tuple) and len(feat) == 3
-
-        if is_camera:
-            # Camera filtering: key is the camera name (e.g., "camera_1")
+        # Camera features
+        if _is_camera_feature(feat):
             if selected_cameras is None or key in selected_cameras:
                 filtered[key] = feat
+            continue
+
+        # Motor features — pairing-based filter takes priority
+        base = key.split(".")[0] if "." in key else key
+        if use_pairing_filter:
+            if base in leader_keys:
+                continue  # SAFETY: never include leader data
+            if allowed_keys is None or base in allowed_keys:
+                filtered[key] = feat
         else:
-            # Motor position feature: key like "left_base.pos", "right_link1.pos"
+            # Legacy prefix filter
             if selected_arms is None:
                 filtered[key] = feat
             elif key.startswith("left_") and "left" in selected_arms:
@@ -61,7 +133,6 @@ def filter_observation_features(
             elif key.startswith("right_") and "right" in selected_arms:
                 filtered[key] = feat
             elif not key.startswith("left_") and not key.startswith("right_"):
-                # Non-arm-specific features (e.g., single-arm robot) - always include
                 filtered[key] = feat
 
     return filtered
@@ -69,34 +140,44 @@ def filter_observation_features(
 
 def filter_action_features(
     action_features: dict,
-    selected_arms: list = None
+    selected_pairing_ids: list[str] | None = None,
+    selected_arms: list[str] | None = None,
 ) -> dict:
-    """Filter action features based on arm selections.
+    """Filter action features to only include selected follower arms.
+
+    SAFETY: Leader arm data is NEVER included.  Tool/trigger data is
+    always included.
 
     Args:
         action_features: Full robot action features dict
-        selected_arms: List of arm IDs ("left", "right") to include (None = all)
-
-    Returns:
-        Filtered action features dict
+        selected_pairing_ids: Follower arm IDs identifying pairings (None = all)
+        selected_arms: Legacy arm prefixes ("left", "right") (None = all)
     """
-    filtered = {}
+    leader_keys, allowed_keys = _build_allowed_motor_keys(selected_pairing_ids)
+    use_pairing_filter = bool(leader_keys) or allowed_keys is not None
 
+    filtered = {}
     for key, feat in action_features.items():
         # Always include tool/trigger features
         if key.startswith("tool.") or key.startswith("trigger."):
             filtered[key] = feat
             continue
 
-        if selected_arms is None:
-            filtered[key] = feat
-        elif key.startswith("left_") and "left" in selected_arms:
-            filtered[key] = feat
-        elif key.startswith("right_") and "right" in selected_arms:
-            filtered[key] = feat
-        elif not key.startswith("left_") and not key.startswith("right_"):
-            # Non-arm-specific features - always include
-            filtered[key] = feat
+        base = key.split(".")[0] if "." in key else key
+        if use_pairing_filter:
+            if base in leader_keys:
+                continue
+            if allowed_keys is None or base in allowed_keys:
+                filtered[key] = feat
+        else:
+            if selected_arms is None:
+                filtered[key] = feat
+            elif key.startswith("left_") and "left" in selected_arms:
+                filtered[key] = feat
+            elif key.startswith("right_") and "right" in selected_arms:
+                filtered[key] = feat
+            elif not key.startswith("left_") and not key.startswith("right_"):
+                filtered[key] = feat
 
     return filtered
 
@@ -172,12 +253,23 @@ def recording_capture_loop(svc):
     print(f"[REC CAPTURE] Thread started at {svc.recording_fps}fps")
     target_dt = 1.0 / svc.recording_fps
 
+    # Pre-build motor key filter sets (rebuilt if pairing selection changes)
+    cached_pairing_ids = getattr(svc, '_selected_pairing_ids', None)
+    leader_keys, allowed_keys = _build_allowed_motor_keys(cached_pairing_ids)
+
     # Wall-clock tracking for actual fps measurement
     episode_start_time = None
 
     while not svc._recording_stop_event.is_set():
-        if svc.recording_active and svc.robot and svc.dataset is not None:
+        robot = _get_effective_robot(svc)
+        if svc.recording_active and robot and svc.dataset is not None:
             start = time.perf_counter()
+
+            # Rebuild key filter if pairing selection changed
+            current_ids = getattr(svc, '_selected_pairing_ids', None)
+            if current_ids != cached_pairing_ids:
+                cached_pairing_ids = current_ids
+                leader_keys, allowed_keys = _build_allowed_motor_keys(cached_pairing_ids)
 
             # Track when recording actually starts
             if episode_start_time is None:
@@ -192,24 +284,26 @@ def recording_capture_loop(svc):
                 obs = {}
 
                 # SOURCE 1: Get motor positions from teleop cache (FAST - no hardware read)
-                # Filter based on selected arms
+                # Filter using pairing-based key sets (leader exclusion + follower allowlist)
+                use_pairing_filter = bool(leader_keys) or allowed_keys is not None
                 with svc._action_lock:
                     if svc._latest_leader_action:
                         for key, val in svc._latest_leader_action.items():
-                            # Filter by selected arms
-                            if svc._selected_arms is None:
-                                action[key] = val
-                                obs[key] = val
-                            elif key.startswith("left_") and "left" in svc._selected_arms:
-                                action[key] = val
-                                obs[key] = val
-                            elif key.startswith("right_") and "right" in svc._selected_arms:
-                                action[key] = val
-                                obs[key] = val
-                            elif not key.startswith("left_") and not key.startswith("right_"):
-                                # Non-arm-specific features - always include
-                                action[key] = val
-                                obs[key] = val
+                            base = key.split(".")[0] if "." in key else key
+                            if use_pairing_filter:
+                                if base in leader_keys:
+                                    continue  # SAFETY: never record leader data
+                                if allowed_keys is not None and base not in allowed_keys:
+                                    continue
+                            else:
+                                # Legacy prefix filter
+                                if svc._selected_arms is not None:
+                                    if key.startswith("left_") and "left" not in svc._selected_arms:
+                                        continue
+                                    elif key.startswith("right_") and "right" not in svc._selected_arms:
+                                        continue
+                            action[key] = val
+                            obs[key] = val
 
                 # SOURCE 2: Capture camera images with async_read (FAST - ZOH pattern)
                 # Only capture selected cameras
@@ -318,12 +412,13 @@ def recording_capture_loop(svc):
                 precise_sleep(sleep_time)
         else:
             # Not recording - log why (only once per state change)
-            if not hasattr(svc, '_last_idle_reason') or svc._last_idle_reason != (svc.recording_active, svc.robot is not None, svc.dataset is not None):
-                svc._last_idle_reason = (svc.recording_active, svc.robot is not None, svc.dataset is not None)
+            idle_state = (svc.recording_active, robot is not None, svc.dataset is not None)
+            if not hasattr(svc, '_last_idle_reason') or svc._last_idle_reason != idle_state:
+                svc._last_idle_reason = idle_state
                 if not svc.recording_active:
                     pass  # Normal idle state, don't spam logs
                 else:
-                    print(f"[REC CAPTURE] IDLE - recording_active:{svc.recording_active}, robot:{svc.robot is not None}, dataset:{svc.dataset is not None}")
+                    print(f"[REC CAPTURE] IDLE - recording_active:{svc.recording_active}, robot:{robot is not None}, dataset:{svc.dataset is not None}")
 
             # Reset episode timing when not actively recording
             if episode_start_time is not None:
@@ -366,8 +461,9 @@ def start_recording_session(
     task: str,
     fps: int = 30,
     root: str = None,
-    selected_cameras: list = None,
-    selected_arms: list = None
+    selected_cameras: list[str] | None = None,
+    selected_pairing_ids: list[str] | None = None,
+    selected_arms: list[str] | None = None,
 ):
     """Initializes a new LeRobotDataset for recording.
 
@@ -377,15 +473,21 @@ def start_recording_session(
         task: Task description
         fps: Recording frames per second
         root: Custom dataset root path
-        selected_cameras: List of camera IDs to record (None = all cameras)
-        selected_arms: List of arm IDs ("left", "right") to record (None = all arms)
+        selected_cameras: Camera IDs to record (None = all)
+        selected_pairing_ids: Follower arm IDs identifying pairings to record (None = all)
+        selected_arms: Legacy arm prefixes ("left", "right") — used when
+            selected_pairing_ids is not provided
     """
+    from app.state import state
+
     print("=" * 60)
     print(f"[START_SESSION] Called with repo_id='{repo_id}', task='{task}'")
     print(f"  selected_cameras: {selected_cameras}")
+    print(f"  selected_pairing_ids: {selected_pairing_ids}")
     print(f"  selected_arms: {selected_arms}")
     print(f"  session_active: {svc.session_active}")
-    print(f"  robot: {svc.robot is not None}")
+    robot = _get_effective_robot(svc)
+    print(f"  robot: {robot is not None} ({type(robot).__name__ if robot else 'None'})")
     print("=" * 60)
 
     if svc.session_active:
@@ -393,8 +495,25 @@ def start_recording_session(
         raise Exception("Session already active")
 
     # Store selections for use during recording
-    svc._selected_cameras = selected_cameras  # None means all cameras
-    svc._selected_arms = selected_arms        # None means all arms
+    svc._selected_cameras = selected_cameras
+    svc._selected_pairing_ids = selected_pairing_ids
+    svc._selected_arms = selected_arms
+
+    # --- Pre-start validation ---
+    if selected_pairing_ids and state.arm_registry:
+        for fid in selected_pairing_ids:
+            pairing = state.arm_registry.get_pairing_by_follower(fid)
+            if not pairing:
+                raise ValueError(f"No pairing found for follower '{fid}'")
+            follower = state.arm_registry.get_arm_instance(pairing.follower_id)
+            if not follower or not getattr(follower, 'is_connected', False):
+                raise ValueError(f"Follower '{fid}' not connected — cannot record")
+
+    if selected_cameras and state.camera_service:
+        for cam_id in selected_cameras:
+            cam = state.camera_service.cameras.get(cam_id)
+            if not cam:
+                logger.warning(f"Camera '{cam_id}' not connected — may miss frames")
 
     # Set default root to app datasets directory
     if root is None:
@@ -408,32 +527,58 @@ def start_recording_session(
     print(f"[START_SESSION] Dataset dir: {dataset_dir}")
 
     try:
-        if not svc.robot:
-             raise Exception("Robot not connected")
+        # --- Build obs/action features from pairing contexts or legacy robot ---
+        raw_obs_features: dict = {}
+        raw_action_features: dict = {}
 
-        # 1. Define Features
-        if not hasattr(svc.robot, "observation_features") or not hasattr(svc.robot, "action_features"):
-             raise RuntimeError("Robot does not have feature definitions ready (observation_features/action_features).")
+        if svc._pairing_contexts and selected_pairing_ids:
+            # Arm-registry mode: combine features from selected follower instances
+            for ctx in svc._pairing_contexts:
+                # Extract follower_id from pairing_id (format: "leader→follower")
+                fid = ctx.pairing_id.split("→")[-1].strip() if "→" in ctx.pairing_id else ctx.pairing_id
+                if fid in selected_pairing_ids and ctx.active_robot:
+                    raw_obs_features.update(ctx.active_robot.observation_features)
+                    raw_action_features.update(ctx.active_robot.action_features)
+            if not raw_obs_features:
+                raise RuntimeError(
+                    f"No matching pairing contexts for selected_pairing_ids={selected_pairing_ids}. "
+                    f"Available: {[c.pairing_id for c in svc._pairing_contexts]}"
+                )
+        elif svc._pairing_contexts:
+            # Arm-registry mode, no pairing selection: include all followers
+            for ctx in svc._pairing_contexts:
+                if ctx.active_robot:
+                    raw_obs_features.update(ctx.active_robot.observation_features)
+                    raw_action_features.update(ctx.active_robot.action_features)
+        elif robot:
+            # Legacy mode
+            if not hasattr(robot, "observation_features") or not hasattr(robot, "action_features"):
+                raise RuntimeError("Robot does not have feature definitions (observation_features/action_features).")
+            raw_obs_features = dict(robot.observation_features)
+            raw_action_features = dict(robot.action_features)
+        else:
+            raise Exception("No robot or pairing contexts available — cannot record")
 
         # Use LeRobot Helpers to construct correct feature dicts
         from lerobot.datasets.utils import combine_feature_dicts, hw_to_dataset_features
 
-        # Filter observation features based on selections
+        # Filter observation features (leader exclusion + pairing isolation)
         filtered_obs_features = filter_observation_features(
-            svc.robot.observation_features,
+            raw_obs_features,
             selected_cameras,
-            selected_arms
+            selected_pairing_ids,
+            selected_arms,
         )
 
-        # Filter action features based on arm selections
+        # Filter action features
         filtered_action_features = filter_action_features(
-            svc.robot.action_features,
-            selected_arms
+            raw_action_features,
+            selected_pairing_ids,
+            selected_arms,
         )
 
         # Add tool/trigger features to observation schema
         from app.core.hardware.tool_state import get_tool_action_features
-        from app.state import state
         tool_features = get_tool_action_features(state.tool_registry)
         if tool_features:
             filtered_obs_features.update(tool_features)
@@ -445,6 +590,16 @@ def start_recording_session(
             hw_to_dataset_features(filtered_obs_features, prefix=OBS_STR, use_video=True),
             hw_to_dataset_features(filtered_action_features, prefix=ACTION, use_video=True)
         )
+
+        # Determine robot_type for dataset metadata
+        robot_type = "unknown"
+        if robot and hasattr(robot, 'robot_type'):
+            robot_type = robot.robot_type
+        elif svc._pairing_contexts:
+            for ctx in svc._pairing_contexts:
+                if ctx.active_robot and hasattr(ctx.active_robot, 'robot_type'):
+                    robot_type = ctx.active_robot.robot_type
+                    break
 
         # 2. Open or Create Dataset (In-Process)
         # Check for VALID dataset (must have meta/info.json)
@@ -472,7 +627,7 @@ def start_recording_session(
                 repo_id=repo_id,
                 fps=fps,
                 root=dataset_dir,
-                robot_type=svc.robot.robot_type,
+                robot_type=robot_type,
                 features=features,
                 use_videos=True,
             )
@@ -607,309 +762,11 @@ def stop_recording_session(svc):
             svc.dataset = None
 
 
-def sync_to_disk(svc):
-    """
-    Flush all pending episode data to disk and close writers.
-    MUST be called BEFORE any external deletion operation.
-
-    This ensures:
-    1. Metadata buffer is flushed to parquet (episodes saved to disk)
-    2. Parquet writers are closed (prevents appending to wrong files)
-    3. Disk state is consistent for external modifications
-
-    Without this, the metadata_buffer may contain episode data that hasn't
-    been written to disk yet. If deletion runs, it won't find the episode
-    on disk, but the buffer still has it. When recording resumes, both
-    the old buffered episode and new episode get saved = 2 episodes!
-    """
-    if not svc.dataset or not svc.session_active:
-        print("[SYNC_TO_DISK] Skipped (no dataset or session not active)")
-        return
-
-    print(f"[SYNC_TO_DISK] BEFORE: meta.total_episodes={svc.dataset.meta.total_episodes}, episode_count={svc.episode_count}")
-
-    try:
-        # 1. Flush and close metadata writer (this flushes metadata_buffer to disk)
-        if hasattr(svc.dataset, 'meta') and hasattr(svc.dataset.meta, '_close_writer'):
-            svc.dataset.meta._close_writer()
-            print("[SYNC_TO_DISK] Flushed metadata buffer and closed metadata writer")
-
-        # 2. Close data parquet writer
-        if hasattr(svc.dataset, '_close_writer'):
-            svc.dataset._close_writer()
-            print("[SYNC_TO_DISK] Closed data writer")
-
-    except Exception as e:
-        import traceback
-        print(f"[SYNC_TO_DISK] Error: {e}")
-        print(traceback.format_exc())
-
-
-def refresh_metadata_from_disk(svc):
-    """
-    Re-read episode metadata from disk to sync after external modifications.
-    Called AFTER external operations like delete_episode().
-
-    Assumes sync_to_disk() was called BEFORE the external operation.
-
-    Resets ALL stale state:
-    - latest_episode: Used by _save_episode_metadata() to compute frame indices
-    - _current_file_start_frame: Tracks current parquet file position
-    - episodes DataFrame: Cached episode metadata
-    - metadata_buffer: Cleared to prevent ghost episodes
-    """
-    if not svc.dataset or not svc.session_active:
-        print("[REFRESH] Skipped (no dataset or session not active)")
-        return
-
-    import json
-
-    info_path = svc.dataset.meta.root / "meta" / "info.json"
-    print(f"[REFRESH] Reading from: {info_path}")
-
-    if info_path.exists():
-        try:
-            with open(info_path, "r") as f:
-                disk_info = json.load(f)
-
-            old_memory_count = svc.dataset.meta.info.get("total_episodes", 0)
-            disk_count = disk_info.get("total_episodes", 0)
-
-            print(f"[REFRESH] Disk: {disk_count}, Memory: {old_memory_count}")
-
-            # 1. Update info dict
-            svc.dataset.meta.info["total_episodes"] = disk_count
-            svc.dataset.meta.info["total_frames"] = disk_info.get("total_frames", 0)
-
-            # Verify the update worked
-            verify_count = svc.dataset.meta.total_episodes
-            print(f"[REFRESH] After update: meta.total_episodes = {verify_count}")
-            if verify_count != disk_count:
-                print(f"[REFRESH] ERROR: Update failed! Expected {disk_count}, got {verify_count}")
-
-            # 2. Reset latest_episode to force fresh index calculation
-            if hasattr(svc.dataset, 'meta'):
-                svc.dataset.meta.latest_episode = None
-                # Clear metadata buffer (should be empty after sync_to_disk, but ensure it)
-                if hasattr(svc.dataset.meta, 'metadata_buffer'):
-                    svc.dataset.meta.metadata_buffer = []
-            if hasattr(svc.dataset, 'latest_episode'):
-                svc.dataset.latest_episode = None
-
-            # 3. Reset current file tracking
-            if hasattr(svc.dataset, '_current_file_start_frame'):
-                svc.dataset._current_file_start_frame = None
-
-            # 4. Reset episodes to None - DON'T reload from parquet
-            # LeRobot expects episodes to be a specific internal structure (not a raw DataFrame)
-            # Setting to None forces LeRobot to start fresh when latest_episode is also None
-            svc.dataset.meta.episodes = None
-
-            # 5. CRITICAL: Clear episode_buffer to force fresh creation on next start_episode()
-            # Without this, stale buffer with old episode_index causes validation failure
-            if hasattr(svc.dataset, 'episode_buffer') and svc.dataset.episode_buffer is not None:
-                svc.dataset.episode_buffer = None
-                print("[REFRESH] Cleared stale episode_buffer")
-
-            # 6. Close and reset data writer to prevent stale frame counting
-            if hasattr(svc.dataset, '_close_writer'):
-                try:
-                    svc.dataset._close_writer()
-                    print("[REFRESH] Closed data writer")
-                except:
-                    pass
-            if hasattr(svc.dataset, 'writer'):
-                svc.dataset.writer = None
-
-            # 7. Sync local episode counter
-            svc.episode_count = disk_count
-
-            print(f"[REFRESH] Complete: episode_count={svc.episode_count}, meta.total_episodes={svc.dataset.meta.total_episodes}")
-
-        except Exception as e:
-            import traceback
-            print(f"[REFRESH] Error: {e}")
-            print(traceback.format_exc())
-    else:
-        print(f"[REFRESH] ERROR: info.json not found at {info_path}")
-
-
-def start_episode(svc):
-    """Starts recording a new episode."""
-    print("=" * 60)
-    print("[START_EPISODE] Called!")
-    print(f"  session_active: {svc.session_active}")
-    print(f"  recording_active: {svc.recording_active}")
-    print(f"  _episode_saving: {svc._episode_saving}")
-    print(f"  dataset: {svc.dataset is not None}")
-    print("=" * 60)
-
-    if not svc.session_active:
-        print("[START_EPISODE] ERROR: No active session!")
-        raise Exception("No active recording session")
-
-    if svc.recording_active:
-        print("[START_EPISODE] Already recording, skipping")
-        return
-
-    # Wait for any ongoing episode save to complete before starting new episode
-    if svc._episode_saving:
-        print("[START_EPISODE] Waiting for previous episode to finish saving...")
-        wait_start = time.time()
-        max_wait = 10.0  # Maximum 10 seconds wait
-        while svc._episode_saving and (time.time() - wait_start) < max_wait:
-            time.sleep(0.1)
-        if svc._episode_saving:
-            raise Exception("Previous episode save timed out. Please try again.")
-        print(f"[START_EPISODE] Previous save completed after {time.time() - wait_start:.1f}s")
-
-    # Warn if teleop isn't running - recording needs teleop for actions
-    if not svc.is_running:
-        print("[START_EPISODE] WARNING: Teleop is NOT running!")
-        print("[START_EPISODE] Recording requires teleop to be active for action/state data.")
-        print("[START_EPISODE] Will use robot state fallback if available.")
-
-    print("[START_EPISODE] Starting Episode Recording...")
-
-    if svc.dataset:
-        # Log current state BEFORE buffer creation (critical for debugging)
-        meta_total = svc.dataset.meta.total_episodes
-        print(f"[START_EPISODE] BEFORE buffer: meta.total_episodes={meta_total}, episode_count={svc.episode_count}")
-
-        # Check for count mismatch and warn
-        if svc.episode_count != meta_total:
-            print(f"[START_EPISODE] WARNING: Count mismatch detected!")
-            print(f"[START_EPISODE]   episode_count={svc.episode_count} != meta.total_episodes={meta_total}")
-            # Don't auto-sync here - the mismatch indicates a bug we need to find
-
-        # Initialize episode buffer - handle case where buffer is None on first use
-        try:
-            if svc.dataset.episode_buffer is None:
-                print("[START_EPISODE] Creating new episode buffer (first episode)")
-                svc.dataset.episode_buffer = svc.dataset.create_episode_buffer()
-            else:
-                print("[START_EPISODE] Clearing existing episode buffer")
-                svc.dataset.clear_episode_buffer()
-        except Exception as e:
-            print(f"[START_EPISODE] Error with buffer, recreating: {e}")
-            svc.dataset.episode_buffer = svc.dataset.create_episode_buffer()
-
-        # Log the episode index that will be used
-        buffer_ep_idx = svc.dataset.episode_buffer.get("episode_index", "N/A")
-        print(f"[START_EPISODE] Episode buffer ready, episode_index={buffer_ep_idx}")
-        print(f"[START_EPISODE] Dataset features: {list(svc.dataset.features.keys())[:5]}...")
-
-    # Reset frame counter for new episode
-    svc._recording_frame_counter = 0
-
-    svc.recording_active = True
-    print("[START_EPISODE] recording_active = True, ready to capture frames!")
-
-
-def stop_episode(svc):
-    """Stops current episode and saves it."""
-    print("=" * 60)
-    print("[STOP_EPISODE] Called!")
-    print(f"  recording_active: {svc.recording_active}")
-    print(f"  session_active: {svc.session_active}")
-    print(f"  dataset: {svc.dataset is not None}")
-    if svc.dataset:
-        print(f"  dataset type: {type(svc.dataset)}")
-    print("=" * 60)
-
-    if not svc.recording_active:
-        print("[STOP_EPISODE] WARNING: recording_active is False, returning")
-        return
-
-    # Acquire lock to prevent race with stop_session
-    # This ensures save_episode() completes before finalize() can be called
-    print("[STOP_EPISODE] Acquiring episode save lock...")
-    with svc._episode_save_lock:
-        svc._episode_saving = True
-        print("[STOP_EPISODE] Lock acquired, proceeding with save")
-
-        # Capture dataset reference BEFORE changing state
-        # This prevents race conditions where dataset could be set to None
-        current_dataset = svc.dataset
-
-        print("[STOP_EPISODE] Stopping Episode Recording...")
-        svc.recording_active = False
-
-        # Wait for frame queue to drain before saving episode
-        print(f"[STOP_EPISODE] Waiting for frame queue to drain ({len(svc._frame_queue)} frames)...")
-        drain_timeout = 5.0  # seconds
-        drain_start = time.time()
-        while len(svc._frame_queue) > 0 and (time.time() - drain_start) < drain_timeout:
-            time.sleep(0.05)
-        if len(svc._frame_queue) > 0:
-            print(f"[STOP_EPISODE] WARNING: Queue not fully drained ({len(svc._frame_queue)} remaining)")
-        else:
-            print(f"[STOP_EPISODE] Queue drained successfully")
-
-        # Reset first frame logging flag for next episode
-        if hasattr(svc, '_first_frame_logged'):
-            delattr(svc, '_first_frame_logged')
-        if hasattr(svc, '_last_rec_error'):
-            delattr(svc, '_last_rec_error')
-
-        if current_dataset is not None:
-            try:
-                # Check episode buffer before saving
-                if hasattr(current_dataset, 'episode_buffer') and current_dataset.episode_buffer:
-                    buffer_size = current_dataset.episode_buffer.get('size', 0)
-                    print(f"[STOP_EPISODE] Episode buffer has {buffer_size} frames (captured {svc._recording_frame_counter})")
-
-                    if buffer_size == 0:
-                        print("[STOP_EPISODE] WARNING: Buffer size is 0, no frames were recorded!")
-                        print("[STOP_EPISODE] This means observations weren't captured during recording.")
-                        svc._episode_saving = False
-                        return
-                else:
-                    print("[STOP_EPISODE] WARNING: Episode buffer is empty or missing!")
-                    print(f"  has episode_buffer attr: {hasattr(current_dataset, 'episode_buffer')}")
-                    if hasattr(current_dataset, 'episode_buffer'):
-                        print(f"  episode_buffer value: {current_dataset.episode_buffer}")
-                    svc._episode_saving = False
-                    return
-
-                # Log state BEFORE save
-                print(f"[STOP_EPISODE] BEFORE save: meta.total_episodes={current_dataset.meta.total_episodes}, episode_count={svc.episode_count}")
-
-                # Diagnostic: Check image writer status before save
-                if hasattr(current_dataset, 'image_writer') and current_dataset.image_writer:
-                    try:
-                        queue_size = current_dataset.image_writer.queue.qsize()
-                        print(f"[STOP_EPISODE] Image writer queue size: {queue_size}")
-                    except Exception:
-                        print("[STOP_EPISODE] Image writer queue size: (unable to check)")
-
-                print(f"[STOP_EPISODE] Calling save_episode()...")
-                save_start = time.time()
-                # Note: task is already included in each frame, no need to pass to save_episode
-                current_dataset.save_episode()
-                save_duration = time.time() - save_start
-                print(f"[STOP_EPISODE] save_episode() completed in {save_duration:.1f}s")
-                # Log state AFTER save
-                print(f"[STOP_EPISODE] AFTER save: meta.total_episodes={current_dataset.meta.total_episodes}")
-                svc.episode_count += 1
-                print(f"[STOP_EPISODE] SUCCESS! Episode {svc.episode_count} Saved! ({svc._recording_frame_counter} frames)")
-            except Exception as e:
-                import traceback
-                print(f"[STOP_EPISODE] ERROR saving episode: {e}")
-                print(traceback.format_exc())
-        else:
-            print("[STOP_EPISODE] WARNING: No dataset available (current_dataset is None)!")
-
-        svc._episode_saving = False
-        print("[STOP_EPISODE] Episode save lock released")
-
-
-def delete_last_episode(svc):
-    """Deletes the last recorded episode (if possible/implemented)."""
-    logger.warning("Delete Last Episode not fully supported yet.")
-
-
-def manual_finalize_dataset(svc, repo_id):
-    """Emergency fix to generate episode metadata if LeRobotDataset fails."""
-    if not repo_id: return
-    pass  # Not implemented fully as per original file
+# Episode lifecycle functions moved to app.core.teleop.episode
+from app.core.teleop.episode import (  # noqa: E402, F401
+    delete_last_episode,
+    refresh_metadata_from_disk,
+    start_episode,
+    stop_episode,
+    sync_to_disk,
+)

@@ -28,6 +28,7 @@ class SystemState:
         self.arm_registry = None  # Arm Manager Service
         self.tool_registry = None
         self.trigger_listener = None
+        self.safety_watchdog = None
         self.leader_assists = {} # {arm_prefix: LeaderAssistService}
         self.lock = threading.Lock()
 
@@ -104,6 +105,18 @@ class SystemState:
             trigger_listener=self.trigger_listener,
         )
 
+        # 6b. Safety Watchdog (created but not started until arms connect)
+        try:
+            from app.core.hardware.safety_watchdog import SafetyWatchdog
+            if self.arm_registry:
+                self.safety_watchdog = SafetyWatchdog(
+                    arm_registry=self.arm_registry,
+                    safety_layer=self.teleop_service.safety,
+                )
+        except Exception as e:
+            print(f"Warning: Safety watchdog init failed: {e}")
+            self.safety_watchdog = None
+
         # 7. Orchestrator with minimal mock robot
         from unittest.mock import MagicMock
         mock = MagicMock()
@@ -172,6 +185,13 @@ class SystemState:
         print("Shutting Down System State...")
         if self.orchestrator:
             self.orchestrator.stop()
+
+        # Stop safety watchdog
+        if self.safety_watchdog:
+            try:
+                self.safety_watchdog.stop()
+            except Exception as e:
+                print(f"Error stopping safety watchdog: {e}")
 
         # Stop trigger listener
         if self.trigger_listener:

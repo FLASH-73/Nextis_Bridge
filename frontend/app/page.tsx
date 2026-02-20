@@ -8,6 +8,7 @@ import ArmManagerModal from "../components/modals/arms";
 import MotorMonitorModal from "../components/MotorMonitorModal";
 import TeleopModal from "../components/modals/teleop";
 import RecordingModal from "../components/modals/recording";
+import RecordingActiveView from "../components/modals/recording/RecordingActiveView";
 import DatasetViewerModal from "../components/modals/datasets";
 import UploadModal from "../components/UploadModal";
 import AuthModal from "../components/AuthModal";
@@ -44,6 +45,10 @@ export default function Dashboard() {
   // Global maximized state - only one window can be maximized at a time
   const [maximizedWindow, setMaximizedWindow] = useState<string | null>(null);
 
+  // Recording phase state machine: idle → setup (RecordingModal) → active (overlay)
+  const [recordingPhase, setRecordingPhase] = useState<"idle" | "active">("idle");
+  const [activeDatasetName, setActiveDatasetName] = useState("");
+
   return (
     <div className="h-screen w-screen overflow-hidden bg-neutral-50 dark:bg-zinc-950 font-sans selection:bg-black selection:text-white dark:selection:bg-white dark:selection:text-black">
       {/* Modals */}
@@ -69,6 +74,12 @@ export default function Dashboard() {
         }}
         maximizedWindow={maximizedWindow}
         setMaximizedWindow={setMaximizedWindow}
+        onSessionStarted={(datasetName) => {
+          setIsRecordingOpen(false);
+          if (maximizedWindow === "recording") setMaximizedWindow(null);
+          setActiveDatasetName(datasetName);
+          setRecordingPhase("active");
+        }}
       />
       <DatasetViewerModal
         isOpen={isDatasetViewerOpen}
@@ -131,6 +142,17 @@ export default function Dashboard() {
         maximizedWindow={maximizedWindow}
         setMaximizedWindow={setMaximizedWindow}
       />
+
+      {/* Active Recording Overlay */}
+      {recordingPhase === "active" && (
+        <RecordingActiveView
+          datasetName={activeDatasetName}
+          onSessionEnded={() => {
+            setRecordingPhase("idle");
+            setActiveDatasetName("");
+          }}
+        />
+      )}
 
       {/* 1. LAYER: BACKGROUND (Task Graph) */}
       <div className="absolute inset-0 z-0">

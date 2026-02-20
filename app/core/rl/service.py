@@ -515,6 +515,15 @@ class RLService:
             # 3. Apply movement scale for safety
             action = self._apply_movement_scale(action, obs)
 
+            # 3b. Safety check (every 3rd step = ~10Hz at 30fps)
+            if step_i % 3 == 0 and self.teleop and hasattr(self.teleop, 'safety'):
+                robot = self._env.robot if self._env else None
+                if robot and hasattr(robot, 'is_connected') and robot.is_connected:
+                    if not self.teleop.safety.check_all_limits(robot):
+                        logger.error("[RL] SAFETY: Limit exceeded — stopping training")
+                        self._stop_event.set()
+                        break
+
             # 4. Step environment
             next_obs, _, terminated, truncated, info = self._env.step(action)
 
