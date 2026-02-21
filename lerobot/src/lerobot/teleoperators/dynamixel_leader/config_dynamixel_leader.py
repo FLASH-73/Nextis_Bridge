@@ -27,3 +27,13 @@ class DynamixelLeaderConfig(TeleoperatorConfig):
 
     # Optional: structural design hint for pairing compatibility
     structural_design: str = ""  # e.g., "damiao_7dof", "umbra_7dof"
+
+    def __post_init__(self):
+        if not self.calibration_dir:
+            import warnings
+            warnings.warn(
+                f"calibration_dir not set for {self.__class__.__name__}. "
+                f"Calibration will fall back to HF cache (~/.cache/huggingface/...). "
+                f"Set calibration_dir explicitly to avoid dual-location bugs.",
+                stacklevel=2,
+            )

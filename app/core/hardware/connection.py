@@ -6,6 +6,7 @@ Creates the appropriate robot/teleoperator instance based on motor type and role
 import logging
 from typing import Any, Optional
 
+from app.core.config import CALIBRATION_DIR
 from app.core.hardware.types import ArmDefinition, MotorType, ArmRole
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ def create_arm_instance(arm: ArmDefinition) -> Optional[Any]:
                 id=arm.id,
                 port=arm.port,
                 cameras={},  # No cameras for individual arms
+                calibration_dir=CALIBRATION_DIR / arm.id,
             )
             robot = UmbraFollowerRobot(config)
             robot.connect(calibrate=False)
@@ -37,6 +39,7 @@ def create_arm_instance(arm: ArmDefinition) -> Optional[Any]:
             config = UmbraLeaderConfig(
                 id=arm.id,
                 port=arm.port,
+                calibration_dir=CALIBRATION_DIR / arm.id,
             )
             leader = UmbraLeader(config)
             leader.connect(calibrate=False)
@@ -51,6 +54,7 @@ def create_arm_instance(arm: ArmDefinition) -> Optional[Any]:
                 port=arm.port,
                 velocity_limit=arm.config.get("velocity_limit", 0.3),
                 cameras={},
+                calibration_dir=CALIBRATION_DIR / arm.id,
             )
             robot = DamiaoFollowerRobot(config)
             robot.connect()
@@ -69,6 +73,7 @@ def create_arm_instance(arm: ArmDefinition) -> Optional[Any]:
                 id=arm.id,
                 port=arm.port,
                 structural_design=arm.structural_design or "",
+                calibration_dir=CALIBRATION_DIR / arm.id,
             )
             leader = DynamixelLeader(config)
             leader.connect(calibrate=False)

@@ -16,6 +16,19 @@ class CalibrationProfiles:
     def __init__(self, svc):
         self._svc = svc
 
+    def _get_arm_calibration_dir(self, arm_id: str, arm=None):
+        """Resolve calibration directory from arm instance, falling back to arm_id.
+
+        Prefers the arm's configured calibration_dir (set via connection.py) so the
+        profile system always targets the same directory as _save_calibration().
+        Falls back to CALIBRATION_DIR / arm_id for disconnected arms.
+        """
+        if arm is None:
+            arm, _ = self._svc.get_arm_context(arm_id)
+        if arm and hasattr(arm, 'calibration_dir'):
+            return arm.calibration_dir
+        return CALIBRATION_DIR / arm_id
+
     def ensure_active_profiles_init(self):
         if not hasattr(self, "active_profiles"):
             self.active_profiles = {}
@@ -63,8 +76,8 @@ class CalibrationProfiles:
 
         self.ensure_active_profiles_init()
 
-        # Use project root directory for persistent storage
-        base_dir = CALIBRATION_DIR / arm_id
+        # Use arm's configured calibration directory
+        base_dir = self._get_arm_calibration_dir(arm_id, arm)
 
         if not base_dir.exists():
             base_dir.mkdir(parents=True, exist_ok=True)
@@ -98,7 +111,7 @@ class CalibrationProfiles:
 
         self.ensure_active_profiles_init()
 
-        base_dir = CALIBRATION_DIR / arm_id
+        base_dir = self._get_arm_calibration_dir(arm_id, arm)
         fpath = base_dir / f"{filename}.json"
 
         if not fpath.exists():
@@ -107,10 +120,10 @@ class CalibrationProfiles:
 
         logger.info(f"Loading calibration for {arm_id} from {fpath}")
         try:
-            # Use the robot's internal loader if possible, or manual load
+            # Load calibration data into memory from the profile file.
+            # No need to call _save_calibration() — the profile file on disk
+            # IS the persistent copy (calibration_dir already points here).
             arm._load_calibration(fpath)
-            # Persist to runtime cache so future arm connects load correct values
-            arm._save_calibration()
             # Apply to motors (Dynamixel EEPROM writes require torque off)
             if hasattr(arm.bus, "write_calibration"):
                 if self._svc._is_dynamixel_arm(arm_id):
@@ -135,7 +148,7 @@ class CalibrationProfiles:
             return False
 
     def delete_calibration_file(self, arm_id: str, filename: str):
-        base_dir = CALIBRATION_DIR / arm_id
+        base_dir = self._get_arm_calibration_dir(arm_id)
         fpath = base_dir / f"{filename}.json"
         if fpath.exists():
             fpath.unlink()
@@ -171,7 +184,7 @@ class CalibrationProfiles:
             import dataclasses
 
             # Create profile dir
-            base_dir = CALIBRATION_DIR / arm_id
+            base_dir = self._get_arm_calibration_dir(arm_id, arm)
             base_dir.mkdir(parents=True, exist_ok=True)
 
             # Sanitize name

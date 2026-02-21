@@ -45,29 +45,22 @@ pairings:
   name: 'Umbra Leader -> Umbra Follower '
 robot:
   cameras:
-    camera_1:
-      fps: 30
-      height: 480
-      index_or_path: /dev/video0
-      type: opencv
-      video_device_id: /dev/video0
-      width: 640
     camera_2:
       fps: 10
-      height: 480
+      height: 720
       serial_number_or_name: '218622275492'
       type: intelrealsense
       use_depth: false
       video_device_id: '218622275492'
-      width: 848
+      width: 1280
     camera_3:
       fps: 15
-      height: 480
+      height: 720
       serial_number_or_name: '336222072963'
       type: intelrealsense
       use_depth: false
       video_device_id: '336222072963'
-      width: 640
+      width: 1280
 tool_pairings:
 - action: toggle
   config: {}

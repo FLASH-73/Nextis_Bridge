@@ -95,3 +95,14 @@ class DamiaoFollowerConfig(RobotConfig):
 
     # Calibration file path (if using external calibration)
     calibration_path: str = ""
+
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.calibration_dir:
+            import warnings
+            warnings.warn(
+                f"calibration_dir not set for {self.__class__.__name__}. "
+                f"Calibration will fall back to HF cache (~/.cache/huggingface/...). "
+                f"Set calibration_dir explicitly to avoid dual-location bugs.",
+                stacklevel=2,
+            )
