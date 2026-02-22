@@ -203,8 +203,8 @@ export default function CalibrationModal({ isOpen, onClose, language }: Calibrat
 
             interval = setInterval(() => {
                 calibrationApi.state(selectedArm)
-                    .then((data: any) => {
-                        setMotors(data.state);
+                    .then((data) => {
+                        setMotors(data.motors ?? []);
                     })
                     .catch(err => console.error("Failed to fetch state", err));
             }, 100);

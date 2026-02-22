@@ -70,8 +70,8 @@ def get_calibration_arms():
 def get_calibration_state(arm_id: str):
     system = get_state()
     if not system.calibration_service:
-        return {}
-    return system.calibration_service.get_calibration_state(arm_id)
+        return {"motors": []}
+    return {"motors": system.calibration_service.get_calibration_state(arm_id)}
 
 @router.post("/calibration/{arm_id}/torque")
 async def set_torque(arm_id: str, request: Request):

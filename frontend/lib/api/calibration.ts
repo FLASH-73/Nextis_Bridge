@@ -9,7 +9,7 @@ export const calibrationApi = {
     api.get<{ motors: MotorState[] }>(`/calibration/${armId}/state`),
 
   torque: (armId: string, enabled: boolean) =>
-    api.post<void>(`/calibration/${armId}/torque`, { enabled }),
+    api.post<void>(`/calibration/${armId}/torque`, { enable: enabled }),
 
   homing: (armId: string) =>
     api.post<void>(`/calibration/${armId}/homing`),
