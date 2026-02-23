@@ -46,21 +46,24 @@ pairings:
 robot:
   cameras:
     camera_1:
-      fps: 15
-      height: 720
+      fps: 30
+      height: 480
       serial_number_or_name: '336222072963'
       type: intelrealsense
       use_depth: false
       video_device_id: '336222072963'
-      width: 1280
+      width: 640
     camera_2:
-      fps: 15
-      height: 720
+      fps: 30
+      height: 480
       serial_number_or_name: '218622275492'
       type: intelrealsense
       use_depth: false
       video_device_id: '218622275492'
-      width: 1280
+      width: 640
+teleop:
+  gripper_force_feedback: true
+  joint_force_feedback: false
 tool_pairings:
 - action: toggle
   config: {}

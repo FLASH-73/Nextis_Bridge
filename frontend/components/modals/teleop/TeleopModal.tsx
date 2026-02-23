@@ -356,9 +356,7 @@ export default function TeleopModal({ isOpen, onClose, maximizedWindow, setMaxim
                             <div key={cam.id} className="flex-1 min-w-[280px] max-w-[50%] aspect-video">
                                 <CameraFeed
                                     cameraId={cam.id}
-                                    maxStreamWidth={800}
                                     mode="contain"
-                                    quality={85}
                                 />
                             </div>
                         ))}

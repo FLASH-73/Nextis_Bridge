@@ -118,7 +118,7 @@ def test_damiao_overload_increments_count(safety_layer):
 
 
 def test_damiao_estop_after_limit(safety_layer):
-    """E-STOP triggers after VIOLATION_LIMIT consecutive Damiao overloads."""
+    """check_damiao_limits returns False after VIOLATION_LIMIT — no disconnect (graceful stop)."""
     robot = MagicMock()
     robot.is_connected = True
     robot.get_torques.return_value = {"link1": 50.0}
@@ -128,7 +128,7 @@ def test_damiao_estop_after_limit(safety_layer):
         result = safety_layer.check_damiao_limits(robot)
 
     assert result is False
-    robot.disconnect.assert_called()
+    robot.disconnect.assert_not_called()  # Graceful: control loop → stop() → homing → disable
 
 
 def test_damiao_good_read_resets(safety_layer):

@@ -34,9 +34,6 @@ export default function CameraFeedGrid({ compact }: CameraFeedGridProps) {
         <div key={cam.id} className="aspect-video rounded-lg overflow-hidden bg-black">
           <CameraFeed
             cameraId={cam.id}
-            maxStreamWidth={compact ? 320 : 640}
-            quality={compact ? 60 : 80}
-            showFullscreenButton={!compact}
             showOverlay={!compact}
             mode="contain"
             className="rounded-none border-0"

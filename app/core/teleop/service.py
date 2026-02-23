@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from app.core.config import load_config, save_config
 from app.core.safety_layer import SafetyLayer
 from app.core.leader_assist import LeaderAssistService
 from lerobot.motors.feetech.feetech import OperatingMode
@@ -93,8 +94,11 @@ class TeleoperationService:
         self._pairing_contexts: list[PairingContext] = []
         self._teleop_threads: list[threading.Thread] = []
 
+        # Load persisted force feedback settings (default True if not yet saved)
+        _teleop_cfg = load_config().get("teleop", {})
+
         # Gripper Force Feedback (follower torque → leader current ceiling)
-        self._force_feedback_enabled = True
+        self._force_feedback_enabled = _teleop_cfg.get("gripper_force_feedback", True)
         self._filtered_gripper_torque = 0.0   # EMA-filtered absolute torque (Nm)
         self._ff_alpha = 0.3                  # EMA smoothing (τ ≈ 55ms at 60Hz)
         self._ff_baseline_current = 60        # mA — light spring (perceptible, not fatiguing)
@@ -104,7 +108,7 @@ class TeleoperationService:
 
         # Joint Force Feedback: CURRENT_POSITION mode (same mechanism as gripper)
         # Goal_Position = follower position, Goal_Current = error magnitude
-        self._joint_ff_enabled = True
+        self._joint_ff_enabled = _teleop_cfg.get("joint_force_feedback", True)
         self._joint_ff_k_spring = 15000.0   # mA/rad — gentler ramp for better tactile gradient
         self._joint_ff_deadzone = 0.10      # rad (~6°) — covers normal tracking lag (0.03-0.06 rad)
         self._joint_ff_max_current = 1750   # mA — full XL330 range
@@ -221,6 +225,21 @@ class TeleoperationService:
                     )
                 except Exception:
                     pass
+
+        # Persist to settings.yaml
+        self._save_force_feedback_config()
+
+    def _save_force_feedback_config(self):
+        """Persist force feedback toggles to settings.yaml."""
+        try:
+            config = load_config()
+            config.setdefault("teleop", {})
+            config["teleop"]["gripper_force_feedback"] = self._force_feedback_enabled
+            config["teleop"]["joint_force_feedback"] = self._joint_ff_enabled
+            save_config(config)
+            logger.info("Force feedback config saved to settings.yaml")
+        except Exception as e:
+            logger.warning(f"Failed to save force feedback config: {e}")
 
     # ── Lifecycle ────────────────────────────────────────────────
 

@@ -283,10 +283,9 @@ def teleop_loop(svc, ctx: PairingContext):
                     if ctx.has_damiao_follower and loop_count % 6 == 3:
                         try:
                             if not svc.safety.check_damiao_limits(ctx.active_robot):
-                                print(f"[TELEOP] [{pid}] SAFETY: Torque limit exceeded — EMERGENCY STOP", flush=True)
-                                logger.error(f"[TELEOP] [{pid}] Damiao torque limit exceeded — emergency stop")
-                                svc.is_running = False
-                                break
+                                print(f"[TELEOP] [{pid}] SAFETY: Torque limit exceeded — stopping for homing", flush=True)
+                                logger.error(f"[TELEOP] [{pid}] Damiao torque limit exceeded — graceful stop")
+                                break  # stop() in finally sets is_running=False, does homing, disables
                         except Exception as e:
                             if loop_count % 60 == 0:
                                 logger.warning(f"[TELEOP] Safety check error (non-fatal): {e}")

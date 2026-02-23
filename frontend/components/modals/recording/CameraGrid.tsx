@@ -57,10 +57,7 @@ export default function CameraGrid({
                 {isConnected ? (
                   <CameraFeed
                     cameraId={cam.id}
-                    maxStreamWidth={240}
-                    quality={50}
                     showOverlay={false}
-                    showFullscreenButton={false}
                     mode="cover"
                     className="rounded-none border-0"
                   />

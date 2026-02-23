@@ -62,7 +62,6 @@ export default function RecordingView({
                                     >
                                         <CameraFeed
                                             cameraId={cam.id}
-                                            maxStreamWidth={800}
                                             mode="contain"
                                             className="rounded-none border-0"
                                         />

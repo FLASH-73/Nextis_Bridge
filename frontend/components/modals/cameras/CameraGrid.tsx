@@ -547,7 +547,6 @@ export default function CameraGrid({
                                         <div className="aspect-video">
                                             <CameraFeed
                                                 cameraId={conf.id}
-                                                maxStreamWidth={640}
                                                 mode="contain"
                                                 badge={conf.type === 'intelrealsense' ? 'RS' : undefined}
                                                 className="rounded-none border-0"

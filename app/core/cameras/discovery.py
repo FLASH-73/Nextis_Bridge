@@ -2,9 +2,14 @@ import cv2
 import glob
 import logging
 import re
-import subprocess
+import time
 
 logger = logging.getLogger(__name__)
+
+# Module-level discovery cache (avoids repeated hardware probes)
+_discovery_cache: dict = {"result": None, "timestamp": 0.0}
+_DISCOVERY_CACHE_TTL = 30.0  # seconds
+
 
 def get_available_video_ports():
     """
@@ -36,26 +41,14 @@ def is_camera_available(port):
         # 1. IOCTL Capability Check (Filter Metadata nodes)
         try:
             with open(port, 'rb') as device_file:
-                # struct v4l2_capability {
-                #   u8 driver[16]; u8 card[32]; u8 bus_info[32];
-                #   u32 version; u32 capabilities; u32 device_caps; u32 reserved[3];
-                # }; Total ~104 bytes.
-                # We need capabilities (offset 84?) -> 16+32+32+4 = 84.
-                # Let's read full buffer.
                 capability = fcntl.ioctl(device_file, VIDIOC_QUERYCAP, b'\0' * 104)
-                # Unpack: 16s 32s 32s I I I 3I
-                # Python struct: 16s 32s 32s I I I (rest doesn't matter much)
-                # Capabilities is 5th element (index 4 in list after unpack?) or offset 84 (driver+card+bus+ver)
-                # Correct unpack format: '16s32s32sIII' (rest doesn't matter much)
-
-                # Using simple buffer slicing to be safe
                 caps = struct.unpack('I', capability[84:88])[0]
 
                 if not (caps & V4L2_CAP_VIDEO_CAPTURE):
                      # Not a video capture device (likely metadata, radio, vbi, etc)
                      return False
 
-        except Exception as e:
+        except Exception:
             # If ioctl fails (permission?), fall back to open check
             pass
 
@@ -80,10 +73,12 @@ def is_camera_available(port):
         logger.error(f"Error checking camera {port}: {e}")
         return False
 
-def discover_cameras(skip_devices: list = None, opencv_only: bool = False):
+def discover_cameras(skip_devices: list = None, opencv_only: bool = False, force: bool = False):
     """
     Scans for available cameras and returns a list of working camera configurations.
     Returns a dictionary with 'opencv' and 'realsense' lists.
+
+    Results are cached for 30 seconds to avoid repeated hardware probes.
 
     Args:
         skip_devices: List of device paths to skip (e.g., ['/dev/video12']).
@@ -91,9 +86,19 @@ def discover_cameras(skip_devices: list = None, opencv_only: bool = False):
         opencv_only: If True, skip RealSense scanning. Used during OpenCV
                      fallback to avoid creating an rs.context that could
                      interfere with subsequent RealSense connections.
+        force: If True, bypass cache and force a fresh scan.
     """
+    global _discovery_cache
+
     if skip_devices is None:
         skip_devices = []
+
+    # Return cached results if still fresh (unless forced or skip_devices changed)
+    if (not force
+            and _discovery_cache["result"] is not None
+            and (time.time() - _discovery_cache["timestamp"]) < _DISCOVERY_CACHE_TTL):
+        logger.debug("Returning cached discovery results")
+        return _discovery_cache["result"]
 
     available_cameras = {
         "opencv": [],
@@ -102,48 +107,49 @@ def discover_cameras(skip_devices: list = None, opencv_only: bool = False):
 
     # 1. Scan OpenCV Cameras (USB Webcams)
     ports = get_available_video_ports()
-    print(f"Scanning video ports: {ports}")
+    logger.debug(f"Scanning {len(ports)} video ports")
 
     for port in ports:
-        # Skip devices that are already in use by the robot
         if port in skip_devices:
-            print(f"Skipping {port} (already in use)")
+            logger.debug(f"Skipping {port} (already in use)")
             continue
 
         if is_camera_available(port):
-            print(f"Camera found at {port}")
+            logger.info(f"Camera found at {port}")
             available_cameras["opencv"].append({
                 "id": port,
                 "index_or_path": port,
                 "name": f"Camera {port}",
-                "width": 640, # Default
-                "height": 480, # Default
+                "width": 640,
+                "height": 480,
                 "fps": 30
             })
 
     # 2. Scan RealSense Cameras (skip if caller only needs OpenCV)
-    if opencv_only:
-        return available_cameras
+    if not opencv_only:
+        try:
+            import pyrealsense2 as rs
+            ctx = rs.context()
+            devices = ctx.query_devices()
+            for dev in devices:
+                serial = dev.get_info(rs.camera_info.serial_number)
+                name = dev.get_info(rs.camera_info.name)
+                logger.info(f"RealSense found: {name} ({serial})")
+                available_cameras["realsense"].append({
+                    "id": serial,
+                    "serial_number_or_name": serial,
+                    "name": name,
+                    "width": 848,
+                    "height": 480,
+                    "fps": 30
+                })
+        except ImportError:
+            logger.warning("pyrealsense2 not installed, skipping RealSense scan.")
+        except Exception as e:
+            logger.error(f"Error scanning RealSense: {e}")
 
-    try:
-        import pyrealsense2 as rs
-        ctx = rs.context()
-        devices = ctx.query_devices()
-        for dev in devices:
-            serial = dev.get_info(rs.camera_info.serial_number)
-            name = dev.get_info(rs.camera_info.name)
-            print(f"RealSense found: {name} ({serial})")
-            available_cameras["realsense"].append({
-                "id": serial,
-                "serial_number_or_name": serial,
-                "name": name,
-                "width": 848, # Default for RealSense
-                "height": 480,
-                "fps": 30
-            })
-    except ImportError:
-        logger.warning("pyrealsense2 not installed, skipping RealSense scan.")
-    except Exception as e:
-        logger.error(f"Error scanning RealSense: {e}")
+    # Update cache
+    _discovery_cache["result"] = available_cameras
+    _discovery_cache["timestamp"] = time.time()
 
     return available_cameras

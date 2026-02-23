@@ -32,6 +32,10 @@ class CameraService:
         self._health_stop_event = threading.Event()
         self._health_thread: threading.Thread | None = None
         self._reconnect_attempts: Dict[str, int] = {}  # camera_key -> consecutive failure count
+        self._health_failure_counts: Dict[str, int] = {}  # camera_key -> consecutive health check failures
+        self._connect_timestamps: Dict[str, float] = {}  # camera_key -> time.time() of last connect
+        self._HEALTH_GRACE_PERIOD = 30.0  # seconds after connect before health checks apply
+        self._HEALTH_CONSECUTIVE_FAILURES = 3  # consecutive async_read failures before unhealthy
 
     @property
     def cameras(self) -> Dict[str, Any]:
@@ -84,6 +88,8 @@ class CameraService:
                 self._camera_status[camera_key] = "connected"
                 self._camera_errors[camera_key] = ""
                 self._reconnect_attempts.pop(camera_key, None)
+                self._health_failure_counts.pop(camera_key, None)
+                self._connect_timestamps[camera_key] = time.time()
                 # Invalidate capabilities cache so frontend re-probes at new resolution
                 cam_cfg_for_cache = config[camera_key]
                 for prefix in ("opencv", "intelrealsense"):
@@ -283,13 +289,7 @@ class CameraService:
             self._camera_actual_res[camera_key] = {
                 "width": camera.width, "height": camera.height, "fps": camera.fps,
             }
-
-            # Prime the frame cache
-            try:
-                camera.async_read(blocking=True, timeout_ms=3000)
-            except Exception as e:
-                logger.warning(f"Camera '{camera_key}': initial frame prime failed ({e}), stream may take a moment")
-
+            self._prime_realsense(camera, camera_key)
             return camera
 
         except (ConnectionError, RuntimeError) as first_err:
@@ -323,14 +323,30 @@ class CameraService:
             f"Camera '{camera_key}': auto-detect connected at "
             f"{camera.width}x{camera.height}@{camera.fps}fps"
         )
+        self._prime_realsense(camera, camera_key)
+        return camera
 
-        # Prime the frame cache
+    @staticmethod
+    def _prime_realsense(camera: RealSenseCamera, camera_key: str):
+        """Start the background read thread and prime the frame cache for a RealSense camera.
+
+        RealSense connect() does NOT start the background thread (unlike OpenCV).
+        We start it explicitly so async_read(blocking=False) has frames immediately.
+        """
+        # Ensure background thread is running
+        if not (camera.thread and camera.thread.is_alive()):
+            camera._start_read_thread()
+
+        # Prime: wait for the first frame to populate latest_frame
         try:
-            camera.async_read(blocking=True, timeout_ms=3000)
+            camera.async_read(blocking=True, timeout_ms=5000)
         except Exception as e:
             logger.warning(f"Camera '{camera_key}': initial frame prime failed ({e}), stream may take a moment")
 
-        return camera
+        # Verify frame cache is populated
+        with camera.frame_lock:
+            if camera.latest_frame is None:
+                logger.warning(f"Camera '{camera_key}': latest_frame still None after prime")
 
     def _update_camera_path(self, camera_key: str, new_path: str):
         """Update the device path for an OpenCV camera in settings.yaml."""
@@ -364,6 +380,8 @@ class CameraService:
         self._camera_status[camera_key] = "disconnected"
         self._camera_errors[camera_key] = ""
         self._camera_actual_res.pop(camera_key, None)
+        self._health_failure_counts.pop(camera_key, None)
+        self._connect_timestamps.pop(camera_key, None)
         return {"status": "disconnected", "camera_key": camera_key}
 
     def disconnect_all(self):
@@ -454,6 +472,7 @@ class CameraService:
 
     def _health_check_cycle(self):
         """Single health check pass over all connected cameras."""
+        now = time.time()
         for camera_key in list(self._cameras.keys()):
             status = self._camera_status.get(camera_key, "disconnected")
             if status != "connected":
@@ -463,8 +482,15 @@ class CameraService:
             if cam is None:
                 continue
 
-            if self._is_camera_healthy(camera_key, cam):
+            # Grace period: skip cameras that just connected (allow stabilization)
+            connect_time = self._connect_timestamps.get(camera_key, 0)
+            if (now - connect_time) < self._HEALTH_GRACE_PERIOD:
+                continue
+
+            healthy = self._is_camera_healthy(camera_key, cam)
+            if healthy:
                 self._reconnect_attempts.pop(camera_key, None)
+                self._health_failure_counts.pop(camera_key, None)
                 continue
 
             # Camera is unhealthy — attempt auto-reconnect
@@ -507,25 +533,51 @@ class CameraService:
                 self._connect_lock.release()
 
     def _is_camera_healthy(self, camera_key: str, cam) -> bool:
-        """Check if a camera is still operational."""
+        """Check if a camera is still operational.
+
+        Thread death is immediately unhealthy. Frame read failures require
+        consecutive failures (self._HEALTH_CONSECUTIVE_FAILURES) before
+        declaring unhealthy, to tolerate brief USB congestion.
+        """
         if not getattr(cam, 'is_connected', False):
             logger.warning(f"Camera '{camera_key}': is_connected=False")
+            self._health_failure_counts.pop(camera_key, None)
             return False
 
+        # Thread death is immediately unhealthy (no counter needed)
         if hasattr(cam, 'thread') and cam.thread is not None:
             if not cam.thread.is_alive():
                 logger.warning(f"Camera '{camera_key}': background thread dead")
+                self._health_failure_counts.pop(camera_key, None)
                 return False
 
+        # Frame read — use consecutive failure counter
         try:
             frame = cam.async_read(blocking=False)
             if frame is None:
-                logger.warning(f"Camera '{camera_key}': async_read returned None")
-                return False
+                count = self._health_failure_counts.get(camera_key, 0) + 1
+                self._health_failure_counts[camera_key] = count
+                if count >= self._HEALTH_CONSECUTIVE_FAILURES:
+                    logger.warning(
+                        f"Camera '{camera_key}': async_read returned None "
+                        f"{count} consecutive times — marking unhealthy"
+                    )
+                    return False
+                logger.debug(
+                    f"Camera '{camera_key}': async_read returned None "
+                    f"({count}/{self._HEALTH_CONSECUTIVE_FAILURES})"
+                )
+                return True  # Not yet unhealthy
         except Exception as e:
-            logger.warning(f"Camera '{camera_key}': async_read failed: {e}")
-            return False
+            count = self._health_failure_counts.get(camera_key, 0) + 1
+            self._health_failure_counts[camera_key] = count
+            if count >= self._HEALTH_CONSECUTIVE_FAILURES:
+                logger.warning(f"Camera '{camera_key}': async_read failed {count} times: {e}")
+                return False
+            return True  # Not yet unhealthy
 
+        # Success — reset failure counter
+        self._health_failure_counts.pop(camera_key, None)
         return True
 
     # ── Capabilities Probing ─────────────────────────────────────────────
@@ -750,11 +802,12 @@ class CameraService:
 
     # ── Legacy methods (unchanged) ────────────────────────────────────────
 
-    def scan_cameras(self, active_ids: List[str] = None) -> Dict[str, List[Dict[str, Any]]]:
+    def scan_cameras(self, active_ids: List[str] = None, force: bool = False) -> Dict[str, List[Dict[str, Any]]]:
         """
         Scans for available OpenCV and RealSense cameras.
         Returns a dict with 'opencv' and 'realsense' lists.
         Filters out devices that cannot be opened or read.
+        Results are cached for 30s unless force=True.
         """
         if active_ids is None:
             active_ids = []
@@ -768,7 +821,7 @@ class CameraService:
 
         try:
             logger.info("Scanning for cameras using unified discovery...")
-            discovered = discover_cameras(skip_devices=active_ids)
+            discovered = discover_cameras(skip_devices=active_ids, force=force)
             results["opencv"] = discovered.get("opencv", [])
             results["realsense"] = discovered.get("realsense", [])
         except Exception as e:

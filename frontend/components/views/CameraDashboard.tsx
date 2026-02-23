@@ -120,7 +120,6 @@ export default function CameraDashboard() {
   // Data fetching
   // ---------------------------------------------------------------------------
 
-  // Initial config load
   useEffect(() => {
     mountedRef.current = true;
     camerasApi.config().then((data) => {
@@ -129,7 +128,6 @@ export default function CameraDashboard() {
     return () => { mountedRef.current = false; };
   }, []);
 
-  // Poll camera status
   usePolling(
     useCallback(() => {
       camerasApi.status().then((s) => {
@@ -140,7 +138,6 @@ export default function CameraDashboard() {
     true
   );
 
-  // Poll recording status
   usePolling(
     useCallback(() => {
       recordingApi.status().then((s: any) => {
@@ -185,7 +182,6 @@ export default function CameraDashboard() {
       for (const cfg of cameraConfigs) {
         try { await camerasApi.disconnect(cfg.id); } catch {}
       }
-      // Short pause before reconnecting
       await new Promise((r) => setTimeout(r, 500));
       for (const cfg of cameraConfigs) {
         try { await camerasApi.connect(cfg.id); } catch {}
@@ -217,9 +213,7 @@ export default function CameraDashboard() {
 
   const startPip = useCallback(
     (cameraId: string) => {
-      // Clean up existing PiP
       stopPip();
-
       const imgEl = document.querySelector(
         `img[data-camera-id="${cameraId}"]`
       ) as HTMLImageElement | null;
@@ -231,7 +225,6 @@ export default function CameraDashboard() {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      // Draw frames periodically
       pipIntervalRef.current = setInterval(() => {
         if (imgEl.complete && imgEl.naturalWidth > 0) {
           canvas.width = imgEl.naturalWidth;
@@ -251,17 +244,11 @@ export default function CameraDashboard() {
       video.play().then(() => {
         video
           .requestPictureInPicture()
-          .then(() => {
-            if (mountedRef.current) setPipCamera(cameraId);
-          })
-          .catch(() => {
-            stopPip();
-          });
+          .then(() => { if (mountedRef.current) setPipCamera(cameraId); })
+          .catch(() => { stopPip(); });
       });
 
-      video.addEventListener("leavepictureinpicture", () => {
-        stopPip();
-      });
+      video.addEventListener("leavepictureinpicture", () => { stopPip(); });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
@@ -283,7 +270,6 @@ export default function CameraDashboard() {
     if (mountedRef.current) setPipCamera(null);
   }, []);
 
-  // Cleanup PiP on unmount
   useEffect(() => {
     return () => { stopPip(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -377,227 +363,166 @@ export default function CameraDashboard() {
   );
 
   // ---------------------------------------------------------------------------
-  // Render: Camera card wrapper (used in Grid & Focus)
+  // Render: Persistent stream layer
+  //
+  // ALL cameras are rendered once. Layout transitions only change CSS on the
+  // wrapper divs — CameraFeed components (and their <img> MJPEG connections)
+  // never unmount.
   // ---------------------------------------------------------------------------
 
-  const renderCameraCard = (
-    cfg: CameraConfig,
-    opts?: { large?: boolean; onClick?: () => void }
-  ) => {
-    const status = cameraStatus[cfg.id];
-    const isConnected = status?.status === "connected";
+  const renderStreams = () => {
+    if (cameraConfigs.length === 0) return renderEmptyState();
+
+    const isGrid = layoutMode === "grid";
+    const isFocus = layoutMode === "focus";
+    const isFS = layoutMode === "fullscreen";
+    const sidebarCount = Math.max(1, cameraConfigs.length - 1);
+
+    // Container styles per layout mode
+    const containerClass = [
+      "w-full h-full",
+      isGrid && "grid gap-4 auto-rows-fr",
+      isFocus && "grid gap-4",
+      isFS && "relative group",
+    ].filter(Boolean).join(" ");
+
+    const containerStyle: React.CSSProperties = {};
+    if (isGrid) {
+      containerStyle.gridTemplateColumns = "repeat(auto-fill, minmax(min(400px, 100%), 1fr))";
+    } else if (isFocus) {
+      containerStyle.gridTemplateColumns = cameraConfigs.length > 1 ? "7fr 3fr" : "1fr";
+      containerStyle.gridTemplateRows = `repeat(${sidebarCount}, 1fr)`;
+    }
 
     return (
-      <div
-        key={cfg.id}
-        className={`bg-neutral-900 rounded-2xl border border-white/5 overflow-hidden relative group transition-all duration-200 ease-out ${
-          opts?.large ? "" : "hover:scale-[1.01] hover:shadow-xl"
-        } ${opts?.onClick ? "cursor-pointer" : ""}`}
-        onClick={opts?.onClick}
-      >
-        {isConnected ? (
-          <CameraFeed
-            cameraId={cfg.id}
-            mode="contain"
-            maxStreamWidth={opts?.large ? 1280 : 800}
-            quality={opts?.large ? 90 : 80}
-            showOverlay={true}
-            showFullscreenButton={false}
-            label={cfg.id}
-          />
-        ) : (
-          <div className="w-full h-full min-h-[200px] flex items-center justify-center">
-            <div className="flex flex-col items-center gap-2">
-              <Camera className="w-6 h-6 text-white/15" />
-              <span className="text-white/30 text-xs">{cfg.id}</span>
-              <span className="text-white/20 text-[10px]">
-                {status?.status ?? "disconnected"}
-              </span>
+      <div className={containerClass} style={containerStyle}>
+        {cameraConfigs.map((cfg) => {
+          const isSelected = cfg.id === effectiveSelected;
+          const st = cameraStatus[cfg.id];
+          const isConnected = st?.status === "connected";
+
+          // Wrapper class per layout mode — only CSS changes, never tree structure
+          let wrapperClass: string;
+          let wrapperStyle: React.CSSProperties = {};
+          let onClick: (() => void) | undefined;
+
+          if (isGrid) {
+            wrapperClass =
+              "bg-neutral-900 rounded-2xl border border-white/5 overflow-hidden relative group hover:scale-[1.01] hover:shadow-xl transition-all duration-200 ease-out";
+          } else if (isFocus) {
+            if (isSelected) {
+              wrapperClass =
+                "bg-neutral-900 rounded-2xl border border-white/5 overflow-hidden relative group transition-all duration-200 ease-out";
+              wrapperStyle = { gridColumn: 1, gridRow: `1 / span ${sidebarCount}` };
+            } else {
+              wrapperClass =
+                "bg-neutral-900 rounded-2xl border border-white/5 overflow-hidden relative group cursor-pointer hover:scale-[1.01] hover:shadow-xl transition-all duration-200 ease-out";
+              wrapperStyle = { gridColumn: 2 };
+              onClick = () => setSelectedCamera(cfg.id);
+            }
+          } else {
+            // Fullscreen
+            if (isSelected) {
+              wrapperClass =
+                "absolute inset-0 z-10 bg-neutral-900 rounded-2xl overflow-hidden";
+            } else {
+              // Hidden but stays in DOM — MJPEG connection stays alive
+              wrapperClass =
+                "absolute w-px h-px overflow-hidden opacity-0 pointer-events-none";
+              wrapperStyle = { left: 0, top: 0 };
+            }
+          }
+
+          return (
+            <div key={cfg.id} className={wrapperClass} style={wrapperStyle} onClick={onClick}>
+              {isConnected ? (
+                <CameraFeed
+                  cameraId={cfg.id}
+                  mode="contain"
+                  showOverlay={!(isFS && isSelected)}
+                  label={cfg.id}
+                />
+              ) : (
+                <div className="w-full h-full min-h-[200px] flex items-center justify-center">
+                  <div className="flex flex-col items-center gap-2">
+                    <Camera className="w-6 h-6 text-white/15" />
+                    <span className="text-white/30 text-xs">{cfg.id}</span>
+                    <span className="text-white/20 text-[10px]">
+                      {st?.status ?? "disconnected"}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Recording overlay */}
+              {isRecording && isConnected && (
+                <div className="absolute top-3 right-3 z-30 flex items-center gap-1.5 bg-red-600/80 backdrop-blur-sm rounded-full px-2.5 py-1">
+                  <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+                  <span className="text-white text-[10px] font-bold tracking-wider">REC</span>
+                </div>
+              )}
+
+              {/* PiP button */}
+              {isConnected && (
+                <div className="absolute bottom-3 left-3 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (pipCamera === cfg.id) stopPip();
+                      else startPip(cfg.id);
+                    }}
+                    className={`p-1.5 rounded-full border transition-colors duration-200 ${
+                      pipCamera === cfg.id
+                        ? "bg-emerald-600/80 border-emerald-500/50 text-white"
+                        : "bg-black/50 backdrop-blur-md border-white/10 text-white/70 hover:text-white"
+                    }`}
+                    title={pipCamera === cfg.id ? "Exit PiP" : "Picture-in-Picture"}
+                  >
+                    <PictureInPicture2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Fullscreen-only overlays on selected camera */}
+              {isFS && isSelected && (
+                <>
+                  {/* Bottom overlay: camera name + resolution + counter */}
+                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                    <div className="bg-black/60 backdrop-blur-md rounded-full px-4 py-2 flex items-center gap-3 border border-white/10">
+                      <span className="text-white text-sm font-medium">{cfg.id}</span>
+                      {st?.actual_width && st?.actual_height && (
+                        <span className="text-white/50 font-mono text-xs">
+                          {st.actual_width}x{st.actual_height}
+                        </span>
+                      )}
+                      <span className="text-white/30 text-xs">
+                        {selectedIndex + 1} / {cameraConfigs.length}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Navigation arrows */}
+                  {cameraConfigs.length > 1 && (
+                    <>
+                      <button
+                        onClick={() => cycleCamera(-1)}
+                        className="absolute left-4 top-1/2 -translate-y-1/2 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-3 bg-black/40 hover:bg-black/60 backdrop-blur-md rounded-full border border-white/10 text-white/70 hover:text-white"
+                      >
+                        <ChevronLeft className="w-5 h-5" />
+                      </button>
+                      <button
+                        onClick={() => cycleCamera(1)}
+                        className="absolute right-4 top-1/2 -translate-y-1/2 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-3 bg-black/40 hover:bg-black/60 backdrop-blur-md rounded-full border border-white/10 text-white/70 hover:text-white"
+                      >
+                        <ChevronRight className="w-5 h-5" />
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
             </div>
-          </div>
-        )}
-
-        {/* Recording overlay */}
-        {isRecording && isConnected && (
-          <div className="absolute top-3 right-3 z-30 flex items-center gap-1.5 bg-red-600/80 backdrop-blur-sm rounded-full px-2.5 py-1">
-            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-            <span className="text-white text-[10px] font-bold tracking-wider">
-              REC
-            </span>
-          </div>
-        )}
-
-        {/* PiP button */}
-        {isConnected && (
-          <div className="absolute bottom-3 left-3 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                if (pipCamera === cfg.id) {
-                  stopPip();
-                } else {
-                  startPip(cfg.id);
-                }
-              }}
-              className={`p-1.5 rounded-full border transition-colors duration-200 ${
-                pipCamera === cfg.id
-                  ? "bg-emerald-600/80 border-emerald-500/50 text-white"
-                  : "bg-black/50 backdrop-blur-md border-white/10 text-white/70 hover:text-white"
-              }`}
-              title={pipCamera === cfg.id ? "Exit PiP" : "Picture-in-Picture"}
-            >
-              <PictureInPicture2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ---------------------------------------------------------------------------
-  // Render: Grid layout
-  // ---------------------------------------------------------------------------
-
-  const renderGrid = () => (
-    <div
-      className="grid gap-4 h-full auto-rows-fr"
-      style={{
-        gridTemplateColumns: "repeat(auto-fill, minmax(min(400px, 100%), 1fr))",
-      }}
-    >
-      {cameraConfigs.map((cfg) => renderCameraCard(cfg))}
-    </div>
-  );
-
-  // ---------------------------------------------------------------------------
-  // Render: Focus layout
-  // ---------------------------------------------------------------------------
-
-  const renderFocus = () => {
-    const sidebarCameras = cameraConfigs.filter(
-      (c) => c.id !== effectiveSelected
-    );
-
-    return (
-      <div className="flex gap-4 h-full">
-        {/* Primary (70%) */}
-        <div className="flex-[7] min-w-0">
-          {effectiveSelected &&
-            renderCameraCard(
-              cameraConfigs.find((c) => c.id === effectiveSelected) ??
-                cameraConfigs[0],
-              { large: true }
-            )}
-        </div>
-
-        {/* Sidebar (30%) */}
-        {sidebarCameras.length > 0 && (
-          <div className="flex-[3] min-w-0 flex flex-col gap-3 overflow-y-auto">
-            {sidebarCameras.map((cfg) =>
-              renderCameraCard(cfg, {
-                onClick: () => setSelectedCamera(cfg.id),
-              })
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ---------------------------------------------------------------------------
-  // Render: Fullscreen layout
-  // ---------------------------------------------------------------------------
-
-  const renderFullscreen = () => {
-    const cfg = cameraConfigs[selectedIndex];
-    if (!cfg) return renderEmptyState();
-
-    const status = cameraStatus[cfg.id];
-    const isConnected = status?.status === "connected";
-
-    return (
-      <div className="relative h-full group">
-        {/* Camera feed */}
-        <div className="h-full">
-          {isConnected ? (
-            <CameraFeed
-              cameraId={cfg.id}
-              mode="contain"
-              maxStreamWidth={1280}
-              quality={90}
-              showOverlay={false}
-              showFullscreenButton={false}
-            />
-          ) : (
-            <div className="h-full flex items-center justify-center bg-neutral-900 rounded-2xl">
-              <div className="flex flex-col items-center gap-2">
-                <Camera className="w-8 h-8 text-white/15" />
-                <span className="text-white/30 text-sm">{cfg.id} - Disconnected</span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Recording overlay */}
-        {isRecording && isConnected && (
-          <div className="absolute top-4 right-4 z-30 flex items-center gap-1.5 bg-red-600/80 backdrop-blur-sm rounded-full px-3 py-1.5">
-            <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
-            <span className="text-white text-xs font-bold tracking-wider">REC</span>
-          </div>
-        )}
-
-        {/* Bottom overlay: camera name + resolution */}
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-          <div className="bg-black/60 backdrop-blur-md rounded-full px-4 py-2 flex items-center gap-3 border border-white/10">
-            <span className="text-white text-sm font-medium">{cfg.id}</span>
-            {status?.actual_width && status?.actual_height && (
-              <span className="text-white/50 font-mono text-xs">
-                {status.actual_width}x{status.actual_height}
-              </span>
-            )}
-            <span className="text-white/30 text-xs">
-              {selectedIndex + 1} / {cameraConfigs.length}
-            </span>
-          </div>
-        </div>
-
-        {/* Navigation arrows */}
-        {cameraConfigs.length > 1 && (
-          <>
-            <button
-              onClick={() => cycleCamera(-1)}
-              className="absolute left-4 top-1/2 -translate-y-1/2 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-3 bg-black/40 hover:bg-black/60 backdrop-blur-md rounded-full border border-white/10 text-white/70 hover:text-white"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </button>
-            <button
-              onClick={() => cycleCamera(1)}
-              className="absolute right-4 top-1/2 -translate-y-1/2 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200 p-3 bg-black/40 hover:bg-black/60 backdrop-blur-md rounded-full border border-white/10 text-white/70 hover:text-white"
-            >
-              <ChevronRight className="w-5 h-5" />
-            </button>
-          </>
-        )}
-
-        {/* PiP button */}
-        {isConnected && (
-          <div className="absolute top-4 left-4 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-            <button
-              onClick={() => {
-                if (pipCamera === cfg.id) stopPip();
-                else startPip(cfg.id);
-              }}
-              className={`p-2 rounded-full border transition-colors duration-200 ${
-                pipCamera === cfg.id
-                  ? "bg-emerald-600/80 border-emerald-500/50 text-white"
-                  : "bg-black/40 hover:bg-black/60 backdrop-blur-md border-white/10 text-white/70 hover:text-white"
-              }`}
-              title={pipCamera === cfg.id ? "Exit PiP" : "Picture-in-Picture"}
-            >
-              <PictureInPicture2 className="w-4 h-4" />
-            </button>
-          </div>
-        )}
+          );
+        })}
       </div>
     );
   };
@@ -612,7 +537,6 @@ export default function CameraDashboard() {
         showHealthStrip ? "flex" : "hidden"
       } sm:flex`}
     >
-      {/* Toggle for mobile */}
       <button
         onClick={() => setShowHealthStrip((p) => !p)}
         className="sm:hidden text-white/30 text-[10px] shrink-0"
@@ -726,15 +650,9 @@ export default function CameraDashboard() {
         <CameraLayoutSelector mode={layoutMode} onChange={setLayoutMode} />
       </div>
 
-      {/* Main area */}
-      <main className="flex-1 min-h-0 p-4 overflow-auto">
-        {cameraConfigs.length === 0
-          ? renderEmptyState()
-          : layoutMode === "grid"
-          ? renderGrid()
-          : layoutMode === "focus"
-          ? renderFocus()
-          : renderFullscreen()}
+      {/* Main area — persistent stream layer */}
+      <main className="flex-1 min-h-0 p-4 overflow-hidden">
+        {renderStreams()}
       </main>
 
       {/* Health strip */}

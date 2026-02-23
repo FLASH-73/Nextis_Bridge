@@ -37,6 +37,9 @@ DAMIAO_MOTOR_SPECS = {
         "p_max": 12.5,   # rad — position encoding range
         "v_max": 45.0,   # rad/s — velocity encoding range (was 8.0 = DM4340 WRONG)
         "t_max": 54.0,   # Nm — torque encoding range (was 28.0 = DM4340 WRONG)
+        # EMA smoothing: XL330 leader encoder (4096 steps/rev) produces staircase commands
+        # at 60Hz. 9:1 gear ratio + 35Nm faithfully reproduces every quantization step.
+        "position_smoothing": 0.80,
     },
     # J4340P: Medium torque motor for elbow joints
     "J4340P": {
@@ -50,6 +53,9 @@ DAMIAO_MOTOR_SPECS = {
         "p_max": 12.5,
         "v_max": 40.0,
         "t_max": 28.0,
+        # EMA smoothing: XL330 encoder quantization visible at low speeds.
+        # 6:1 gear ratio less aggressive than J8009P; alpha=0.85 matches J4310.
+        "position_smoothing": 0.85,
     },
     # J4310: Precision motor for wrist joints and gripper
     "J4310": {
@@ -59,7 +65,7 @@ DAMIAO_MOTOR_SPECS = {
         "gear_ratio": 10.0,
         "torque_constant": 0.945,  # Nm/A
         "dm_type": "DM4310",  # Uses DM4310 protocol
-        "torque_limit_percent": 0.30,  # Conservative for initial testing (increase to 0.85 when confident)
+        "torque_limit_percent": 0.70,  # 8.75 Nm — wrist gravity load ~3.8Nm in normal use
         "p_max": 12.5,
         "v_max": 30.0,
         "t_max": 10.0,
@@ -114,7 +120,7 @@ MIT_GAINS = {
 # Per-motor MIT gain overrides (takes priority over per-type MIT_GAINS)
 # Use when identical motor types need different gains due to load/gravity differences.
 MIT_MOTOR_GAINS = {
-    "base":  {"kp": 20.0, "kd": 1.0},  # No gravity load — softer to avoid gear backlash chatter
+    "base":  {"kp": 10.0, "kd": 3.0},  # No gravity load — softer to avoid gear backlash chatter
     "link3": {"kp": 22.0, "kd": 0.7},  # Lower payload than link2 — softer gains
 }
 

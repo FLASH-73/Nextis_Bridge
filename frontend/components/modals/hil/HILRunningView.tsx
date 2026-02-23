@@ -38,8 +38,6 @@ export default function HILRunningView({
                             <div key={cam.id} className="relative w-full h-full overflow-hidden">
                                 <CameraFeed
                                     cameraId={cam.id}
-                                    maxStreamWidth={1280}
-                                    quality={90}
                                     mode="contain"
                                     className="rounded-none border-0"
                                 />

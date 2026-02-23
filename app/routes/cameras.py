@@ -16,6 +16,8 @@ def generate_frames(camera_key: str, max_width: int | None = None, quality: int 
     system = get_state()
     sleep_interval = 1.0 / target_fps
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, quality]
+    last_good_frame = None  # Serve last good frame during brief gaps instead of placeholder
+    first_frame = True
 
     while True:
         frame = None
@@ -24,7 +26,12 @@ def generate_frames(camera_key: str, max_width: int | None = None, quality: int 
         if system.camera_service and camera_key in system.camera_service.cameras:
             cam = system.camera_service.cameras[camera_key]
             try:
-                frame = cam.async_read(blocking=False)  # ZOH pattern: return cached frame immediately
+                if first_frame:
+                    # Blocking read for first frame — ensures we serve a real camera image
+                    # immediately instead of a placeholder (reduces time-to-first-frame)
+                    frame = cam.async_read(blocking=True, timeout_ms=1000)
+                else:
+                    frame = cam.async_read(blocking=False)  # ZOH: cached frame
             except Exception:
                 pass
 
@@ -36,32 +43,20 @@ def generate_frames(camera_key: str, max_width: int | None = None, quality: int 
             except Exception:
                 pass
 
-        # PRIORITY 2: Orchestrator Observation (What the Agent sees) - Fallback
-        if frame is None and system.orchestrator and system.orchestrator.intervention_engine:
-            obs = system.orchestrator.intervention_engine.latest_observation
-            if obs:
-                # Try explicit key then partial match
-                full_key = f"observation.images.{camera_key}"
-                if full_key in obs:
-                    frame = obs[full_key]
-                elif camera_key in obs:
-                    frame = obs[camera_key]
-                else:
-                    for k in obs.keys():
-                        if camera_key in k:
-                            frame = obs[k]
-                            break
-
-        # PRIORITY 3: Snapshot Fallback (always try, even if robot has camera)
-        # Note: If robot's camera thread has device open, snapshot might fail (device busy)
-        # but we still try as a last resort before showing "Waiting..."
-        if frame is None and system.camera_service:
-            snapshot = system.camera_service.capture_snapshot(camera_key)
-            if snapshot is not None:
-                frame = snapshot
-
-        if frame is None:
-            # Yield placeholder matching camera's actual/configured aspect ratio
+        # Use last good frame during brief gaps (avoid flashing placeholder)
+        if frame is not None:
+            # Convert PyTorch tensor to numpy if needed
+            if isinstance(frame, torch.Tensor):
+                frame = frame.permute(1, 2, 0).cpu().numpy() * 255
+                frame = frame.astype("uint8")
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            last_good_frame = frame
+            first_frame = False
+        elif last_good_frame is not None:
+            # Serve last good frame instead of placeholder
+            frame = last_good_frame
+        else:
+            # No frame ever received — show placeholder
             pw, ph = 640, 480
             if system.camera_service:
                 pw, ph = system.camera_service.get_camera_resolution(camera_key)
@@ -69,13 +64,6 @@ def generate_frames(camera_key: str, max_width: int | None = None, quality: int 
             cv2.putText(blank_image, f"Waiting for {camera_key}...", (50, ph // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             frame = blank_image
-        else:
-            # Convert PyTorch tensor to numpy if needed
-            if isinstance(frame, torch.Tensor):
-                frame = frame.permute(1, 2, 0).cpu().numpy() * 255
-                frame = frame.astype("uint8")
-                # RGB to BGR for OpenCV encoding
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         # Downscale for UI preview if max_width is set
         if max_width and frame.shape[1] > max_width:
@@ -83,7 +71,6 @@ def generate_frames(camera_key: str, max_width: int | None = None, quality: int 
             new_h = int(frame.shape[0] * scale)
             frame = cv2.resize(frame, (max_width, new_h), interpolation=cv2.INTER_AREA)
 
-        # Encode to JPEG with explicit quality
         ret, buffer = cv2.imencode('.jpg', frame, encode_params)
         frame_bytes = buffer.tobytes()
 
@@ -239,8 +226,8 @@ def scan_cameras():
                 })
                 active_realsense_serials.add(str(serial))
 
-        # 2. Scan for Available Cameras (ignoring errors on busy ones)
-        available = system.camera_service.scan_cameras(active_ids=list(active_opencv_indices))
+        # 2. Scan for Available Cameras (force=True since user explicitly requested scan)
+        available = system.camera_service.scan_cameras(active_ids=list(active_opencv_indices), force=True)
 
         # 3. Merge (avoid duplicates)
         final_opencv = active_opencv[:]

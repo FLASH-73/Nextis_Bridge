@@ -135,8 +135,7 @@ class SafetyLayer:
 
                     if self.violation_counts.get(motor_name, 0) >= self.VIOLATION_LIMIT:
                         logger.error(f"SAFETY CRITICAL: Damiao {motor_name} overloaded!")
-                        self.emergency_stop(robot)
-                        return False
+                        return False  # Control loop → stop() → homing → disable
                 else:
                     self.violation_counts[motor_name] = 0
 
