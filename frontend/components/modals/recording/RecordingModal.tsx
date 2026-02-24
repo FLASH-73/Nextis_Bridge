@@ -40,12 +40,28 @@ export default function RecordingModal({
         setIsStarting(true);
 
         try {
-            // Map pairing names → follower IDs
+            // Map pairing names → leader + follower IDs
             const { pairings } = await armsApi.listPairings();
-            const followerIds = pairings
-                .filter((p) => selectedPairings.includes(p.name))
-                .map((p) => p.follower_id);
+            const matchedPairings = pairings.filter((p) => selectedPairings.includes(p.name));
+            const followerIds = matchedPairings.map((p) => p.follower_id);
+            // Teleop needs ALL arm IDs (both leaders and followers) to build pairing contexts
+            const activeArms = matchedPairings.flatMap((p) => [p.leader_id, p.follower_id]);
 
+            // 1. Ensure teleop is running (builds pairing contexts needed by recording)
+            //    CRITICAL: Do NOT call start() if already running — a stop→restart
+            //    cycle re-enables motors with full MIT gains against stale position
+            //    error, causing dangerous torque spikes / vibration.
+            const teleopStatus = await teleopApi.status();
+            if (!teleopStatus.running) {
+                const teleopResult = await teleopApi.start({ force: false, active_arms: activeArms });
+                if ((teleopResult as any).status === 'error') {
+                    setError((teleopResult as any).message || 'Failed to start teleop');
+                    setIsStarting(false);
+                    return;
+                }
+            }
+
+            // 2. THEN start recording session (needs pairing contexts from teleop)
             const data = await recordingApi.startSession({
                 repo_id: datasetConfig.repo_id,
                 task: datasetConfig.task,
@@ -54,9 +70,6 @@ export default function RecordingModal({
             });
 
             if (data.status === 'success') {
-                // Start teleop alongside recording
-                await teleopApi.start({ force: false });
-                // Transition to active recording view
                 onSessionStarted?.(datasetConfig.repo_id);
             } else {
                 setError(data.message);

@@ -12,6 +12,13 @@ MODELS_DIR      = PROJECT_ROOT / "models"
 RAW_DATA_DIR    = PROJECT_ROOT / "data" / "raw"
 LEROBOT_SRC     = PROJECT_ROOT / "lerobot" / "src"
 
+# Streaming video encoding (LeRobot v0.4.4+)
+STREAMING_ENCODING_ENABLED = True
+STREAMING_VCODEC = "libsvtav1"                  # "libsvtav1" (best compression), "h264" (less CPU)
+STREAMING_ENCODER_QUEUE_MAXSIZE = 60            # per-camera frame buffer (~2s at 30fps)
+STREAMING_ENCODER_THREADS: int | None = None    # None = codec decides
+FRAME_QUEUE_MAXSIZE = 200                       # backpressure limit for recording _frame_queue
+
 def load_config():
     if not CONFIG_PATH.exists():
         return {}

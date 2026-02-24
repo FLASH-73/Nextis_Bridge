@@ -6,7 +6,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-from app.core.config import DATASETS_DIR
+from app.core.config import (
+    DATASETS_DIR,
+    STREAMING_ENCODING_ENABLED,
+    STREAMING_VCODEC,
+    STREAMING_ENCODER_QUEUE_MAXSIZE,
+    STREAMING_ENCODER_THREADS,
+    FRAME_QUEUE_MAXSIZE,
+)
 
 _DEFAULT_DATASETS_PATH = DATASETS_DIR
 
@@ -14,10 +21,11 @@ _DEFAULT_DATASETS_PATH = DATASETS_DIR
 try:
     from lerobot.utils.robot_utils import precise_sleep
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    from lerobot.datasets.video_utils import VideoEncodingManager
+    from lerobot.datasets.video_utils import VideoEncodingManager, StreamingVideoEncoder
     from lerobot.datasets.utils import build_dataset_frame
     from lerobot.utils.constants import OBS_STR, ACTION
 except ImportError:
+    StreamingVideoEncoder = None
     def precise_sleep(dt):
         time.sleep(max(0, dt))
 
@@ -381,9 +389,16 @@ def recording_capture_loop(svc):
                     if svc._recording_frame_counter == 0:
                         print(f"[REC CAPTURE] Built frame with keys: {list(frame.keys())}")
 
-                    # Queue for async writing
-                    svc._frame_queue.append(frame)
-                    svc._recording_frame_counter += 1
+                    # Queue for async writing (with backpressure)
+                    if len(svc._frame_queue) >= FRAME_QUEUE_MAXSIZE:
+                        if svc._recording_frame_counter % 30 == 0:
+                            logger.warning(
+                                f"[REC CAPTURE] Frame queue full ({len(svc._frame_queue)}/{FRAME_QUEUE_MAXSIZE}), "
+                                f"dropping frame — encoder may be falling behind"
+                            )
+                    else:
+                        svc._frame_queue.append(frame)
+                        svc._recording_frame_counter += 1
 
                     if svc._recording_frame_counter == 1:
                         print(f"[REC CAPTURE] FIRST FRAME captured and queued!")
@@ -464,6 +479,10 @@ def start_recording_session(
     selected_cameras: list[str] | None = None,
     selected_pairing_ids: list[str] | None = None,
     selected_arms: list[str] | None = None,
+    streaming_encoding: bool | None = None,
+    vcodec: str | None = None,
+    encoder_queue_maxsize: int | None = None,
+    encoder_threads: int | None = None,
 ):
     """Initializes a new LeRobotDataset for recording.
 
@@ -477,6 +496,10 @@ def start_recording_session(
         selected_pairing_ids: Follower arm IDs identifying pairings to record (None = all)
         selected_arms: Legacy arm prefixes ("left", "right") — used when
             selected_pairing_ids is not provided
+        streaming_encoding: Enable real-time MP4 encoding (None = use config default)
+        vcodec: Video codec (None = use config default)
+        encoder_queue_maxsize: Per-camera encoder queue size (None = use config default)
+        encoder_threads: Threads per encoder (None = use config default)
     """
     from app.state import state
 
@@ -514,6 +537,19 @@ def start_recording_session(
             cam = state.camera_service.cameras.get(cam_id)
             if not cam:
                 logger.warning(f"Camera '{cam_id}' not connected — may miss frames")
+
+    # Resolve streaming encoding defaults from config
+    use_streaming = streaming_encoding if streaming_encoding is not None else STREAMING_ENCODING_ENABLED
+    effective_vcodec = vcodec or STREAMING_VCODEC
+    effective_queue_maxsize = encoder_queue_maxsize if encoder_queue_maxsize is not None else STREAMING_ENCODER_QUEUE_MAXSIZE
+    effective_encoder_threads = encoder_threads if encoder_threads is not None else STREAMING_ENCODER_THREADS
+
+    # Guard: streaming requires StreamingVideoEncoder to be available
+    if use_streaming and StreamingVideoEncoder is None:
+        logger.warning("StreamingVideoEncoder not available (lerobot too old?), falling back to batch encoding")
+        use_streaming = False
+
+    print(f"[START_SESSION] Streaming encoding: {use_streaming} (vcodec={effective_vcodec})")
 
     # Set default root to app datasets directory
     if root is None:
@@ -620,6 +656,10 @@ def start_recording_session(
                 repo_id=repo_id,
                 root=dataset_dir,
                 local_files_only=True,
+                streaming_encoding=use_streaming,
+                vcodec=effective_vcodec,
+                encoder_queue_maxsize=effective_queue_maxsize,
+                encoder_threads=effective_encoder_threads,
             )
         else:
             logger.info("Creating new Dataset...")
@@ -630,9 +670,14 @@ def start_recording_session(
                 robot_type=robot_type,
                 features=features,
                 use_videos=True,
+                streaming_encoding=use_streaming,
+                vcodec=effective_vcodec,
+                encoder_queue_maxsize=effective_queue_maxsize,
+                encoder_threads=effective_encoder_threads,
             )
 
         svc.dataset.meta.metadata_buffer_size = 1
+        svc._streaming_encoding = use_streaming
         print(f"[START_SESSION] Dataset created/loaded successfully")
 
         # CRITICAL: Set episode_count from actual dataset state
@@ -641,15 +686,20 @@ def start_recording_session(
         svc.episode_count = svc.dataset.meta.total_episodes
         print(f"[START_SESSION] Episode count set to {svc.episode_count} (from dataset)")
 
-        # 3. Start Video Encoding
-        if not svc.video_manager:
-            svc.video_manager = VideoEncodingManager(svc.dataset)
-            svc.video_manager.__enter__()
-        print("[START_SESSION] Video manager started")
+        # 3. Start Video Encoding / Image Writer
+        if use_streaming:
+            # Streaming mode: encoder is internal to LeRobotDataset, no
+            # VideoEncodingManager or PNG image writer needed
+            print("[START_SESSION] Streaming encoding active — skipping VideoEncodingManager and image writer")
+        else:
+            # Batch mode: use VideoEncodingManager + PNG image writer
+            if not svc.video_manager:
+                svc.video_manager = VideoEncodingManager(svc.dataset)
+                svc.video_manager.__enter__()
+            print("[START_SESSION] Video manager started (batch mode)")
 
-        # 4. Start Image Writer (Threads)
-        svc.dataset.start_image_writer(num_processes=0, num_threads=4)
-        print("[START_SESSION] Image writer started")
+            svc.dataset.start_image_writer(num_processes=0, num_threads=4)
+            print("[START_SESSION] Image writer started (batch mode)")
 
         svc.dataset_config = {"repo_id": repo_id, "task": task}
         svc.session_active = True
@@ -698,6 +748,19 @@ def stop_recording_session(svc):
             print("[STOP_SESSION] Auto-save completed successfully")
         except Exception as e:
             print(f"[STOP_SESSION] WARNING: Auto-save failed: {e}")
+    elif (svc.dataset and hasattr(svc.dataset, 'episode_buffer')
+          and svc.dataset.episode_buffer
+          and svc.dataset.episode_buffer.get('size', 0) > 0):
+        # Episode buffer has unsaved frames (e.g. E-STOP cleared recording_active
+        # but frames were already buffered via add_frame)
+        buffer_size = svc.dataset.episode_buffer.get('size', 0)
+        print(f"[STOP_SESSION] Found {buffer_size} unsaved frames in episode buffer — emergency saving...")
+        try:
+            svc.dataset.save_episode()
+            svc.episode_count += 1
+            print(f"[STOP_SESSION] Emergency save completed (episode {svc.episode_count})")
+        except Exception as e:
+            print(f"[STOP_SESSION] WARNING: Emergency save failed: {e}")
 
     print("[STOP_SESSION] Stopping Recording Session...")
     svc.session_active = False
@@ -747,11 +810,14 @@ def stop_recording_session(svc):
 
                 print("[STOP_SESSION] Dataset finalized")
 
-                if svc.video_manager:
+                if getattr(svc, '_streaming_encoding', False):
+                    print("[STOP_SESSION] Streaming mode — no VideoEncodingManager to close")
+                elif svc.video_manager:
                     svc.video_manager.__exit__(None, None, None)
                     svc.video_manager = None
-                    print("[STOP_SESSION] Video manager closed")
+                    print("[STOP_SESSION] Video manager closed (batch mode)")
 
+                svc._streaming_encoding = False
                 svc.dataset = None
                 print("[STOP_SESSION] SUCCESS! Session Stopped and Saved!")
         except Exception as e:

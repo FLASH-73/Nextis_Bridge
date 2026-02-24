@@ -140,7 +140,7 @@ class TeleoperationService:
         self._recording_skip_frames = max(1, self.frequency // self.recording_fps)  # Skip every 2nd frame
 
         # Async frame writing queue
-        self._frame_queue = deque(maxlen=100)
+        self._frame_queue = deque()  # explicit backpressure in recording_capture_loop
         self._frame_writer_thread = None
         self._frame_writer_stop = threading.Event()
 
@@ -253,8 +253,8 @@ class TeleoperationService:
             self._homing_thread.join(timeout=2.0)
 
         if self.is_running:
-            logger.info("Teleop already running, stopping first before restart...")
-            self.stop()
+            logger.info("Teleop already running — skipping redundant start")
+            return
 
         if not self.robot and not (self.arm_registry and active_arms):
              raise Exception("Robot not connected and no arm registry arms selected")
@@ -627,11 +627,13 @@ class TeleoperationService:
         selected_cameras: list[str] | None = None,
         selected_pairing_ids: list[str] | None = None,
         selected_arms: list[str] | None = None,
+        **kwargs,
     ) -> dict:
         from app.core.teleop.recording import start_recording_session
         return start_recording_session(
             self, repo_id, task, fps, root,
             selected_cameras, selected_pairing_ids, selected_arms,
+            **kwargs,
         )
 
     def stop_recording_session(self) -> dict:

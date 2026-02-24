@@ -289,7 +289,8 @@ def stop_episode(svc):
                 # Note: task is already included in each frame, no need to pass to save_episode
                 current_dataset.save_episode()
                 save_duration = time.time() - save_start
-                print(f"[STOP_EPISODE] save_episode() completed in {save_duration:.1f}s")
+                mode_str = "streaming" if getattr(svc, '_streaming_encoding', False) else "batch"
+                print(f"[STOP_EPISODE] save_episode() completed in {save_duration:.1f}s (mode={mode_str})")
                 # Log state AFTER save
                 print(f"[STOP_EPISODE] AFTER save: meta.total_episodes={current_dataset.meta.total_episodes}")
                 svc.episode_count += 1

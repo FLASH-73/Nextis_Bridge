@@ -81,6 +81,11 @@ async def start_recording_session(request: Request):
     selected_cameras = data.get("selected_cameras")        # list of camera IDs or None (all)
     selected_pairing_ids = data.get("selected_pairing_ids")  # list of follower arm IDs or None (all)
     selected_arms = data.get("selected_arms")              # legacy: list of arm prefixes or None (all)
+    # Streaming encoding overrides (None = use config defaults)
+    streaming_encoding = data.get("streaming_encoding")      # bool or None
+    vcodec = data.get("vcodec")                              # str or None
+    encoder_queue_maxsize = data.get("encoder_queue_maxsize") # int or None
+    encoder_threads = data.get("encoder_threads")            # int or None
     print(f"    repo_id={repo_id}, task={task}, cameras={selected_cameras}, pairings={selected_pairing_ids}, arms={selected_arms}")
     _recording_logger.info(f"  repo_id={repo_id}, task={task}, cameras={selected_cameras}, pairings={selected_pairing_ids}, arms={selected_arms}")
 
@@ -101,6 +106,10 @@ async def start_recording_session(request: Request):
             selected_cameras=selected_cameras,
             selected_pairing_ids=selected_pairing_ids,
             selected_arms=selected_arms,
+            streaming_encoding=streaming_encoding,
+            vcodec=vcodec,
+            encoder_queue_maxsize=encoder_queue_maxsize,
+            encoder_threads=encoder_threads,
         )
         episode_count = system.teleop_service.episode_count
         print(f"    SUCCESS: Session started (episode_count={episode_count})")
