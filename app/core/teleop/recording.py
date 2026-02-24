@@ -595,6 +595,21 @@ def start_recording_session(
         else:
             raise Exception("No robot or pairing contexts available — cannot record")
 
+        # --- Inject CameraService cameras into observation features ---
+        # CameraService cameras are independent of robot config (which has cameras={}),
+        # but must be included in the dataset schema for video recording to work.
+        if state.camera_service and state.camera_service.cameras:
+            cameras_to_include = selected_cameras or list(state.camera_service.cameras.keys())
+            for cam_key in cameras_to_include:
+                cam = state.camera_service.cameras.get(cam_key)
+                if cam and hasattr(cam, 'async_read'):
+                    test_frame = cam.async_read(blocking=False)
+                    if test_frame is not None:
+                        raw_obs_features[cam_key] = test_frame.shape  # e.g. (480, 640, 3)
+                        print(f"[START_SESSION] Added camera feature: {cam_key} shape={test_frame.shape}")
+                    else:
+                        logger.warning(f"Camera '{cam_key}' has no cached frame — skipping feature")
+
         # Use LeRobot Helpers to construct correct feature dicts
         from lerobot.datasets.utils import combine_feature_dicts, hw_to_dataset_features
 

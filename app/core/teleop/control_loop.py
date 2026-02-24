@@ -4,6 +4,7 @@ import numpy as np
 
 from app.core.teleop.pairing import PairingContext
 from app.core.teleop.observation import update_history
+from lerobot.robots.damiao_follower.damiao_follower import map_range
 
 logger = logging.getLogger(__name__)
 
@@ -395,41 +396,56 @@ def teleop_loop(svc, ctx: PairingContext):
                 # position can give different encoder values.
                 if ctx.active_robot:
                     if svc.recording_active:
-                        # Only read follower positions when recording — needed for
-                        # accurate dataset frames. For Damiao (CAN), this costs ~14ms
-                        # per loop (7 motors × 2ms each), so skip when not recording.
-                        follower_obs = None
-
-                        # Retry loop for transient serial communication errors
-                        for attempt in range(3):  # Up to 3 attempts
-                            try:
-                                follower_obs = ctx.active_robot.get_observation()
-                                break  # Success, exit retry loop
-                            except (OSError, ConnectionError) as e:
-                                error_str = str(e)
-                                if "Incorrect status packet" in error_str or "Port is in use" in error_str:
-                                    if attempt < 2:  # Not the last attempt
-                                        time.sleep(0.005)  # 5ms backoff
-                                        continue
-                                    else:
-                                        # Log only on final failure (rate-limited)
-                                        if loop_count % 60 == 0:
-                                            logger.warning(f"Motor read failed after 3 attempts: {e}")
-                                else:
-                                    # Non-transient error, don't retry
-                                    logger.error(f"Motor read error: {e}")
-                                    break
-
-                        # Process observation (whether from retry success or previous cache)
-                        if follower_obs:
-                            follower_motors = {k: v for k, v in follower_obs.items() if '.pos' in k}
-                            if follower_motors:
+                        if ctx.has_damiao_follower:
+                            # Damiao: use MIT response cache (zero CAN overhead,
+                            # no torque disruption from zero-torque probes).
+                            cached = ctx.active_robot.get_cached_positions()
+                            if cached:
+                                follower_motors = {}
+                                for k, v in cached.items():
+                                    if k == "gripper":
+                                        v = map_range(
+                                            v,
+                                            ctx.active_robot.gripper_open_pos,
+                                            ctx.active_robot.gripper_closed_pos,
+                                            0.0, 1.0,
+                                        )
+                                    follower_motors[f"{k}.pos"] = v
                                 with svc._action_lock:
                                     svc._latest_leader_action = follower_motors.copy()
-                        elif leader_action:
-                            # Fallback to leader action if all retries failed
-                            with svc._action_lock:
-                                svc._latest_leader_action = leader_action.copy()
+                            elif leader_action:
+                                with svc._action_lock:
+                                    svc._latest_leader_action = leader_action.copy()
+                        else:
+                            # Non-Damiao (Feetech/Dynamixel): sync_read is passive,
+                            # safe to call get_observation() with retry.
+                            follower_obs = None
+
+                            for attempt in range(3):  # Up to 3 attempts
+                                try:
+                                    follower_obs = ctx.active_robot.get_observation()
+                                    break  # Success, exit retry loop
+                                except (OSError, ConnectionError) as e:
+                                    error_str = str(e)
+                                    if "Incorrect status packet" in error_str or "Port is in use" in error_str:
+                                        if attempt < 2:  # Not the last attempt
+                                            time.sleep(0.005)  # 5ms backoff
+                                            continue
+                                        else:
+                                            if loop_count % 60 == 0:
+                                                logger.warning(f"Motor read failed after 3 attempts: {e}")
+                                    else:
+                                        logger.error(f"Motor read error: {e}")
+                                        break
+
+                            if follower_obs:
+                                follower_motors = {k: v for k, v in follower_obs.items() if '.pos' in k}
+                                if follower_motors:
+                                    with svc._action_lock:
+                                        svc._latest_leader_action = follower_motors.copy()
+                            elif leader_action:
+                                with svc._action_lock:
+                                    svc._latest_leader_action = leader_action.copy()
                     elif leader_action:
                         # Not recording: use leader action directly as cached action
                         # (no need to read follower positions over CAN)

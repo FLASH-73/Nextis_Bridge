@@ -139,7 +139,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
-datasets/
+/datasets/
 frontend/node_modules/
 training/outputs/
 __pycache__/

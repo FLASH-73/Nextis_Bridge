@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import RecordingBottomBar from "./RecordingBottomBar";
 import RecordingSidePanel from "./RecordingSidePanel";
-import { recordingApi, systemApi } from "../../../lib/api";
+import CameraFeed from "../../ui/CameraFeed";
+import { recordingApi, systemApi, camerasApi } from "../../../lib/api";
 import { usePolling } from "../../../hooks/usePolling";
-import type { RecordingStatus, EpisodeRecord } from "../../../lib/api/types";
+import type { RecordingStatus, EpisodeRecord, CameraConfig } from "../../../lib/api/types";
 
 interface RecordingActiveViewProps {
   onSessionEnded: () => void;
@@ -23,6 +24,16 @@ export default function RecordingActiveView({
   const [episodeStartTime, setEpisodeStartTime] = useState<number | null>(null);
   const [episodeHistory, setEpisodeHistory] = useState<EpisodeRecord[]>([]);
   const [isBusy, setIsBusy] = useState(false);
+  const [cameras, setCameras] = useState<CameraConfig[]>([]);
+
+  // Fetch available cameras on mount
+  useEffect(() => {
+    let cancelled = false;
+    camerasApi.config().then((cfg) => {
+      if (!cancelled) setCameras(cfg);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   // Track previous episode_active to detect transitions
   const prevEpisodeActive = useRef(false);
@@ -173,8 +184,38 @@ export default function RecordingActiveView({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleStartEpisode, handleSaveEpisode, handleDiscardEpisode]);
 
+  const gridCols =
+    cameras.length <= 1 ? "grid-cols-1" :
+    cameras.length <= 4 ? "grid-cols-2" :
+    "grid-cols-3";
+
   return (
     <>
+      {/* Full-screen camera grid */}
+      <div
+        className={`fixed inset-0 z-30 bg-black pb-[48px] transition-all duration-200 ${
+          sidePanelOpen ? "pr-[300px]" : "pr-0"
+        }`}
+      >
+        {cameras.length === 0 ? (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-zinc-500 text-sm">No cameras connected</p>
+          </div>
+        ) : (
+          <div className={`grid ${gridCols} gap-2 p-2 h-full place-content-center`}>
+            {cameras.map((cam) => (
+              <div key={cam.id} className="aspect-video rounded-lg overflow-hidden bg-zinc-900 w-full">
+                <CameraFeed
+                  cameraId={cam.id}
+                  showOverlay={true}
+                  mode="contain"
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <RecordingBottomBar
         episodeActive={status.episode_active}
         episodeCount={status.episode_count}

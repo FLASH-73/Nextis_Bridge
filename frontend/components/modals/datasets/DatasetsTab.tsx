@@ -285,7 +285,7 @@ export default function DatasetsTab({ datasets, fetchDatasets }: DatasetsTabProp
             </div>
 
             {/* Main View */}
-            <div className="flex-1 flex flex-col bg-white/50 dark:bg-zinc-900/50 relative">
+            <div className="flex-1 flex flex-col overflow-hidden bg-white/50 dark:bg-zinc-900/50 relative">
                 {episodeData ? (
                     <EpisodeViewer episodeData={episodeData} onDeleteEpisode={deleteEpisode} />
                 ) : (

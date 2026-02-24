@@ -203,6 +203,9 @@ class DatasetService:
                     # Get action columns
                     if "action" in chunk_df.columns:
                         actions = [x.tolist() if hasattr(x, 'tolist') else list(x) for x in chunk_df["action"].values]
+                        logger.info(f"Loaded {len(actions)} actions for episode {episode_index} (dim={len(actions[0]) if actions else 'N/A'})")
+                    else:
+                        logger.warning(f"No 'action' column in data for episode {episode_index}. Columns: {list(chunk_df.columns)}")
 
                     # Get timestamps
                     if "timestamp" in chunk_df.columns:
