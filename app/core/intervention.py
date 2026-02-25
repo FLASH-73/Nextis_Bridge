@@ -1,26 +1,29 @@
-import time
 import threading
+import time
+
 import numpy as np
-from app.core.recorder import DataRecorder
+
 from app.core.config import load_config
+from app.core.recorder import DataRecorder
+
 
 class InterventionEngine:
     def __init__(self, robot, recorder: DataRecorder, robot_lock=None):
         self.robot = robot
         self.recorder = recorder
         self.robot_lock = robot_lock
-        
+
         # CONFIGURATION
         config = load_config()
         # You might want to add these specific params to settings.yaml later
         self.MOVE_THRESHOLD = config.get("intervention", {}).get("move_threshold", 0.05)
         self.IDLE_TIMEOUT = config.get("intervention", {}).get("idle_timeout", 2.0)
-        
+
         # STATE
         self.is_human_controlling = False
         self.last_human_move_time = time.time()
         self.is_running = False
-        
+
         # Cache for video streaming
         self.latest_observation = {}
 
@@ -40,24 +43,24 @@ class InterventionEngine:
                     observation = self.robot.get_observation()
             else:
                 observation = self.robot.get_observation()
-                
+
             self.latest_observation = observation # Update cache
-            
+
             max_vel = 0.0
-            
+
             # Check all potential velocity keys
             keys_to_check = [
-                "observation.velocity", 
-                "observation.velocity_left", 
+                "observation.velocity",
+                "observation.velocity_left",
                 "observation.velocity_right"
             ]
-            
+
             for key in keys_to_check:
                 if key in observation:
                     val = np.linalg.norm(observation[key])
                     if val > max_vel:
                         max_vel = val
-            
+
             return max_vel
 
         except Exception as e:
@@ -99,16 +102,16 @@ class InterventionEngine:
             # 1. SENSE
             human_velocity = self.get_leader_velocity()
             # self.latest_observation is updated in get_leader_velocity
-            
+
             # 2. DECIDE
             if human_velocity > self.MOVE_THRESHOLD:
                 if not self.is_human_controlling:
                     print("⚠️ HUMAN OVERRIDE ACTIVE - Recording Started")
                     self.is_human_controlling = True
                     self.recorder.start_new_episode("intervention_correction")
-                
+
                 self.last_human_move_time = time.time()
-            
+
             elif (time.time() - self.last_human_move_time) > self.IDLE_TIMEOUT:
                 if self.is_human_controlling:
                     print("🤖 Human stopped. Stopping recording & Handing control back to AI")
@@ -117,7 +120,7 @@ class InterventionEngine:
 
             # 3. RECORD (If Human Controlling OR External Recording)
             should_record = self.is_human_controlling or getattr(self, 'is_recording_externally', False)
-            
+
             if should_record and self.robot.is_connected:
                 # Capture what the human (or robot) is doing
                 try:
@@ -130,13 +133,13 @@ class InterventionEngine:
                         # or we might need to implement this properly later.
                         # For now, let's just use observation to prevent crash
                         action = self.robot.get_observation()
-                    
+
                     # Ensure latest_observation is populated
                     if not self.latest_observation:
                          self.latest_observation = self.robot.get_observation()
 
                     self.recorder.save_frame(self.latest_observation, action)
-                except Exception as e:
+                except Exception:
                     # print(f"Recording error: {e}") # Reduce spam
                     pass
 
@@ -144,7 +147,7 @@ class InterventionEngine:
             if not self.is_human_controlling:
                 # Logic to run AI inference would go here
                 pass
-            
+
             time.sleep(1.0 / 30.0) # 30 Hz loop
 
 if __name__ == "__main__":

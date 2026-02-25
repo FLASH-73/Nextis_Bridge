@@ -1,21 +1,23 @@
-import time
 import threading
-from typing import List, Dict
+import time
+from typing import Dict, List
+
 from app.core.intervention import InterventionEngine
 from app.core.recorder import DataRecorder
+
 
 class TaskOrchestrator:
     def __init__(self, robot, recorder: DataRecorder, robot_lock=None):
         self.robot = robot
         self.recorder = recorder
         self.intervention_engine = InterventionEngine(robot, recorder, robot_lock=robot_lock)
-        
+
         self.task_chain = []
         self.current_task_index = 0
         self.models = {} # Cache for loaded models
         self.active_policy = None
         self.is_running = False
-        
+
         # Execution State
         self.is_executing_plan = False
         self.current_plan = []
@@ -51,8 +53,8 @@ class TaskOrchestrator:
         """
         print(f"Deploying policy from: {checkpoint_path}")
 
-        from pathlib import Path
         import json
+        from pathlib import Path
 
         checkpoint = Path(checkpoint_path)
         if not checkpoint.exists():
@@ -89,7 +91,7 @@ class TaskOrchestrator:
     def start(self):
         self.is_running = True
         self.intervention_engine.start() # Start monitoring for human input
-        
+
         # Start the main inference loop in a separate thread
         self.inference_thread = threading.Thread(target=self._inference_loop)
         self.inference_thread.start()
@@ -110,13 +112,13 @@ class TaskOrchestrator:
         self.current_plan = plan
         self.current_task_index = 0
         self.is_executing_plan = True
-        
+
         # Parse first task
         if self.current_plan:
             first_task = self.current_plan[0].get("task")
             self.active_policy = self.load_model_for_task(first_task)
             self.task_start_time = time.time()
-            
+
             # Start Recording
             plan_desc = f"execution_{int(time.time())}"
             self.intervention_engine.start_recording(plan_desc)
@@ -139,12 +141,12 @@ class TaskOrchestrator:
             if self.is_executing_plan:
                 # Check for Task Completion (Mocked by time for now)
                 elapsed = time.time() - self.task_start_time
-                
+
                 if elapsed > self.TASK_DURATION:
                     # Task Complete
                     print(f"Task {self.current_task_index} Complete.")
                     self.current_task_index += 1
-                    
+
                     if self.current_task_index < len(self.current_plan):
                         # Load Next Task
                         next_step = self.current_plan[self.current_task_index]
@@ -166,30 +168,30 @@ class TaskOrchestrator:
                         # obs = self.robot.get_observation()
                         # action = self.active_policy.select_action(obs)
                         # self.robot.send_action(action)
-                        
+
                         # Record Autonomous Frame (Success Data)
                         # We use the intervention engine's recorder, but mark it as autonomous?
                         # For now, InterventionEngine stops recording when NOT human controlling unless we force it.
                         # We forced it in execute_plan via start_recording.
-                        
+
                         # We need to explicitly record frame here because InterventionEngine loop
                         # mainly checks for Human velocity.
-                        
+
                         if hasattr(self.intervention_engine, 'is_recording_externally') and self.intervention_engine.is_recording_externally:
                              # Capture observation/action for training
                              obs = self.robot.get_observation()
                              # active_policy would give action, here we mock
-                             action = getattr(self.robot, 'mock_action', None) 
-                             # If robot is real, we need real action. 
+                             action = getattr(self.robot, 'mock_action', None)
+                             # If robot is real, we need real action.
                              # For now, let's just record the state as 'action' (holding position) if no policy output
                              if action is None:
                                  # Use current joint positions as action (holding)
                                  action = obs.get("observation.state", [])
-                             
+
                              self.recorder.save_frame(obs, action)
 
-                    except Exception as e:
+                    except Exception:
                         # print(f"Inference Error: {e}")
                         pass
-            
+
             time.sleep(1.0 / 30.0) # 30Hz Control Loop

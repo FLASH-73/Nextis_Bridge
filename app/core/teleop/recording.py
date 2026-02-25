@@ -1,29 +1,30 @@
-import time
-import threading
 import logging
+import threading
+import time
 from pathlib import Path
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-from app.core.config import (
+from app.core.config import (  # noqa: E402
     DATASETS_DIR,
-    STREAMING_ENCODING_ENABLED,
-    STREAMING_VCODEC,
+    FRAME_QUEUE_MAXSIZE,
     STREAMING_ENCODER_QUEUE_MAXSIZE,
     STREAMING_ENCODER_THREADS,
-    FRAME_QUEUE_MAXSIZE,
+    STREAMING_ENCODING_ENABLED,
+    STREAMING_VCODEC,
 )
 
 _DEFAULT_DATASETS_PATH = DATASETS_DIR
 
 # Conditional lerobot imports
 try:
-    from lerobot.utils.robot_utils import precise_sleep
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    from lerobot.datasets.video_utils import VideoEncodingManager, StreamingVideoEncoder
     from lerobot.datasets.utils import build_dataset_frame
-    from lerobot.utils.constants import OBS_STR, ACTION
+    from lerobot.datasets.video_utils import StreamingVideoEncoder, VideoEncodingManager
+    from lerobot.utils.constants import ACTION, OBS_STR
+    from lerobot.utils.robot_utils import precise_sleep
 except ImportError:
     StreamingVideoEncoder = None
     def precise_sleep(dt):
@@ -203,7 +204,7 @@ def frame_writer_loop(svc):
                     svc.dataset.add_frame(frame)
                     written_count += 1
                     if written_count == 1:
-                        print(f"[FRAME WRITER] FIRST FRAME added to dataset buffer!")
+                        print("[FRAME WRITER] FIRST FRAME added to dataset buffer!")
                         # Log buffer size to confirm it's working
                         if hasattr(svc.dataset, 'episode_buffer'):
                             buf_size = svc.dataset.episode_buffer.get('size', 0)
@@ -282,7 +283,7 @@ def recording_capture_loop(svc):
             # Track when recording actually starts
             if episode_start_time is None:
                 episode_start_time = time.perf_counter()
-                print(f"[REC CAPTURE] Episode recording started at wall-clock t=0")
+                print("[REC CAPTURE] Episode recording started at wall-clock t=0")
                 print(f"[REC CAPTURE] Target: {svc.recording_fps}fps ({target_dt*1000:.1f}ms per frame)")
 
             try:
@@ -401,7 +402,7 @@ def recording_capture_loop(svc):
                         svc._recording_frame_counter += 1
 
                     if svc._recording_frame_counter == 1:
-                        print(f"[REC CAPTURE] FIRST FRAME captured and queued!")
+                        print("[REC CAPTURE] FIRST FRAME captured and queued!")
                     elif svc._recording_frame_counter % 30 == 0:
                         wall_elapsed = time.perf_counter() - episode_start_time
                         actual_fps = svc._recording_frame_counter / wall_elapsed if wall_elapsed > 0 else 0
@@ -693,7 +694,7 @@ def start_recording_session(
 
         svc.dataset.meta.metadata_buffer_size = 1
         svc._streaming_encoding = use_streaming
-        print(f"[START_SESSION] Dataset created/loaded successfully")
+        print("[START_SESSION] Dataset created/loaded successfully")
 
         # CRITICAL: Set episode_count from actual dataset state
         # For new dataset: total_episodes = 0
@@ -745,7 +746,7 @@ def start_recording_session(
 def stop_recording_session(svc):
     """Finalizes the LeRobotDataset."""
     print("=" * 60)
-    print(f"[STOP_SESSION] Called!")
+    print("[STOP_SESSION] Called!")
     print(f"  session_active: {svc.session_active}")
     print(f"  dataset: {svc.dataset is not None}")
     print(f"  episode_saving: {svc._episode_saving}")

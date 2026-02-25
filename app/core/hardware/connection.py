@@ -7,7 +7,7 @@ import logging
 from typing import Any, Optional
 
 from app.core.config import CALIBRATION_DIR
-from app.core.hardware.types import ArmDefinition, MotorType, ArmRole
+from app.core.hardware.types import ArmDefinition, ArmRole, MotorType
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def create_arm_instance(arm: ArmDefinition) -> Optional[Any]:
             return robot
         else:
             # Damiao leader not yet implemented
-            logger.warning(f"Damiao leader arms not yet supported")
+            logger.warning("Damiao leader arms not yet supported")
             return None
 
     elif arm.motor_type in [MotorType.DYNAMIXEL_XL330, MotorType.DYNAMIXEL_XL430]:
@@ -79,7 +79,7 @@ def create_arm_instance(arm: ArmDefinition) -> Optional[Any]:
             leader.connect(calibrate=False)
             return leader
         else:
-            logger.warning(f"Dynamixel follower arms not typical use case")
+            logger.warning("Dynamixel follower arms not typical use case")
             return None
 
     logger.warning(f"Unknown motor type: {arm.motor_type}")

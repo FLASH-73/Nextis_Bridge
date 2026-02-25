@@ -1,14 +1,14 @@
-import os
-import sys
 import json
-import re
 import logging
+import os
+import re
 import subprocess
+import sys
 import threading
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
-from .types import TrainingJob, JobStatus, PolicyType, _PROJECT_ROOT
+from .types import _PROJECT_ROOT, JobStatus, PolicyType, TrainingJob
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +264,7 @@ class CommandMixin:
             f"--num_workers={config.get('num_workers', 4)}",
             f"--save_freq={config.get('save_freq', 20000)}",
             f"--eval_freq={config.get('eval_freq', 20000)}",
-            f"--log_freq=200",
+            "--log_freq=200",
             f"--output_dir={job.output_dir}",
         ])
 

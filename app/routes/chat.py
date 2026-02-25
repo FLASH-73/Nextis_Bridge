@@ -1,8 +1,9 @@
-import os
 import json
+import os
 
-from fastapi import APIRouter, Request, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
+
 from app.dependencies import get_state
 
 router = APIRouter(tags=["chat"])
@@ -36,7 +37,7 @@ async def chat_endpoint(request: Request):
     # Lazy-load planner on first use
     if system.planner is None:
         try:
-            from app.core.planner import LocalPlanner, GeminiPlanner
+            from app.core.planner import GeminiPlanner, LocalPlanner
             gemini_key = os.getenv("GEMINI_API_KEY")
             if gemini_key and gemini_key.strip():
                 print("Lazy-loading GeminiPlanner...")

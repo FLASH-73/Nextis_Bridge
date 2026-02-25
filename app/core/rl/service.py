@@ -29,7 +29,7 @@ from queue import Empty
 import numpy as np
 import torch
 
-from .types import RLConfig, RLTrainingState, _APP_ROOT, _DEFAULT_MODELS_PATH, _DEFAULT_DATASETS_PATH
+from .types import _APP_ROOT, _DEFAULT_DATASETS_PATH, _DEFAULT_MODELS_PATH, RLConfig, RLTrainingState
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class RLService:
 
         elif self.config.reward_source == "gvl":
             if self.gvl_reward_svc is None:
-                from app.core.rl.rewards.gvl import GVLRewardService, GVLConfig
+                from app.core.rl.rewards.gvl import GVLConfig, GVLRewardService
                 gvl_config = GVLConfig(
                     task_description=self.config.task_description,
                     query_interval=self.config.gvl_query_interval,
@@ -302,9 +302,9 @@ class RLService:
 
     def _init_policy(self):
         """Initialize SAC policy."""
+        from lerobot.configs.types import FeatureType, PolicyFeature
         from lerobot.policies.sac.configuration_sac import SACConfig
         from lerobot.policies.sac.modeling_sac import SACPolicy
-        from lerobot.configs.types import FeatureType, PolicyFeature
 
         # Build input/output features from environment
         input_features = {

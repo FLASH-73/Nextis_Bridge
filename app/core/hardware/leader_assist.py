@@ -1,8 +1,9 @@
-import numpy as np
-import logging
 import json
-import os
+import logging
 import math
+import os
+
+import numpy as np
 
 from app.core.config import GRAVITY_DIR
 
@@ -55,11 +56,16 @@ class LeaderAssistService:
         self.max_pwm = 400 # Cap at 40% (Safety First)
 
     def update_gains(self, k_gravity=None, k_assist=None, k_haptic=None, v_threshold=None, k_damping=None):
-        if k_gravity is not None: self.k_gravity = float(k_gravity)
-        if k_assist is not None: self.k_assist = float(k_assist)
-        if k_haptic is not None: self.k_haptic = float(k_haptic)
-        if v_threshold is not None: self.v_threshold = float(v_threshold)
-        if k_damping is not None: self.k_damping = float(k_damping)
+        if k_gravity is not None:
+            self.k_gravity = float(k_gravity)
+        if k_assist is not None:
+            self.k_assist = float(k_assist)
+        if k_haptic is not None:
+            self.k_haptic = float(k_haptic)
+        if v_threshold is not None:
+            self.v_threshold = float(v_threshold)
+        if k_damping is not None:
+            self.k_damping = float(k_damping)
         logger.info(f"Updated Gains: G={self.k_gravity}, F={self.k_assist}, H={self.k_haptic}, D={self.k_damping}")
 
     def load_calibration(self):
@@ -111,7 +117,8 @@ class LeaderAssistService:
         loads_raw: list of current loads (PWM value needed to hold position)
                    In calibration, user holds arm still, so Load ~ Gravity.
         """
-        if not self.calibration_mode: return
+        if not self.calibration_mode:
+            return
         self.calibration_data.append((positions_deg, loads_raw))
         logger.info(f"Recorded Calibration Sample {len(self.calibration_data)}")
 

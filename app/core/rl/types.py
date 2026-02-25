@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.core.config import PROJECT_ROOT, MODELS_DIR, DATASETS_DIR
+from app.core.config import DATASETS_DIR, MODELS_DIR, PROJECT_ROOT
 
 _APP_ROOT = PROJECT_ROOT
 _DEFAULT_MODELS_PATH = MODELS_DIR

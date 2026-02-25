@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+
 from app.dependencies import get_state
 
 router = APIRouter(tags=["debug"])

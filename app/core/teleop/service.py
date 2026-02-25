@@ -1,16 +1,15 @@
-import time
-import threading
 import logging
+import threading
+import time
 from collections import deque
 from typing import Any
 
 import numpy as np
-
-from app.core.config import load_config, save_config
-from app.core.safety_layer import SafetyLayer
-from app.core.leader_assist import LeaderAssistService
 from lerobot.motors.feetech.feetech import OperatingMode
 
+from app.core.config import load_config, save_config
+from app.core.leader_assist import LeaderAssistService
+from app.core.safety_layer import SafetyLayer
 from app.core.teleop.pairing import PairingContext
 
 logger = logging.getLogger(__name__)
@@ -244,8 +243,8 @@ class TeleoperationService:
     # ── Lifecycle ────────────────────────────────────────────────
 
     def start(self, force: bool = False, active_arms: list[str] | None = None) -> None:
-        from app.core.teleop import pairing as _pairing
         from app.core.teleop import control_loop as _control
+        from app.core.teleop import pairing as _pairing
 
         # Cancel any ongoing homing before starting new teleop
         if getattr(self, '_homing_thread', None) and self._homing_thread.is_alive():
@@ -371,7 +370,7 @@ class TeleoperationService:
                 self._has_damiao_follower = self._pairing_contexts[0].has_damiao_follower
                 self._leader_cal_ranges = self._pairing_contexts[0].leader_cal_ranges
         else:
-            print(f"[TELEOP] No arm_registry or no active_arms — using legacy robot/leader", flush=True)
+            print("[TELEOP] No arm_registry or no active_arms — using legacy robot/leader", flush=True)
             # Legacy single-pair: build context from self.robot/self.leader
             _pairing.precompute_mappings(self)
 
@@ -487,8 +486,8 @@ class TeleoperationService:
             logger.error(f"Failed to enable torque: {e}")
 
     def stop(self) -> None:
-        from app.core.teleop import observation as _obs
         from app.core.teleop import homing as _homing
+        from app.core.teleop import observation as _obs
 
         if not self.is_running:
             return

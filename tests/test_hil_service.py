@@ -8,7 +8,6 @@ import pytest
 from app.core.hil.service import HILService
 from app.core.hil.types import HILMode, HILSessionState
 
-
 # ── Fixtures ──
 
 
@@ -103,12 +102,12 @@ def test_start_session_no_checkpoint(hil_service, mock_training):
 
 def test_start_session_movement_scale_clamped(hil_service):
     """movement_scale is clamped to [0.1, 1.0]."""
-    result = hil_service.start_session("p1", "ds", "task", movement_scale=5.0)
+    hil_service.start_session("p1", "ds", "task", movement_scale=5.0)
     assert hil_service.state.movement_scale == 1.0
 
     # Reset for next test
     hil_service.stop_session()
-    result = hil_service.start_session("p1", "ds", "task", movement_scale=0.01)
+    hil_service.start_session("p1", "ds", "task", movement_scale=0.01)
     assert hil_service.state.movement_scale == 0.1
 
 

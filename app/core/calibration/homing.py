@@ -131,7 +131,7 @@ class CalibrationHoming:
         try:
             with open(fpath, "r") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {}
 
     def _find_paired_follower(self, arm_id: str):
@@ -202,7 +202,8 @@ class CalibrationHoming:
             self._svc.disable_torque(follower_id)
 
         arm, _ = self._svc.get_arm_context(arm_id)
-        if not arm: return False
+        if not arm:
+            return False
 
         # Read all raw positions
         positions = arm.bus.sync_read("Present_Position", normalize=False)

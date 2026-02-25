@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request
+
 from app.dependencies import get_state
 
 router = APIRouter(tags=["teleop"])
@@ -9,7 +10,7 @@ async def start_teleop(request: Request):
     system = get_state()
     try:
         data = await request.json()
-    except:
+    except Exception:
         data = {}
 
     force = data.get("force", False)

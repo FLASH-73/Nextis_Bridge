@@ -1,12 +1,12 @@
 """Tests for ArmRegistryService: CRUD, config loading, pairings."""
 
-import yaml
-import pytest
 from unittest.mock import MagicMock, patch
 
-from app.core.hardware.arm_registry import ArmRegistryService
-from app.core.hardware.types import ArmRole, MotorType, ConnectionStatus
+import pytest
+import yaml
 
+from app.core.hardware.arm_registry import ArmRegistryService
+from app.core.hardware.types import ArmRole, ConnectionStatus, MotorType
 
 # ── Fixtures ──
 

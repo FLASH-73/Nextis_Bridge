@@ -1,7 +1,7 @@
 
 import logging
-import time
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,12 @@ class SafetyLayer:
             # Initialize monitored motors list if empty or robot changed (simplified check)
             if not self.monitored_motors:
                 buses = []
-                if hasattr(robot, "left_arm"): buses.append(robot.left_arm.bus)
-                if hasattr(robot, "right_arm"): buses.append(robot.right_arm.bus)
-                if hasattr(robot, "bus"): buses.append(robot.bus)
+                if hasattr(robot, "left_arm"):
+                    buses.append(robot.left_arm.bus)
+                if hasattr(robot, "right_arm"):
+                    buses.append(robot.right_arm.bus)
+                if hasattr(robot, "bus"):
+                    buses.append(robot.bus)
 
                 for bus in buses:
                     # Skip Damiao CAN buses — they use check_damiao_limits() with
@@ -67,7 +70,8 @@ class SafetyLayer:
             batch_size = 1
 
             for _ in range(batch_size):
-                if not self.monitored_motors: break
+                if not self.monitored_motors:
+                    break
 
                 self.current_motor_index = (self.current_motor_index + 1) % len(self.monitored_motors)
                 bus, motor = self.monitored_motors[self.current_motor_index]
@@ -89,7 +93,7 @@ class SafetyLayer:
                         self.emergency_stop(robot)
                         return False
 
-                except Exception as e:
+                except Exception:
                     # Silent fail for single read error to robustify
                     pass
 

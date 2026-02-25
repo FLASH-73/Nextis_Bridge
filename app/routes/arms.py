@@ -1,9 +1,10 @@
 import logging
 
-from app.core.hardware.types import ArmRole, ConnectionStatus
-from app.dependencies import get_state
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
+from app.core.hardware.types import ArmRole, ConnectionStatus
+from app.dependencies import get_state
 
 logger = logging.getLogger(__name__)
 
@@ -342,11 +343,16 @@ def get_motor_diagnostics(arm_id: str):
                     err = int(val)
                     motor_map[name]["error"] = err
                     names = []
-                    if err & 0x01: names.append("Voltage")
-                    if err & 0x04: names.append("Overheat")
-                    if err & 0x08: names.append("Encoder")
-                    if err & 0x10: names.append("Shock")
-                    if err & 0x20: names.append("Overload")
+                    if err & 0x01:
+                        names.append("Voltage")
+                    if err & 0x04:
+                        names.append("Overheat")
+                    if err & 0x08:
+                        names.append("Encoder")
+                    if err & 0x10:
+                        names.append("Shock")
+                    if err & 0x20:
+                        names.append("Overload")
                     motor_map[name]["error_names"] = names
 
         motors_info = list(motor_map.values())

@@ -1,5 +1,6 @@
-import yaml
 from pathlib import Path
+
+import yaml
 
 # Project paths (derived from this file's location: app/core/config.py)
 PROJECT_ROOT    = Path(__file__).resolve().parent.parent.parent

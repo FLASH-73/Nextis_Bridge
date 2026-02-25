@@ -10,7 +10,6 @@ from app.core.teleop.pairing import (
     get_arm_prefix,
 )
 
-
 # ── DYNAMIXEL_TO_DAMIAO_JOINT_MAP ──
 
 

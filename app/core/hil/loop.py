@@ -1,8 +1,9 @@
 """HIL loop mixin: main control loop, leader velocity, policy inference, and action conversion."""
 
-import time
-import numpy as np
 import logging
+import time
+
+import numpy as np
 
 from .observation import HILObservationMixin
 from .types import HILMode
@@ -235,7 +236,7 @@ class HILLoopMixin(HILObservationMixin):
             print(f"[HIL DEBUG] Raw policy output stats: min={action_np_debug.min():.4f}, max={action_np_debug.max():.4f}, mean={action_np_debug.mean():.4f}, std={action_np_debug.std():.4f}")
             # Check if output is near-zero (indicates broken model)
             if np.abs(action_np_debug).max() < 0.01:
-                print(f"[HIL DEBUG] WARNING: Policy output is near-zero! Model may not be loaded correctly.")
+                print("[HIL DEBUG] WARNING: Policy output is near-zero! Model may not be loaded correctly.")
 
             # Convert tensor action to dict with named keys for robot and recording
             # The recording capture loop expects dict with keys like 'left_base.pos'
@@ -350,8 +351,8 @@ class HILLoopMixin(HILObservationMixin):
         2. Applies movement scaling (safety limiter) if configured
         3. Converts to dict using TRAINING dataset feature names
         """
-        import torch
         import numpy as np
+        import torch
 
         # If already a dict, return as-is
         if isinstance(action, dict):
@@ -466,8 +467,8 @@ class HILLoopMixin(HILObservationMixin):
 
             if not hasattr(self, '_logged_denorm_action'):
                 dead_count = np.sum(dead_motors)
-                print(f"[HIL] ===== DENORMALIZATION DETAILS =====")
-                print(f"[HIL]   Normalized input (first 7): {action_np_pre_denorm[:7].tolist() if 'action_np_pre_denorm' in dir() else action_np[:7].tolist()}")
+                print("[HIL] ===== DENORMALIZATION DETAILS =====")
+                print(f"[HIL]   Normalized input (first 7): {action_np[:7].tolist()}")
                 print(f"[HIL]   action.min: {action_min.tolist()}")
                 print(f"[HIL]   action.max: {action_max.tolist()}")
                 print(f"[HIL]   action.range: {action_range.tolist()}")
@@ -477,7 +478,7 @@ class HILLoopMixin(HILObservationMixin):
                     dead_indices = np.where(dead_motors)[0].tolist()
                     print(f"[HIL] WARNING: {dead_count} actions have min==max (didn't move in training), indices: {dead_indices}")
                     print(f"[HIL]   These actions use mid-point values: {[action_mid[i] for i in dead_indices]}")
-                print(f"[HIL] =====================================")
+                print("[HIL] =====================================")
                 self._logged_denorm_action = True
 
             action_np = action_denorm
@@ -525,7 +526,7 @@ class HILLoopMixin(HILObservationMixin):
                         self._logged_scale_dim_mismatch = True
             else:
                 if not hasattr(self, '_logged_no_current_state'):
-                    print(f"[HIL] WARNING: Cannot apply movement scaling - could not get current robot state")
+                    print("[HIL] WARNING: Cannot apply movement scaling - could not get current robot state")
                     print(f"[HIL]   action_names: {action_names}")
                     print(f"[HIL]   raw_obs keys: {list(raw_obs.keys()) if raw_obs else 'None'}")
                     self._logged_no_current_state = True
@@ -633,6 +634,6 @@ class HILLoopMixin(HILObservationMixin):
                 with self.teleop._action_lock:
                     self.teleop._latest_leader_action = leader_action.copy() if hasattr(leader_action, 'copy') else dict(leader_action)
 
-        except Exception as e:
+        except Exception:
             # Suppress frequent errors during normal operation
             pass

@@ -1,8 +1,8 @@
 """HIL type definitions: mode enum and session state."""
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 
 class HILMode(str, Enum):

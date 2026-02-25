@@ -1,9 +1,9 @@
 import time
 
 import cv2
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
 
-from fastapi import APIRouter, Request, HTTPException, BackgroundTasks, Query
-from fastapi.responses import StreamingResponse, Response
 from app.dependencies import get_state
 
 router = APIRouter(tags=["cameras"])

@@ -1,11 +1,11 @@
-import os
-import sys
 import json
 import logging
+import os
 import subprocess
+import sys
 from pathlib import Path
 
-from .types import ValidationResult, PolicyType, _PROJECT_ROOT
+from .types import _PROJECT_ROOT, PolicyType, ValidationResult
 
 logger = logging.getLogger(__name__)
 

@@ -1,12 +1,12 @@
 """Tests for TrainingService: job creation, management, hardware detection."""
 
 import json
-import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from app.core.training.service import TrainingService
+import pytest
 
+from app.core.training.service import TrainingService
 
 # ── Job creation ──
 

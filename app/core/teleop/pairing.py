@@ -235,7 +235,8 @@ def precompute_mappings_legacy(svc):
     """Legacy side-based mapping (left_leader -> left_follower, etc.)"""
     # Helper to check if active
     def is_active(side, group):
-        if svc.active_arms is None: return True
+        if svc.active_arms is None:
+            return True
         id_str = f"{side}_{group}"
         return id_str in svc.active_arms
 

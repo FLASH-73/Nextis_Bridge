@@ -1,5 +1,6 @@
-import numpy as np
 import logging
+
+import numpy as np
 from lerobot.model.kinematics import RobotKinematics
 
 logger = logging.getLogger(__name__)
@@ -56,14 +57,14 @@ class GravityCompensationService:
             # Velocities in rad/s
             dq = np.deg2rad(joint_velocities_deg)
             # Accelerations (0 for gravity only)
-            ddq = np.zeros_like(q)
+            _ddq = np.zeros_like(q)
 
             # Update wrapper
             # Note: Placo/Pinocchio joint order matches self.joint_names
             for i, name in enumerate(self.joint_names):
-                 self.robot_wrapper.set_joint(name, q[i])
-                 self.robot_wrapper.set_velocity(name, dq[i])
-                 # self.robot_wrapper.set_acceleration(name, 0)
+                self.robot_wrapper.set_joint(name, q[i])
+                self.robot_wrapper.set_velocity(name, dq[i])
+                # self.robot_wrapper.set_acceleration(name, 0)
 
             self.robot_wrapper.update_kinematics()
 
@@ -102,6 +103,6 @@ class GravityCompensationService:
 
             return pwm_values
 
-        except Exception as e:
+        except Exception:
             # logger.error(f"G-Comp Calc Fail: {e}") # Noisy log
             return {}

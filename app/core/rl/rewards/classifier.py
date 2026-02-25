@@ -21,7 +21,8 @@ from torch.utils.data import DataLoader, TensorDataset
 logger = logging.getLogger(__name__)
 
 # Default paths
-from app.core.config import DATASETS_DIR, MODELS_DIR
+from app.core.config import DATASETS_DIR, MODELS_DIR  # noqa: E402
+
 _DEFAULT_DATASETS_PATH = DATASETS_DIR
 _DEFAULT_MODELS_PATH = MODELS_DIR
 

@@ -8,7 +8,6 @@ from app.core.hardware.types import (
     Pairing,
 )
 
-
 # ── Enum value tests ──
 
 

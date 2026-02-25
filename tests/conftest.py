@@ -70,14 +70,13 @@ for _mod in [
 
 # ── Now safe to import app code ──
 
-import threading
-from pathlib import Path
-from unittest.mock import patch
+import threading  # noqa: E402
+from pathlib import Path  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
-import pytest
+import pytest  # noqa: E402
 
-from app.core.hardware.types import ArmDefinition, ArmRole, MotorType, Pairing
-
+from app.core.hardware.types import ArmDefinition, ArmRole, MotorType, Pairing  # noqa: E402
 
 # ── Fixtures ──
 
@@ -148,6 +147,7 @@ def app_client():
     instead of trying to initialize real hardware.
     """
     from fastapi.testclient import TestClient
+
     from app.main import app
 
     mock_state = MagicMock()

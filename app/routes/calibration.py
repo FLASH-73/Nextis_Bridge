@@ -1,8 +1,9 @@
-import time
 import logging
+import time
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+
 from app.dependencies import get_state
 
 logger = logging.getLogger(__name__)
@@ -42,16 +43,24 @@ def _get_calibration_target(arm_key: str):
     is_follower = "follower" in arm_key
 
     if is_follower:
-        if not system.robot: raise Exception("Follower Robot not connected")
+        if not system.robot:
+            raise Exception("Follower Robot not connected")
         # Match side
-        if "left" in arm_key and hasattr(system.robot, "left_arm"): arm = system.robot.left_arm
-        elif "right" in arm_key and hasattr(system.robot, "right_arm"): arm = system.robot.right_arm
-        elif hasattr(system.robot, "bus") and not hasattr(system.robot, "left_arm"): arm = system.robot # Mono robot
+        if "left" in arm_key and hasattr(system.robot, "left_arm"):
+            arm = system.robot.left_arm
+        elif "right" in arm_key and hasattr(system.robot, "right_arm"):
+            arm = system.robot.right_arm
+        elif hasattr(system.robot, "bus") and not hasattr(system.robot, "left_arm"):
+            arm = system.robot  # Mono robot
     else:
-        if not system.leader: raise Exception("Leader Arm not connected")
-        if "left" in arm_key and hasattr(system.leader, "left_arm"): arm = system.leader.left_arm
-        elif "right" in arm_key and hasattr(system.leader, "right_arm"): arm = system.leader.right_arm
-        elif hasattr(system.leader, "bus") and not hasattr(system.leader, "left_arm"): arm = system.leader # Mono leader
+        if not system.leader:
+            raise Exception("Leader Arm not connected")
+        if "left" in arm_key and hasattr(system.leader, "left_arm"):
+            arm = system.leader.left_arm
+        elif "right" in arm_key and hasattr(system.leader, "right_arm"):
+            arm = system.leader.right_arm
+        elif hasattr(system.leader, "bus") and not hasattr(system.leader, "left_arm"):
+            arm = system.leader  # Mono leader
 
     if not arm:
         raise Exception(f"Physical Arm interface not found for {arm_key}")
@@ -88,9 +97,9 @@ async def set_torque(arm_id: str, request: Request):
 @router.post("/calibration/{arm_id}/limit")
 async def set_limit(arm_id: str, request: Request):
     data = await request.json()
-    motor = data.get("motor")
-    limit_type = data.get("type") # min or max
-    value = data.get("value")
+    _motor = data.get("motor")
+    _limit_type = data.get("type")  # min or max
+    _value = data.get("value")
 
 
 # --- Gravity Calibration (Wizard) ---

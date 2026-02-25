@@ -1,11 +1,13 @@
 """SARM (Stage-Aware Reward Modeling) Reward Service.
 
 Trains and uses SARM reward models for HIL-SERL.
+
 SARM learns task progress (0→1) from demonstration datasets,
 providing dense rewards for RL training.
 
 Reference: https://arxiv.org/abs/2509.25358
 """
+from __future__ import annotations
 
 import json
 import logging
@@ -22,7 +24,8 @@ import torch
 logger = logging.getLogger(__name__)
 
 # Default paths
-from app.core.config import DATASETS_DIR, MODELS_DIR
+from app.core.config import DATASETS_DIR, MODELS_DIR  # noqa: E402
+
 _DEFAULT_DATASETS_PATH = DATASETS_DIR
 _DEFAULT_MODELS_PATH = MODELS_DIR
 
@@ -355,7 +358,7 @@ class SARMRewardService:
     def _process_batch_for_sarm(
         self,
         batch_items: list,
-        processor: "SARMEncodingProcessorStep",
+        processor: "SARMEncodingProcessorStep",  # noqa: F821
         image_key: str,
         state_key: str,
         device: torch.device,
@@ -484,15 +487,15 @@ class SARMRewardService:
     def _encode_images_for_sarm(
         self,
         images: np.ndarray,
-        processor: "SARMEncodingProcessorStep",
+        processor: "SARMEncodingProcessorStep",  # noqa: F821
     ) -> torch.Tensor:
         """Encode images with CLIP for SARM."""
         return processor._encode_images_batch(images)
 
     def _save_sarm_model(
         self,
-        model: "SARMRewardModel",
-        config: "SARMConfig",
+        model: "SARMRewardModel",  # noqa: F821
+        config: "SARMConfig",  # noqa: F821
         name: str,
         dataset_repo_id: str,
         train_config: SARMTrainingConfig,
@@ -539,7 +542,7 @@ class SARMRewardService:
 
         logger.info(f"[SARM] Model saved to {model_path}")
 
-    def load_sarm(self, name: str) -> "SARMRewardModel":
+    def load_sarm(self, name: str) -> "SARMRewardModel":  # noqa: F821
         """Load a trained SARM model.
 
         Args:
@@ -599,7 +602,7 @@ class SARMRewardService:
 
     def predict_reward(
         self,
-        sarm_model: "SARMRewardModel",
+        sarm_model: "SARMRewardModel",  # noqa: F821
         images: list,
         state: np.ndarray,
         task_description: str,

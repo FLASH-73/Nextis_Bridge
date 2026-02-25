@@ -1,9 +1,11 @@
 import time
 from pathlib import Path
+
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.robots.utils import make_robot_from_config
 
 from app.core.config import RAW_DATA_DIR
+
 
 class DataRecorder:
     def __init__(self, repo_id, robot_type="so100_follower"):
@@ -31,10 +33,10 @@ class DataRecorder:
                     fps=self.fps,
                     root=self.root,
                     robot_type=self.robot_type,
-                    features={}, 
-                    use_videos=True 
+                    features={},
+                    use_videos=True
                 )
-        
+
         # If the dataset supports explicit episode starting, do it here.
         # For LeRobotDataset, adding frames automatically builds the episode,
         # and save_episode() finalizes it.
@@ -47,7 +49,7 @@ class DataRecorder:
         if self.dataset:
             # Flexible data mapping
             frame = {"action": action}
-            
+
             # Flatten observation if needed or just pass through known keys
             # LeRobotDataset expects keys like "observation.state", "observation.images.phone"
             for key, value in observation.items():
@@ -57,7 +59,7 @@ class DataRecorder:
                 else:
                     # Otherwise assume it's a raw component
                     frame[f"observation.{key}"] = value
-            
+
             self.dataset.add_frame(frame)
 
     def stop_episode(self):

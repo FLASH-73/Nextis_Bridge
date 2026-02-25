@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -11,14 +12,27 @@ sys.path.insert(0, str(root_path))
 # Add lerobot/src to sys.path
 sys.path.insert(0, str(root_path / "lerobot" / "src"))
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from app.state import state
-from app.routes import (
-    system, arms, motors, calibration, teleop,
-    cameras, recording, datasets, training,
-    policies, hil, rl, chat, debug, tools,
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from app.routes import (  # noqa: E402
+    arms,
+    calibration,
+    cameras,
+    chat,
+    datasets,
+    debug,
+    hil,
+    motors,
+    policies,
+    recording,
+    rl,
+    system,
+    teleop,
+    tools,
+    training,
 )
+from app.state import state  # noqa: E402
 
 app = FastAPI(title="Nextis Robotics API")
 

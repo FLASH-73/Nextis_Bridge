@@ -1,11 +1,11 @@
 """Tests for ValidatorMixin: dataset validation per policy type."""
 
 import json
-import pytest
 from pathlib import Path
 
-from app.core.training.service import TrainingService
+import pytest
 
+from app.core.training.service import TrainingService
 
 # ── Helpers ──
 

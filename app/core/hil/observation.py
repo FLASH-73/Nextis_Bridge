@@ -1,7 +1,8 @@
 """HIL observation preparation mixin: state names, normalization, and policy observation building."""
 
-import numpy as np
 import logging
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,8 @@ class HILObservationMixin:
         Returns:
             List of motor names like ['left_base.pos', 'left_link3.pos', ...] or None
         """
-        from pathlib import Path
         import json
+        from pathlib import Path
 
         # Return cached result if available
         if hasattr(self, '_cached_training_state_names'):
@@ -43,7 +44,7 @@ class HILObservationMixin:
         # Get training dataset path
         dataset_root = train_config.get("dataset", {}).get("root")
         if not dataset_root:
-            print(f"[HIL] WARNING: dataset.root not found in train_config")
+            print("[HIL] WARNING: dataset.root not found in train_config")
             self._cached_training_state_names = None
             return None
 
@@ -76,9 +77,10 @@ class HILObservationMixin:
         Returns:
             Dict with normalization stats or None if not found
         """
-        from pathlib import Path
-        import safetensors.torch as st
         import json
+        from pathlib import Path
+
+        import safetensors.torch as st
         import torch
 
         # Return cached result if available
@@ -108,7 +110,7 @@ class HILObservationMixin:
                     action_range = stats['action.max'] - stats['action.min']
                     print(f"[HIL DEBUG] action range (max-min): {action_range.tolist()}")
                 else:
-                    print(f"[HIL DEBUG] WARNING: 'action.min' not found in stats!")
+                    print("[HIL DEBUG] WARNING: 'action.min' not found in stats!")
 
                 self._cached_norm_stats = stats
                 return stats
@@ -117,7 +119,7 @@ class HILObservationMixin:
                 print(f"[HIL] WARNING: Failed to load normalization stats from safetensors: {e}")
 
         # FALLBACK: Load from training dataset's stats.json (needed for Pi0.5)
-        print(f"[HIL] Checkpoint stats not found, trying training dataset...")
+        print("[HIL] Checkpoint stats not found, trying training dataset...")
 
         # Find policy metadata to get training dataset
         metadata_path = checkpoint_path / "policy_metadata.json"
@@ -171,7 +173,7 @@ class HILObservationMixin:
                                     "action.min": torch.tensor(action_stats["q01"], dtype=torch.float32),
                                     "action.max": torch.tensor(action_stats["q99"], dtype=torch.float32),
                                 }
-                                print(f"[HIL] Loaded action normalization stats (QUANTILES q01/q99 - matching training)")
+                                print("[HIL] Loaded action normalization stats (QUANTILES q01/q99 - matching training)")
                                 print(f"[HIL DEBUG] action.min (q01): {action_stats['q01']}")
                                 print(f"[HIL DEBUG] action.max (q99): {action_stats['q99']}")
                             elif "min" in action_stats and "max" in action_stats:
@@ -184,7 +186,7 @@ class HILObservationMixin:
                                 print(f"[HIL DEBUG] action.min: {action_stats['min']}")
                                 print(f"[HIL DEBUG] action.max: {action_stats['max']}")
                             else:
-                                print(f"[HIL] WARNING: No valid action normalization stats found")
+                                print("[HIL] WARNING: No valid action normalization stats found")
                                 stats = {}
 
                             # CRITICAL: Also load state normalization stats!
@@ -195,19 +197,19 @@ class HILObservationMixin:
                                 if use_quantile and "q01" in state_stats and "q99" in state_stats:
                                     stats["observation.state.min"] = torch.tensor(state_stats["q01"], dtype=torch.float32)
                                     stats["observation.state.max"] = torch.tensor(state_stats["q99"], dtype=torch.float32)
-                                    print(f"[HIL] Loaded state normalization stats (QUANTILES q01/q99)")
+                                    print("[HIL] Loaded state normalization stats (QUANTILES q01/q99)")
                                     print(f"[HIL DEBUG] state.min (q01): {state_stats['q01']}")
                                     print(f"[HIL DEBUG] state.max (q99): {state_stats['q99']}")
                                 elif "min" in state_stats and "max" in state_stats:
                                     stats["observation.state.min"] = torch.tensor(state_stats["min"], dtype=torch.float32)
                                     stats["observation.state.max"] = torch.tensor(state_stats["max"], dtype=torch.float32)
-                                    print(f"[HIL] Loaded state normalization stats (min/max)")
+                                    print("[HIL] Loaded state normalization stats (min/max)")
                                     print(f"[HIL DEBUG] state.min: {state_stats['min']}")
                                     print(f"[HIL DEBUG] state.max: {state_stats['max']}")
                                 else:
-                                    print(f"[HIL] WARNING: No valid state normalization stats found - state will NOT be normalized!")
+                                    print("[HIL] WARNING: No valid state normalization stats found - state will NOT be normalized!")
                             else:
-                                print(f"[HIL] WARNING: No observation.state in dataset stats - state will NOT be normalized!")
+                                print("[HIL] WARNING: No observation.state in dataset stats - state will NOT be normalized!")
 
                             if stats:
                                 self._cached_norm_stats = stats
@@ -215,7 +217,7 @@ class HILObservationMixin:
                     else:
                         print(f"[HIL] WARNING: Training dataset stats not found: {stats_json_path}")
                 else:
-                    print(f"[HIL] WARNING: No dataset_repo_id in policy metadata")
+                    print("[HIL] WARNING: No dataset_repo_id in policy metadata")
 
             except Exception as e:
                 print(f"[HIL] WARNING: Failed to load stats from training dataset: {e}")
@@ -224,7 +226,7 @@ class HILObservationMixin:
         else:
             print(f"[HIL] WARNING: Policy metadata not found at: {metadata_path}")
 
-        print(f"[HIL] WARNING: No normalization stats found - actions will NOT be denormalized!")
+        print("[HIL] WARNING: No normalization stats found - actions will NOT be denormalized!")
         self._cached_norm_stats = None
         return None
 
@@ -322,7 +324,7 @@ class HILObservationMixin:
                         if dead_count > 0:
                             dead_indices = torch.where(dead_motors)[0].tolist()
                             print(f"[HIL] WARNING: {dead_count} motors have min==max (didn't move in training), indices: {dead_indices}")
-                            print(f"[HIL]   These motors normalized to 0.0 (neutral position)")
+                            print("[HIL]   These motors normalized to 0.0 (neutral position)")
                         print(f"[HIL] State after norm: min={state_tensor.min():.3f}, max={state_tensor.max():.3f}, mean={state_tensor.mean():.3f}")
                         self._logged_state_norm = True
 
@@ -331,13 +333,13 @@ class HILObservationMixin:
                     if state_tensor.min() < -1.0 or state_tensor.max() > 1.0:
                         if not hasattr(self, '_logged_clamp_warning'):
                             # Log which motors are out of range (once)
-                            print(f"[HIL] WARNING: Some motors outside training range!")
+                            print("[HIL] WARNING: Some motors outside training range!")
                             for i, name in enumerate(state_names):
                                 val = state_tensor[i].item()
                                 if val < -1.0 or val > 1.0:
                                     raw_val = float(raw_obs.get(name, 0.0))
                                     print(f"[HIL]   Motor '{name}': normalized={val:.2f} (raw={raw_val:.1f}, expected=[{state_min[i].item():.1f}, {state_max[i].item():.1f}])")
-                            print(f"[HIL]   Clamping all normalized values to [-1, 1]")
+                            print("[HIL]   Clamping all normalized values to [-1, 1]")
                             self._logged_clamp_warning = True
                         state_tensor = torch.clamp(state_tensor, -1.0, 1.0)
 
@@ -378,7 +380,7 @@ class HILObservationMixin:
                     from transformers import AutoTokenizer
                     self._pi05_tokenizer = AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")
                     self._pi05_tokenizer.padding_side = "right"
-                    print(f"[HIL] Pi0.5 tokenizer loaded: google/paligemma-3b-pt-224")
+                    print("[HIL] Pi0.5 tokenizer loaded: google/paligemma-3b-pt-224")
 
                 max_length = getattr(policy.config, 'tokenizer_max_length', 200)
                 tokenized = self._pi05_tokenizer(

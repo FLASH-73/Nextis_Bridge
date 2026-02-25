@@ -1,10 +1,11 @@
-import time
 import logging
-import numpy as np
+import time
 
-from app.core.teleop.pairing import PairingContext
-from app.core.teleop.observation import update_history
+import numpy as np
 from lerobot.robots.damiao_follower.damiao_follower import map_range
+
+from app.core.teleop.observation import update_history
+from app.core.teleop.pairing import PairingContext
 
 logger = logging.getLogger(__name__)
 

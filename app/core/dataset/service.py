@@ -1,17 +1,16 @@
 """Dataset browsing, episode inspection, and CRUD operations."""
 
-import os
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
-
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from app.core.config import DATASETS_DIR
-from app.core.dataset.merge import MergeJobManager, MergeValidationResult, MergeJob
+from app.core.dataset.merge import MergeJob, MergeJobManager, MergeValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +91,6 @@ class DatasetService:
         Returns cached data for visualization.
         Reads directly from disk to avoid HuggingFace Hub lookups.
         """
-        import pandas as pd
         import numpy as np
 
         # Security: Prevent traversing up
@@ -266,7 +264,6 @@ class DatasetService:
         3. Updates info.json total_episodes.
         4. Does NOT remove actual Action/Observation data from chunks (too risky/complex).
         """
-        import pandas as pd
         import shutil
 
         dataset_root = self.base_path / repo_id
@@ -279,8 +276,8 @@ class DatasetService:
         # Load all into DF
         try:
             df = pd.read_parquet(episodes_dir)
-        except:
-             raise Exception("Failed to load episodes metadata")
+        except Exception:
+            raise Exception("Failed to load episodes metadata")
 
         # Only check episode_index column (the standard LeRobot v3 column name)
         if "episode_index" not in df.columns:
@@ -290,7 +287,7 @@ class DatasetService:
             raise ValueError(f"Episode index {episode_index} not found in dataset")
 
         # Check total count
-        total = len(df)
+        _total = len(df)
 
         # 2. Filter and Re-Index
         # Remove the row
@@ -305,7 +302,6 @@ class DatasetService:
         df.loc[df["episode_index"] > episode_index, "episode_index"] -= 1
 
         # 3. Write back Metadata
-        import shutil
         shutil.rmtree(episodes_dir)
         episodes_dir.mkdir()
         (episodes_dir / "chunk-000").mkdir()

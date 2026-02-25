@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
 from app.dependencies import get_state
 
 router = APIRouter(tags=["rl"])

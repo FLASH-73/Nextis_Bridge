@@ -1,8 +1,9 @@
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
+
+from lerobot.motors.feetech import OperatingMode
 from lerobot.robots.bi_umbra_follower.bi_umbra_follower import BiUmbraFollower
 from lerobot.robots.umbra_follower.umbra_follower import UmbraFollowerRobot
-from lerobot.motors.feetech import OperatingMode
 
 # Try to import Damiao robot (may not be available on all systems)
 try:
@@ -13,8 +14,8 @@ except ImportError:
     DAMIAO_AVAILABLE = False
 
 from app.core.calibration.discovery import CalibrationDiscovery
-from app.core.calibration.profiles import CalibrationProfiles
 from app.core.calibration.homing import CalibrationHoming
+from app.core.calibration.profiles import CalibrationProfiles
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class CalibrationService:
         if DAMIAO_AVAILABLE and DamiaoFollowerRobot is not None:
             if isinstance(self.robot, DamiaoFollowerRobot):
                 # Damiao uses absolute encoders, always "calibrated"
-                damiao_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
+                _damiao_motors = ["base", "link1", "link2", "link3", "link4", "link5", "gripper"]
                 try:
                     damiao_calibrated = self.robot.is_calibrated
                 except Exception as e:

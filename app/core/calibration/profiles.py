@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 from app.core.config import CALIBRATION_DIR
 
@@ -180,8 +180,8 @@ class CalibrationProfiles:
         # If a name is provided, ALSO save to the profile directory
         if name:
             self.ensure_active_profiles_init()
-            import json
             import dataclasses
+            import json
 
             # Create profile dir
             base_dir = self._get_arm_calibration_dir(arm_id, arm)

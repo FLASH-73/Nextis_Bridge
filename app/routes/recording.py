@@ -1,7 +1,8 @@
-import sys
 import logging
+import sys
 
 from fastapi import APIRouter, Request
+
 from app.dependencies import get_state
 
 _recording_logger = logging.getLogger("recording_debug")

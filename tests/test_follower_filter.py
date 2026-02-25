@@ -153,7 +153,7 @@ def test_direction_reversal_no_overshoot():
         pos, vel = f.apply("m", target, DT, OMEGA)
         max_pos_after_reversal = max(max_pos_after_reversal, pos)
 
-    overshoot_limit = peak_target + 0.05 * ramp_rate * DT
+    _overshoot_limit = peak_target + 0.05 * ramp_rate * DT
     assert max_pos_after_reversal <= peak_target + 0.05, (
         f"Overshoot at reversal: max={max_pos_after_reversal:.4f}, peak_target={peak_target:.4f}"
     )

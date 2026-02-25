@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
 from app.dependencies import get_state
 
 router = APIRouter(tags=["hil"])
@@ -171,7 +172,7 @@ async def trigger_hil_retrain(request: Request):
 
     try:
         data = await request.json()
-    except:
+    except Exception:
         data = {}
 
     try:

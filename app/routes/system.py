@@ -1,9 +1,10 @@
+import logging
 import sys
 import time
-import logging
 
 from fastapi import APIRouter, BackgroundTasks
 from fastapi.responses import JSONResponse
+
 from app.core.config import load_config
 from app.dependencies import get_state
 

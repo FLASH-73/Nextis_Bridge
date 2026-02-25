@@ -1,8 +1,8 @@
 """FastAPI route smoke tests using TestClient with mocked SystemState."""
 
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
 
 # ── System routes ──
 

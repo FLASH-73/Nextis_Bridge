@@ -9,16 +9,17 @@ This service provides:
 - Port scanning for device discovery
 """
 
-import os
 import logging
+import os
 import threading
 from dataclasses import asdict
-from typing import Dict, List, Optional, Any
 from pathlib import Path
-import yaml
-import serial.tools.list_ports
+from typing import Any, Dict, List, Optional
 
-from app.core.hardware.types import MotorType, ArmRole, ConnectionStatus, ArmDefinition, Pairing
+import serial.tools.list_ports
+import yaml
+
+from app.core.hardware.types import ArmDefinition, ArmRole, ConnectionStatus, MotorType, Pairing
 
 logger = logging.getLogger(__name__)
 
@@ -565,11 +566,16 @@ class ArmRegistryService:
                                     )
                                     if error_status != 0:
                                         has_error = True
-                                        if error_status & 0x01: error_names.append("Input Voltage")
-                                        if error_status & 0x04: error_names.append("Overheating")
-                                        if error_status & 0x08: error_names.append("Motor Encoder")
-                                        if error_status & 0x10: error_names.append("Electrical Shock")
-                                        if error_status & 0x20: error_names.append("Overload")
+                                        if error_status & 0x01:
+                                            error_names.append("Input Voltage")
+                                        if error_status & 0x04:
+                                            error_names.append("Overheating")
+                                        if error_status & 0x08:
+                                            error_names.append("Motor Encoder")
+                                        if error_status & 0x10:
+                                            error_names.append("Electrical Shock")
+                                        if error_status & 0x20:
+                                            error_names.append("Overload")
                                 except Exception:
                                     pass
 
@@ -726,8 +732,9 @@ class ArmRegistryService:
 
             if motor_type in ["dynamixel_xl330", "dynamixel_xl430"]:
                 import time
-                from lerobot.motors.dynamixel import DynamixelMotorsBus
+
                 from lerobot.motors import Motor, MotorNormMode
+                from lerobot.motors.dynamixel import DynamixelMotorsBus
 
                 # Step 1: Auto-detect the motor model by scanning
                 logger.info(f"Auto-detecting motor model on {port}...")
@@ -767,14 +774,19 @@ class ArmRegistryService:
                     if error_status != 0:
                         # Decode error bits
                         error_names = []
-                        if error_status & 0x01: error_names.append("Input Voltage")
-                        if error_status & 0x04: error_names.append("Overheating")
-                        if error_status & 0x08: error_names.append("Motor Encoder")
-                        if error_status & 0x10: error_names.append("Electrical Shock")
-                        if error_status & 0x20: error_names.append("Overload")
+                        if error_status & 0x01:
+                            error_names.append("Input Voltage")
+                        if error_status & 0x04:
+                            error_names.append("Overheating")
+                        if error_status & 0x08:
+                            error_names.append("Motor Encoder")
+                        if error_status & 0x10:
+                            error_names.append("Electrical Shock")
+                        if error_status & 0x20:
+                            error_names.append("Overload")
 
                         logger.warning(f"Motor has hardware error (status=0x{error_status:02X}): {', '.join(error_names)}")
-                        logger.info(f"Rebooting motor to clear error...")
+                        logger.info("Rebooting motor to clear error...")
 
                         # Reboot motor to clear error flags
                         scan_bus.packet_handler.reboot(scan_bus.port_handler, current_id)
@@ -810,8 +822,8 @@ class ArmRegistryService:
                 }
 
             elif motor_type == "sts3215":
-                from lerobot.motors.feetech import FeetechMotorsBus
                 from lerobot.motors import Motor, MotorNormMode
+                from lerobot.motors.feetech import FeetechMotorsBus
 
                 # Create bus with motor defined at TARGET ID
                 bus = FeetechMotorsBus(
@@ -913,11 +925,16 @@ class ArmRegistryService:
                     )
                     if error_status != 0:
                         error_names = []
-                        if error_status & 0x01: error_names.append("Input Voltage")
-                        if error_status & 0x04: error_names.append("Overheating")
-                        if error_status & 0x08: error_names.append("Motor Encoder")
-                        if error_status & 0x10: error_names.append("Electrical Shock")
-                        if error_status & 0x20: error_names.append("Overload")
+                        if error_status & 0x01:
+                            error_names.append("Input Voltage")
+                        if error_status & 0x04:
+                            error_names.append("Overheating")
+                        if error_status & 0x08:
+                            error_names.append("Motor Encoder")
+                        if error_status & 0x10:
+                            error_names.append("Electrical Shock")
+                        if error_status & 0x20:
+                            error_names.append("Overload")
 
                         log[-1]["detail"] = f"Hardware error detected: {', '.join(error_names)} (0x{error_status:02X})"
                         log.append({"step": 2, "action": "Rebooting motor to clear error...", "status": "running"})

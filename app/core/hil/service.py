@@ -12,12 +12,12 @@ Integrates:
 - TrainingService: Retraining on intervention data
 """
 
-import threading
-from typing import Dict, Any
 import logging
+import threading
+from typing import Any, Dict
 
-from .types import HILMode, HILSessionState
 from .loop import HILLoopMixin
+from .types import HILMode, HILSessionState
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class HILService(HILLoopMixin):
         if policy_config:
             logger.info(f"[HIL] Policy config detected: cameras={policy_config.cameras}, arms={policy_config.arms}")
         else:
-            logger.warning(f"[HIL] No policy config found, using defaults (all cameras/arms)")
+            logger.warning("[HIL] No policy config found, using defaults (all cameras/arms)")
 
         try:
             self.orchestrator.deploy_policy(policy.checkpoint_path)

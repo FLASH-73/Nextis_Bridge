@@ -1,11 +1,12 @@
 import threading
-from app.core.config import load_config, CONFIG_PATH
+
+from app.core.calibration_service import CalibrationService
 from app.core.camera_service import CameraService
+from app.core.config import CONFIG_PATH, load_config
+from app.core.dataset import DatasetService
 from app.core.orchestrator import TaskOrchestrator
 from app.core.recorder import DataRecorder
-from app.core.calibration_service import CalibrationService
 from app.core.teleop_service import TeleoperationService
-from app.core.dataset import DatasetService
 from app.core.training import TrainingService
 
 
@@ -60,7 +61,7 @@ class SystemState:
         self.training_service = TrainingService()
 
         # 2. Load config
-        config_data = load_config()
+        load_config()
 
         # 3. Arm Registry (reads config only, no hardware)
         try:
@@ -231,9 +232,9 @@ class SystemState:
 
     def restart(self):
         print("SYSTEM RESTART REQUESTED. RESTARTING PROCESS...")
+        import os
         import sys
         import time
-        import os
 
         # Flush buffers
         sys.stdout.flush()
@@ -246,7 +247,6 @@ class SystemState:
              print(f"Error during shutdown: {e}")
 
         # os._exit(42) forces exit without cleanup/exception handling, guaranteeing the return code
-        import os
         os._exit(42)
 
 state = SystemState()

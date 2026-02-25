@@ -1,8 +1,9 @@
 import os
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
+
 from app.dependencies import get_state
 
 router = APIRouter(tags=["datasets"])
@@ -214,7 +215,7 @@ def stream_video(repo_id: str, index: int, key: str):
                         file_index = int(episode_row[file_index_col].iloc[0])
                     if chunk_index_col in episode_row.columns:
                         chunk_index = int(episode_row[chunk_index_col].iloc[0])
-            except Exception as e:
+            except Exception:
                 pass  # Fall back to using episode_index
 
         # Standard LeRobot v3: videos/{key}/episode_{index}.mp4 (or inside chunks)

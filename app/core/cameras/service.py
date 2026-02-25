@@ -2,12 +2,14 @@ import gc
 import logging
 import threading
 import time
-from typing import List, Dict, Any
 from pathlib import Path
+from typing import Any, Dict, List
+
 import yaml
 from lerobot.cameras.opencv.camera_opencv import OpenCVCamera
 from lerobot.cameras.realsense.camera_realsense import RealSenseCamera
-from app.core.config import load_config, save_config, CONFIG_PATH
+
+from app.core.config import CONFIG_PATH, load_config, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +223,7 @@ class CameraService:
     def _opencv_discovery_fallback(self, camera_key: str, idx, fps, width, height) -> OpenCVCamera:
         """Find available OpenCV cameras via discovery and connect to the first one."""
         from lerobot.cameras.opencv import OpenCVCameraConfig
+
         from app.core.cameras.discovery import discover_cameras
         discovered = discover_cameras(opencv_only=True)
         opencv_devices = discovered.get("opencv", [])

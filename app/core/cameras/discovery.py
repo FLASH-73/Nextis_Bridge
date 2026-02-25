@@ -1,8 +1,9 @@
-import cv2
 import glob
 import logging
 import re
 import time
+
+import cv2
 
 logger = logging.getLogger(__name__)
 

@@ -4,8 +4,8 @@ Extracted from recording.py to keep file sizes manageable.
 All functions take a TeleoperationService instance as their first argument.
 """
 
-import time
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ def start_episode(svc):
 
         # Check for count mismatch and warn
         if svc.episode_count != meta_total:
-            print(f"[START_EPISODE] WARNING: Count mismatch detected!")
+            print("[START_EPISODE] WARNING: Count mismatch detected!")
             print(f"[START_EPISODE]   episode_count={svc.episode_count} != meta.total_episodes={meta_total}")
 
         # Initialize episode buffer - handle case where buffer is None on first use
@@ -245,7 +245,7 @@ def stop_episode(svc):
         if len(svc._frame_queue) > 0:
             print(f"[STOP_EPISODE] WARNING: Queue not fully drained ({len(svc._frame_queue)} remaining)")
         else:
-            print(f"[STOP_EPISODE] Queue drained successfully")
+            print("[STOP_EPISODE] Queue drained successfully")
 
         # Reset first frame logging flag for next episode
         if hasattr(svc, '_first_frame_logged'):
@@ -284,7 +284,7 @@ def stop_episode(svc):
                     except Exception:
                         print("[STOP_EPISODE] Image writer queue size: (unable to check)")
 
-                print(f"[STOP_EPISODE] Calling save_episode()...")
+                print("[STOP_EPISODE] Calling save_episode()...")
                 save_start = time.time()
                 # Note: task is already included in each frame, no need to pass to save_episode
                 current_dataset.save_episode()

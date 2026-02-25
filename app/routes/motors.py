@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+
 from app.dependencies import get_state
 
 router = APIRouter(tags=["motors"])
@@ -132,8 +133,8 @@ async def ping_motor(request: Request):
 
     try:
         if motor_type in ["dynamixel_xl330", "dynamixel_xl430"]:
-            from lerobot.motors.dynamixel import DynamixelMotorsBus
             from lerobot.motors import Motor, MotorNormMode
+            from lerobot.motors.dynamixel import DynamixelMotorsBus
 
             bus = DynamixelMotorsBus(port=port, motors={})
             bus.connect()

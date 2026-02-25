@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, PropertyMock
 
 from app.core.hardware.safety import SafetyLayer
 
-
 # ── Basic edge cases ──
 
 

@@ -3,14 +3,13 @@
 Refactored from the original script-style tests to pytest conventions.
 lerobot mocking is handled by conftest.py.
 """
-import time
 import threading
+import time
 
 import numpy as np
 
 from app.core.intervention import InterventionEngine
 from app.core.recorder import DataRecorder
-
 
 # ── Test-specific mocks ──
 

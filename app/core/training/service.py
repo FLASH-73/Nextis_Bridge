@@ -4,28 +4,39 @@ Manages training jobs, validates datasets, and executes training in background s
 """
 
 import json
-import uuid
+import logging
 import re
 import shutil
-import threading
 import subprocess
-import logging
-from pathlib import Path
-from datetime import datetime
+import threading
+import uuid
 from collections import deque
-from typing import Dict, List, Optional, Any
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from .types import (
-    JobStatus, PolicyType, TrainingProgress, TrainingJob, PolicyInfo,
-    _DEFAULT_DATASETS_PATH, _DEFAULT_OUTPUTS_PATH,
-)
-from .presets import (
-    SMOLVLA_PRESETS, DIFFUSION_PRESETS, PI05_PRESETS, ACT_PRESETS,
-    SMOLVLA_DEFAULTS, DIFFUSION_DEFAULTS, PI05_DEFAULTS, ACT_DEFAULTS,
-)
-from .validators import ValidatorMixin
 from .commands import CommandMixin
 from .policies import PolicyMixin
+from .presets import (
+    ACT_DEFAULTS,
+    ACT_PRESETS,
+    DIFFUSION_DEFAULTS,
+    DIFFUSION_PRESETS,
+    PI05_DEFAULTS,
+    PI05_PRESETS,
+    SMOLVLA_DEFAULTS,
+    SMOLVLA_PRESETS,
+)
+from .types import (
+    _DEFAULT_DATASETS_PATH,
+    _DEFAULT_OUTPUTS_PATH,
+    JobStatus,
+    PolicyInfo,
+    PolicyType,
+    TrainingJob,
+    TrainingProgress,
+)
+from .validators import ValidatorMixin
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +264,7 @@ class TrainingService(ValidatorMixin, CommandMixin, PolicyMixin):
                     error_msg = str(e)
                     try:
                         name = torch.cuda.get_device_name(i)
-                    except:
+                    except Exception:
                         name = f"GPU {i}"
                     if "capability" in error_msg.lower() or "sm_" in error_msg.lower() or "no kernel image" in error_msg.lower():
                         cuda_warning = f"{name} detected but not compatible with this PyTorch version. Install PyTorch nightly with CUDA 12.8+ for Blackwell support."

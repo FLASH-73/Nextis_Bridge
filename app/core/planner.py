@@ -1,9 +1,11 @@
+import json
+import os
+import re
+
+import google.generativeai as genai
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import json
-import re
-import os
-import google.generativeai as genai
+
 
 class GeminiPlanner:
     def __init__(self, api_key):
@@ -14,13 +16,13 @@ class GeminiPlanner:
     def plan(self, input_data):
         system_prompt = """
         You are the brain of a highly intelligent robotic arm. Your job is to decompose complex user commands into a tailored sequence of atomic actions.
-        
+
         INSTRUCTIONS:
         1. Break down the user's request into a logical step-by-step plan.
         2. You are NOT limited to a fixed set of tasks. You should generate descriptive "task" names that best fit the action (e.g., "Pick Apple", "Screw Nut", "Place on Shelf", "Open Drawer").
         3. The "task" field should be human-readable and concise.
         4. Use the "params" field for any specific details (coordinates, object IDs, target locations).
-        
+
         OUTPUT FORMAT:
         Output ONLY a valid JSON list of objects, each with "task" and "params".
 
@@ -56,14 +58,14 @@ class GeminiPlanner:
             {"task": "Place in Box B", "params": {"box_id": "B"}}
         ]
         """
-        
+
         # Construct Chat History for Gemini
-        history = []
+        _history = []
         user_message = ""
-        
+
         if isinstance(input_data, list):
             print(f"DEBUG: Planning with history length: {len(input_data)}")
-            
+
             # Extract last known plan
             last_plan = None
             for msg in reversed(input_data):
@@ -79,17 +81,17 @@ class GeminiPlanner:
                             break
                     except Exception as e:
                         print(f"DEBUG: Error extracting plan: {e}")
-            
+
             # Construct simple history string
             context_str = f"SYSTEM INSTRUCTION:\n{system_prompt}\n\nCONVERSATION HISTORY:\n"
-            
+
             for msg in input_data[:-1]: # All but last
                 role = "User" if msg.get("role") == "user" else "Assistant"
                 context_str += f"{role}: {msg.get('content')}\n"
-            
+
             last_msg = input_data[-1]
             last_content = last_msg.get('content')
-            
+
             if last_plan:
                 print("DEBUG: Injecting CURRENT PLAN into prompt.")
                 injection = f"""
@@ -134,14 +136,14 @@ class LocalPlanner:
     def __init__(self, model_id="Qwen/Qwen2.5-7B-Instruct", device="cuda"):
         print(f"Loading Local Planner Model: {model_id}...")
         self.device = device
-        
+
         # Proactive CUDA Check
         use_cuda = False
         if device != "cpu":
             try:
                 if torch.cuda.is_available():
                     # Try a small operation
-                    t = torch.tensor([1.0]).cuda()
+                    torch.tensor([1.0]).cuda()
                     use_cuda = True
             except Exception as e:
                 print(f"⚠️ CUDA detected but broken: {e}")
@@ -177,7 +179,7 @@ class LocalPlanner:
 
         system_prompt = """
         You are the brain of a robotic arm. Your job is to decompose user commands into a JSON list of sequential atomic tasks.
-        
+
         AVAILABLE TASKS:
         - move_to_bin(bin_id: str)  -> Move to a specific bin (A, B, C, etc.).
         - pick_object(object_name: str) -> Pick up an object.
@@ -195,7 +197,7 @@ class LocalPlanner:
         - If the user modifies the request (e.g., "replace X with Y"), YOU MUST PRESERVE all other parts of the previous plan that weren't changed.
         - Do not drop items from the plan unless explicitly told to remove them.
         - Merge the new intent with the existing context to form a complete, updated plan.
-        
+
         ID HANDLING:
         - If the user does NOT specify a bin/box ID (e.g., just "the box"), use "default" as the ID. Do NOT hallucinate "A", "B", or "C".
 
@@ -239,13 +241,13 @@ class LocalPlanner:
             {"task": "home", "params": {}}
         ]
         """
-        
+
         # Build messages list
         messages = [{"role": "system", "content": system_prompt}]
-        
+
         if isinstance(input_data, list):
             # It's a history list
-            
+
             # --- CONTEXT INJECTION STRATEGY ---
             # Extract the last valid plan from the assistant's history to force the model to see it.
             last_plan = None
@@ -258,17 +260,17 @@ class LocalPlanner:
                         if match:
                             last_plan = match.group(0)
                             break
-                    except:
+                    except Exception:
                         continue
-            
+
             for i, msg in enumerate(input_data):
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
-                
+
                 # If this is the LAST message (User's new request) and we found a previous plan, INJECT IT.
                 if i == len(input_data) - 1 and role == "user" and last_plan:
                     content = f"CURRENT PLAN:\n{last_plan}\n\nUSER REQUEST: {content}\n\nINSTRUCTION: Update the CURRENT PLAN based on the USER REQUEST. Keep all items from the CURRENT PLAN that are not explicitly removed or replaced."
-                
+
                 messages.append({"role": role, "content": content})
         else:
             # It's a single string
@@ -291,9 +293,9 @@ class LocalPlanner:
         generated_ids = [
             output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
         ]
-        
+
         response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        
+
         # Clean up response to find JSON
         try:
             # Find the first '[' and last ']'
