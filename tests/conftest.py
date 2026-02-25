@@ -61,6 +61,7 @@ for _mod in [
     "torch",
     "transformers",
     "can",
+    "cv2",
     "serial",
     "serial.tools",
     "serial.tools.list_ports",

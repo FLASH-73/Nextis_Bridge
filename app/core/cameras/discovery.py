@@ -3,7 +3,10 @@ import logging
 import re
 import time
 
-import cv2
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 logger = logging.getLogger(__name__)
 
