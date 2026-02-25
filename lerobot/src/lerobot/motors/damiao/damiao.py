@@ -22,7 +22,10 @@ Supports two connection modes:
 - SocketCAN: Native Linux CAN interface (e.g. can0 via gs_usb adapter)
 """
 
+import collections
 import logging
+import math
+import statistics
 import struct
 import serial
 import threading
@@ -44,6 +47,10 @@ from .tables import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Leader-side position read filter constants (hybrid median-EMA)
+LEADER_READ_FILTER_WINDOW = 5   # Circular buffer size for median filter
+LEADER_READ_FILTER_ALPHA = 0.92  # EMA alpha applied to median output (light smoothing)
 
 
 # --- SocketCAN support classes ---
@@ -402,7 +409,10 @@ class DamiaoMotorConfig:
         # Capped velocity for rate limiter (J4310 raw max_velocity=20.9 is too high)
         self.rate_limit_velocity = specs.get("rate_limit_velocity", self.max_velocity)
         # EMA position smoothing alpha (1.0=no filter, <1.0=smooth for low-inertia motors)
+        # DEPRECATED: replaced by filter_omega (second-order critically-damped filter)
         self.position_smoothing = specs.get("position_smoothing", 1.0)
+        # Second-order critically-damped filter natural frequency (rad/s)
+        self.filter_omega = specs.get("filter_omega", 55.0)
 
 
 @dataclass
@@ -480,7 +490,10 @@ class DamiaoMotorsBus:
         self._last_sync_write_time = None  # For real dt calculation in rate limiter
         self._quarantined_motors = set()  # Motors with corrupt encoder — no commands sent
         self._mit_offsets = {}  # name -> float: gap between MIT encoder and 0xCC encoder (dual-encoder motors)
+        self._filter_state: dict[str, tuple[float, float]] = {}  # name -> (filtered_pos, filtered_vel)
         self._active_joint_limits = dict(DEFAULT_JOINT_LIMITS)  # Mutable limits, overridden by calibration
+        self._read_filter_buffers: dict[str, collections.deque] = {}  # Median filter circular buffers
+        self._read_filter_prev: dict[str, float] = {}  # Previous EMA output per motor
 
         # Build motor configs
         for name, mcfg in config.motors.items():
@@ -603,6 +616,7 @@ class DamiaoMotorsBus:
         else:
             self._connect_serial()
 
+        self.reset_read_filters()
         self._is_connected = True
         logger.info(f"[Damiao] Connected with {len(self._motors)} motors")
 
@@ -799,6 +813,7 @@ class DamiaoMotorsBus:
 
                 self._enabled_motors.add(name)
                 self._last_goal_positions[name] = self._last_positions.get(name, 0.0)
+                self._filter_state[name] = (self._last_positions.get(name, 0.0), 0.0)
                 configured.append(name)
 
                 # Verify mode was set
@@ -1033,6 +1048,30 @@ class DamiaoMotorsBus:
         print(f"[Damiao] Motor '{name}' enabled in MIT mode (safe enable with limp frames)", flush=True)
         return True
 
+    def _filter_position(self, name: str, raw: float) -> float:
+        """Apply hybrid median-EMA filter to a raw position reading.
+
+        Eliminates encoder quantization staircase artifacts (hold-then-jump)
+        by centering step transitions temporally via median, with light EMA
+        to smooth median transitions.
+        """
+        if name not in self._read_filter_buffers:
+            self._read_filter_buffers[name] = collections.deque(maxlen=LEADER_READ_FILTER_WINDOW)
+            self._read_filter_prev[name] = raw
+
+        buf = self._read_filter_buffers[name]
+        buf.append(raw)
+
+        if len(buf) < 3:
+            self._read_filter_prev[name] = raw
+            return raw
+
+        median_val = statistics.median(buf)
+        prev = self._read_filter_prev[name]
+        filtered = LEADER_READ_FILTER_ALPHA * median_val + (1.0 - LEADER_READ_FILTER_ALPHA) * prev
+        self._read_filter_prev[name] = filtered
+        return filtered
+
     def sync_read(self, data_name: str, motors: list[str] | None = None, normalize: bool = True) -> dict[str, float]:
         """Read data from motors.
 
@@ -1094,6 +1133,9 @@ class DamiaoMotorsBus:
                 pos = motor.getPosition()
                 # Remove MIT encoder offset to return user-space position
                 pos = pos - self._mit_offsets.get(name, 0.0)
+                # Apply read filter (skip gripper — different encoder path)
+                if name != "gripper":
+                    pos = self._filter_position(name, pos)
                 self._last_positions[name] = pos
                 results[name] = pos
             elif data_name == "Present_Velocity":
@@ -1117,11 +1159,48 @@ class DamiaoMotorsBus:
                 pass
         self._enabled_motors = set()
         self._last_goal_positions.clear()
+        self._filter_state.clear()
         self._last_sync_write_time = None
         self._can_bus_dead = True
         print(f"[Damiao] All motors DISABLED. CAN bus marked dead.", flush=True)
         print(f"[Damiao] Fix: sudo ip link set {self.config.port} txqueuelen 256", flush=True)
         print(f"{'!'*70}\n", flush=True)
+
+    def _apply_position_filter(self, name: str, target: float,
+                                dt: float, omega: float) -> tuple[float, float]:
+        """Second-order critically-damped filter for position smoothing.
+
+        Returns (smoothed_position, smooth_velocity). The filter has zero
+        steady-state error and produces analytically smooth velocity output
+        without differentiation noise.
+
+        Args:
+            name: Motor name (key into _filter_state)
+            target: Target position (rate-limited input from leader)
+            dt: Time step in seconds
+            omega: Natural frequency in rad/s (higher = faster tracking)
+
+        Returns:
+            Tuple of (filtered_position, filtered_velocity)
+        """
+        if dt > 0.050:
+            # Stall detected — snap to target with zero velocity
+            self._filter_state[name] = (target, 0.0)
+            return target, 0.0
+
+        if name not in self._filter_state:
+            # First call — initialize at target with zero velocity
+            self._filter_state[name] = (target, 0.0)
+            return target, 0.0
+
+        x, v = self._filter_state[name]
+        e = math.exp(-omega * dt)
+        err = x - target
+        x_new = target + e * (err * (1.0 + omega * dt) + v * dt)
+        v_new = e * (v * (1.0 - omega * dt) - omega * omega * dt * err)
+
+        self._filter_state[name] = (x_new, v_new)
+        return x_new, v_new
 
     def sync_write(self, data_name: str, values: dict[str, float], normalize: bool = True) -> None:
         """Write goal positions to motors using MIT or POS_VEL mode.
@@ -1217,21 +1296,11 @@ class DamiaoMotorsBus:
                     kp = min(kp, 5.0)
                     kd = min(kd, 1.0)
 
-                # EMA position smoothing (J4310: low inertia tracks 60Hz steps → jitter)
-                alpha = mcfg.position_smoothing
-                if alpha < 1.0 and name in self._last_goal_positions:
-                    value = alpha * value + (1.0 - alpha) * self._last_goal_positions[name]
-
-                # MIT MODE VELOCITY LIMITING + VELOCITY FEEDFORWARD
-                # Rate-limit the position target AND compute v_des so kd assists
-                # motion instead of fighting it. v_des = actual_step/dt makes the
-                # damping term vanish during intentional motion (v ≈ v_des → kd≈0)
-                # and only activate for disturbance rejection.
+                # RATE LIMITING — applied to raw target before filter
                 v_des = 0.0
                 if name in self._last_goal_positions:
                     last_goal = self._last_goal_positions[name]
 
-                    # Rate limiting
                     if name == "gripper":
                         max_step = mcfg.max_velocity * real_dt
                     elif self._velocity_limit < 1.0:
@@ -1250,12 +1319,20 @@ class DamiaoMotorsBus:
                                       f"{delta:+.4f} -> {max_step:.4f} rad, "
                                       f"(vel_limit={vel_str})", flush=True)
 
-                    # Velocity feedforward: always compute from actual step
-                    actual_step = value - last_goal
-                    if real_dt > 0:
-                        v_des = actual_step / real_dt
-
+                # Store rate-limited target for next rate limiter cycle
                 self._last_goal_positions[name] = value
+
+                # SECOND-ORDER CRITICALLY-DAMPED FILTER
+                # Replaces EMA smoothing + finite-difference velocity.
+                # Outputs smooth position AND analytical velocity with zero
+                # steady-state error and no differentiation noise.
+                omega = mcfg.filter_omega
+                if name == "gripper":
+                    omega = 80.0  # Gripper needs fast tracking
+                value, v_des = self._apply_position_filter(name, value, real_dt, omega)
+
+                # Clamp v_des to encoding range for safety
+                v_des = max(-mcfg.v_max, min(mcfg.v_max, v_des))
 
                 # Apply MIT encoder offset (dual-encoder motors like J8009P-2EC).
                 # Joint limit clamping above works in user-space; now shift to MIT-encoder-space.
@@ -1450,7 +1527,9 @@ class DamiaoMotorsBus:
 
         self._enabled_motors.clear()
         self._last_goal_positions.clear()
+        self._filter_state.clear()
         self._last_sync_write_time = None
+        self.reset_read_filters()
 
         if self._use_socketcan:
             if hasattr(self._control, 'shutdown'):
@@ -1460,6 +1539,11 @@ class DamiaoMotorsBus:
 
         self._is_connected = False
         logger.info("[Damiao] Disconnected")
+
+    def reset_read_filters(self) -> None:
+        """Clear position read filter state (call on reconnect or mode change)."""
+        self._read_filter_buffers.clear()
+        self._read_filter_prev.clear()
 
     def read_torques(self) -> dict[str, float]:
         """Read current torques from all motors (for safety monitoring).

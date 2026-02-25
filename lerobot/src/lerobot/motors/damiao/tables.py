@@ -37,9 +37,11 @@ DAMIAO_MOTOR_SPECS = {
         "p_max": 12.5,   # rad — position encoding range
         "v_max": 45.0,   # rad/s — velocity encoding range (was 8.0 = DM4340 WRONG)
         "t_max": 54.0,   # Nm — torque encoding range (was 28.0 = DM4340 WRONG)
-        # EMA smoothing: XL330 leader encoder (4096 steps/rev) produces staircase commands
-        # at 60Hz. 9:1 gear ratio + 35Nm faithfully reproduces every quantization step.
+        # DEPRECATED: replaced by filter_omega (second-order critically-damped filter)
         "position_smoothing": 0.80,
+        # Second-order critically-damped filter natural frequency (rad/s).
+        # Heavy motor with high inertia — more smoothing needed.
+        "filter_omega": 50.0,
     },
     # J4340P: Medium torque motor for elbow joints
     "J4340P": {
@@ -53,9 +55,10 @@ DAMIAO_MOTOR_SPECS = {
         "p_max": 12.5,
         "v_max": 40.0,
         "t_max": 28.0,
-        # EMA smoothing: XL330 encoder quantization visible at low speeds.
-        # 6:1 gear ratio less aggressive than J8009P; alpha=0.85 matches J4310.
+        # DEPRECATED: replaced by filter_omega (second-order critically-damped filter)
         "position_smoothing": 0.85,
+        # Second-order critically-damped filter natural frequency (rad/s).
+        "filter_omega": 55.0,
     },
     # J4310: Precision motor for wrist joints and gripper
     "J4310": {
@@ -74,9 +77,11 @@ DAMIAO_MOTOR_SPECS = {
         # torque spikes and oscillation on this low-inertia motor. Cap at 10.0 rad/s
         # (still 1.5× faster than J8009P) to keep torque demands proportional.
         "rate_limit_velocity": 10.0,
-        # EMA smoothing: low inertia tracks 60Hz steps perfectly → jitter.
-        # alpha=0.85 → 95% in ~2 frames (33ms). Increase toward 1.0 for less filtering.
+        # DEPRECATED: replaced by filter_omega (second-order critically-damped filter)
         "position_smoothing": 0.85,
+        # Second-order critically-damped filter natural frequency (rad/s).
+        # Light motor — can track faster.
+        "filter_omega": 60.0,
     },
 }
 
