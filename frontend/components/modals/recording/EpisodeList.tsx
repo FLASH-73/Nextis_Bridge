@@ -19,7 +19,7 @@ export default function EpisodeList({ episodes }: EpisodeListProps) {
     <div className="space-y-1">
       {visible.map((ep) => (
         <div
-          key={ep.index}
+          key={ep.id}
           className="flex items-center justify-between px-2 py-1.5 rounded-lg bg-zinc-800/50"
         >
           <span className="text-xs text-zinc-300 font-mono">#{ep.index}</span>

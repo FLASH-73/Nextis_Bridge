@@ -15,7 +15,7 @@ export const datasetsApi = {
     ),
 
   deleteEpisode: (repoId: string, index: number) =>
-    api.post<void>(
+    api.delete<void>(
       `/datasets/${encodeURIComponent(repoId)}/episode/${index}`
     ),
 
