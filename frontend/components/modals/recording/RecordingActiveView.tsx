@@ -25,6 +25,7 @@ export default function RecordingActiveView({
   const [episodeHistory, setEpisodeHistory] = useState<EpisodeRecord[]>([]);
   const [isBusy, setIsBusy] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
+  const nextHistoryId = useRef(0);
 
   // Fetch available cameras on mount
   useEffect(() => {
@@ -90,10 +91,11 @@ export default function RecordingActiveView({
     const duration =
       episodeStartTime != null ? (Date.now() - episodeStartTime) / 1000 : 0;
     try {
-      await recordingApi.stopEpisode();
+      const result = await recordingApi.stopEpisode();
+      const id = nextHistoryId.current++;
       setEpisodeHistory((prev) => [
         ...prev,
-        { index: status.episode_count + 1, duration, status: "saved" },
+        { id, index: result.episode_count ?? status.episode_count + 1, duration, status: "saved" },
       ]);
     } catch (e) {
       console.error("Failed to save episode:", e);
@@ -108,11 +110,12 @@ export default function RecordingActiveView({
     const duration =
       episodeStartTime != null ? (Date.now() - episodeStartTime) / 1000 : 0;
     try {
-      await recordingApi.stopEpisode();
+      const result = await recordingApi.stopEpisode();
       await recordingApi.deleteLastEpisode();
+      const id = nextHistoryId.current++;
       setEpisodeHistory((prev) => [
         ...prev,
-        { index: status.episode_count + 1, duration, status: "discarded" },
+        { id, index: result.episode_count ?? status.episode_count + 1, duration, status: "discarded" },
       ]);
     } catch (e) {
       console.error("Failed to discard episode:", e);

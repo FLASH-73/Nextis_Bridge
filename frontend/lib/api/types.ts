@@ -369,6 +369,7 @@ export interface RecordingStatus {
 }
 
 export interface EpisodeRecord {
+  id: number;
   index: number;
   duration: number;
   status: "saved" | "discarded";

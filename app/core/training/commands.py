@@ -156,8 +156,28 @@ class CommandMixin:
         cmd.extend([
             f"--dataset.repo_id={job.dataset_repo_id}",
             f"--dataset.root={dataset_full_path}",
-            "--dataset.video_backend=pyav",  # Use pyav (more stable than torchcodec)
+            f"--dataset.video_backend={config.get('video_backend', 'pyav')}",
         ])
+
+        # Optional episode filtering (e.g. "0:76" or "0,1,2,5,10" or "[0,1,2]")
+        if config.get("dataset_episodes"):
+            episodes = config["dataset_episodes"]
+            if isinstance(episodes, str):
+                episodes = episodes.strip()
+                if ":" in episodes:
+                    # Range syntax: "0:76" → [0,1,2,...,75]
+                    parts = episodes.split(":")
+                    start, end = int(parts[0]), int(parts[1])
+                    episode_list = list(range(start, end))
+                    cmd.append(f"--dataset.episodes=[{','.join(str(i) for i in episode_list)}]")
+                elif episodes.startswith("["):
+                    # Already a list literal: "[0,1,2,3]"
+                    cmd.append(f"--dataset.episodes={episodes}")
+                else:
+                    # Comma-separated: "0,1,2,3" → "[0,1,2,3]"
+                    cmd.append(f"--dataset.episodes=[{episodes}]")
+            elif isinstance(episodes, list):
+                cmd.append(f"--dataset.episodes=[{','.join(str(i) for i in episodes)}]")
 
         # Policy configuration
         if job.policy_type == PolicyType.SMOLVLA:
@@ -257,6 +277,9 @@ class CommandMixin:
             # Generic policy type
             cmd.append(f"--policy.type={job.policy_type.value}")
 
+        # Output directory (allow override from config)
+        output_dir = config.get("output_dir_custom") or str(job.output_dir)
+
         # Training parameters
         cmd.extend([
             f"--steps={config.get('steps', 100000)}",
@@ -264,9 +287,24 @@ class CommandMixin:
             f"--num_workers={config.get('num_workers', 4)}",
             f"--save_freq={config.get('save_freq', 20000)}",
             f"--eval_freq={config.get('eval_freq', 20000)}",
-            "--log_freq=200",
-            f"--output_dir={job.output_dir}",
+            f"--log_freq={config.get('log_freq', 200)}",
+            f"--output_dir={output_dir}",
         ])
+
+        # Optional image_size / resize_size (applies to all policies with vision)
+        if config.get("image_size"):
+            cmd.append(f"--policy.image_size={config['image_size']}")
+        if config.get("resize_size"):
+            rs = config["resize_size"]
+            if isinstance(rs, str) and rs.strip():
+                # Accept "512,512" or "512" format
+                cmd.append(f"--policy.resize_size=[{rs.strip()}]")
+            elif isinstance(rs, list):
+                cmd.append(f"--policy.resize_size=[{','.join(str(x) for x in rs)}]")
+
+        # Optional evaluation settings
+        if config.get("eval_n_episodes"):
+            cmd.append(f"--eval.n_episodes={config['eval_n_episodes']}")
 
         # Learning rate
         if "learning_rate" in config:

@@ -68,6 +68,19 @@ export default function TrainModal({ isOpen, onClose, maximizedWindow, setMaximi
         latent_dim: 32,
         kl_weight: 10.0,
         dim_model: 512,
+        // System / dataloader (Custom mode)
+        num_workers: 4,
+        save_freq: 20000,
+        eval_freq: 20000,
+        // Dataset episodes filter (Custom mode) — e.g. "0:76" or "0,1,2,5"
+        dataset_episodes: '',
+        // Model (Custom mode)
+        image_size: 0,          // 0 = not set (use policy default)
+        resize_size: '',        // empty = not set
+        // Evaluation (Custom mode)
+        eval_n_episodes: 0,     // 0 = not set
+        // Output (Custom mode)
+        output_dir_custom: '',  // empty = auto-generated
     });
 
     // Quantile stats state (for Pi0.5)

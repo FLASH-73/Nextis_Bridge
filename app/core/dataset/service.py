@@ -343,11 +343,113 @@ class DatasetService:
         info["total_episodes"] = len(df)
         if "length" in df.columns:
             info["total_frames"] = int(df["length"].sum())
+        # Keep splits.train in sync with total_episodes
+        if "splits" in info:
+            info["splits"]["train"] = f"0:{len(df)}"
 
         with open(info_path, "w") as f:
             json.dump(info, f, indent=4)
 
         return {"status": "success", "new_count": len(df)}
+
+    def consolidate_dataset(self, repo_id: str) -> dict:
+        """Rebuild dataset parquet files to remove orphan frames from discarded episodes.
+
+        When episodes are deleted, only metadata is updated but the actual frame data
+        in data/chunk-*.parquet is left untouched. This method:
+        1. Reads the episodes metadata to determine valid episode indices.
+        2. Filters orphan frames from data parquet files.
+        3. Rebuilds contiguous episode_index and global index columns.
+        4. Recomputes dataset_from_index / dataset_to_index in episodes metadata.
+        5. Updates info.json (total_frames, splits).
+        """
+        import numpy as np
+
+        dataset_root = self.base_path / repo_id
+        if not dataset_root.exists():
+            raise FileNotFoundError(f"Dataset {repo_id} not found")
+
+        info_path = dataset_root / "meta" / "info.json"
+        if not info_path.exists():
+            raise FileNotFoundError(f"Dataset info not found at {info_path}")
+
+        # 1. Load episodes metadata to get valid episode indices
+        episodes_path = dataset_root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        if not episodes_path.exists():
+            raise FileNotFoundError("Episodes metadata not found")
+
+        episodes_df = pd.read_parquet(episodes_path)
+        valid_episode_indices = set(episodes_df["episode_index"].tolist())
+        logger.info(f"[Consolidate] {repo_id}: {len(valid_episode_indices)} valid episodes: {sorted(valid_episode_indices)}")
+
+        # 2. Load and filter all data parquet files
+        data_dir = dataset_root / "data"
+        if not data_dir.exists():
+            raise FileNotFoundError("Data directory not found")
+
+        total_removed = 0
+        global_index = 0  # Running global frame index across all parquet files
+
+        for parquet_file in sorted(data_dir.rglob("*.parquet")):
+            df = pd.read_parquet(parquet_file)
+            original_len = len(df)
+
+            # Filter out orphan frames (frames whose episode_index is not in valid set)
+            df = df[df["episode_index"].isin(valid_episode_indices)].copy()
+            removed = original_len - len(df)
+            total_removed += removed
+
+            if len(df) > 0:
+                # Rebuild contiguous global "index" column
+                df["index"] = range(global_index, global_index + len(df))
+                global_index += len(df)
+
+            # Rewrite parquet file
+            df.to_parquet(parquet_file, index=False)
+
+            if removed > 0:
+                logger.info(f"[Consolidate] {parquet_file.name}: removed {removed} orphan frames ({original_len} → {len(df)})")
+
+        total_frames = global_index
+
+        # 3. Recompute dataset_from_index / dataset_to_index in episodes metadata
+        # Load the cleaned data to compute per-episode frame ranges
+        all_data = pd.read_parquet(data_dir)
+        for ep_idx in sorted(valid_episode_indices):
+            ep_mask = all_data["episode_index"] == ep_idx
+            ep_frames = all_data[ep_mask]
+            if len(ep_frames) > 0:
+                from_idx = int(ep_frames["index"].iloc[0])
+                to_idx = int(ep_frames["index"].iloc[-1]) + 1
+                ep_row = episodes_df["episode_index"] == ep_idx
+                episodes_df.loc[ep_row, "dataset_from_index"] = from_idx
+                episodes_df.loc[ep_row, "dataset_to_index"] = to_idx
+                episodes_df.loc[ep_row, "length"] = len(ep_frames)
+
+        # Write updated episodes metadata
+        episodes_df.to_parquet(episodes_path, index=False)
+
+        # 4. Update info.json
+        with open(info_path, "r") as f:
+            info = json.load(f)
+
+        old_frames = info.get("total_frames", 0)
+        info["total_frames"] = total_frames
+        info["total_episodes"] = len(valid_episode_indices)
+        info["splits"]["train"] = f"0:{len(valid_episode_indices)}"
+
+        with open(info_path, "w") as f:
+            json.dump(info, f, indent=4)
+
+        logger.info(f"[Consolidate] {repo_id}: done. Removed {total_removed} orphan frames. "
+                     f"Frames: {old_frames} → {total_frames}. Episodes: {len(valid_episode_indices)}")
+
+        return {
+            "status": "ok",
+            "total_episodes": len(valid_episode_indices),
+            "total_frames": total_frames,
+            "orphan_frames_removed": total_removed,
+        }
 
     def delete_dataset(self, repo_id: str):
         """Deletes an entire dataset repository."""

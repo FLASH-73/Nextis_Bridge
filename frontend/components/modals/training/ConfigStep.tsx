@@ -51,6 +51,19 @@ export interface TrainingConfig {
     latent_dim: number;
     kl_weight: number;
     dim_model: number;
+    // System / dataloader (Custom mode)
+    num_workers: number;
+    save_freq: number;
+    eval_freq: number;
+    // Dataset (Custom mode)
+    dataset_episodes: string;
+    // Model (Custom mode)
+    image_size: number;
+    resize_size: string;
+    // Evaluation (Custom mode)
+    eval_n_episodes: number;
+    // Output (Custom mode)
+    output_dir_custom: string;
 }
 
 export interface QuantileStats {
@@ -113,8 +126,35 @@ export default function ConfigStep({
                 policy_name: policyName || undefined,
             };
 
-            // Filter and map policy-specific options
-            if (policyType === 'pi05') {
+            // Filter and map policy-specific options — strip fields not valid for each policy's config
+            if (policyType === 'diffusion') {
+                const {
+                    freeze_vision_encoder, train_expert_only, train_state_proj,
+                    pretrained_path, use_quantile_normalization,
+                    chunk_size, n_action_steps_pi05,
+                    lora_rank, lora_alpha, lora_dropout,
+                    chunk_size_act, n_action_steps_act, use_vae, latent_dim, kl_weight, dim_model,
+                    // NOT valid for DiffusionConfig
+                    dtype, compile_model, gradient_checkpointing,
+                    ...diffusionConfig
+                } = trainingConfig;
+                trainingConfig = diffusionConfig;
+            } else if (policyType === 'smolvla') {
+                const {
+                    // Remove diffusion-specific
+                    horizon, noise_scheduler_type, num_train_timesteps,
+                    // Remove Pi0.5-specific
+                    pretrained_path, use_quantile_normalization,
+                    chunk_size, n_action_steps_pi05,
+                    lora_rank, lora_alpha, lora_dropout,
+                    // Remove ACT-specific
+                    chunk_size_act, n_action_steps_act, use_vae, latent_dim, kl_weight, dim_model,
+                    // NOT valid for SmolVLA
+                    dtype, compile_model, gradient_checkpointing,
+                    ...smolvlaConfig
+                } = trainingConfig;
+                trainingConfig = smolvlaConfig;
+            } else if (policyType === 'pi05') {
                 // Remove SmolVLA-specific options that are not valid for Pi0.5
                 const {
                     freeze_vision_encoder,
@@ -151,15 +191,16 @@ export default function ConfigStep({
                     n_obs_steps,
                     // Remove Pi0.5-specific
                     pretrained_path,
-                    compile_model,
-                    gradient_checkpointing,
-                    dtype,
                     use_quantile_normalization,
                     chunk_size,
                     n_action_steps_pi05,
                     lora_rank,
                     lora_alpha,
                     lora_dropout,
+                    // NOT valid for ACTConfig
+                    dtype,
+                    compile_model,
+                    gradient_checkpointing,
                     // Remove ACT internal keys (remap below)
                     chunk_size_act,
                     n_action_steps_act,
@@ -172,6 +213,13 @@ export default function ConfigStep({
                     n_obs_steps: 1,
                 };
             }
+
+            // Clean up optional fields — don't send empty/zero values to avoid overriding defaults
+            if (!trainingConfig.dataset_episodes) delete trainingConfig.dataset_episodes;
+            if (!trainingConfig.image_size) delete trainingConfig.image_size;
+            if (!trainingConfig.resize_size) delete trainingConfig.resize_size;
+            if (!trainingConfig.eval_n_episodes) delete trainingConfig.eval_n_episodes;
+            if (!trainingConfig.output_dir_custom) delete trainingConfig.output_dir_custom;
 
             const data: any = await trainingApi.start({
                 dataset_repo_id: selectedDataset,
@@ -258,8 +306,8 @@ export default function ConfigStep({
                 <div className="bg-neutral-50 dark:bg-zinc-800/50 rounded-xl p-4 border border-neutral-200 dark:border-zinc-700 space-y-4">
                     <h3 className="text-sm font-bold text-neutral-700 dark:text-zinc-300">Custom Parameters</h3>
 
+                    {/* Core Training */}
                     <div className="grid grid-cols-2 gap-4">
-                        {/* Steps */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Training Steps</label>
                             <input
@@ -267,50 +315,156 @@ export default function ConfigStep({
                                 value={config.steps}
                                 onChange={(e) => setConfig(c => ({ ...c, steps: parseInt(e.target.value) || 10000 }))}
                                 className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                                min={1000}
+                                min={100}
                                 step={1000}
                             />
                         </div>
-
-                        {/* Batch Size */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Batch Size</label>
-                            <select
+                            <input
+                                type="number"
                                 value={config.batch_size}
-                                onChange={(e) => setConfig(c => ({ ...c, batch_size: parseInt(e.target.value) }))}
+                                onChange={(e) => setConfig(c => ({ ...c, batch_size: parseInt(e.target.value) || 1 }))}
                                 className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value={4}>4 (low VRAM)</option>
-                                <option value={8}>8 (default)</option>
-                                <option value={16}>16 (high VRAM)</option>
-                                <option value={32}>32 (very high VRAM)</option>
-                            </select>
+                                min={1}
+                                step={1}
+                                placeholder="e.g. 56"
+                            />
                         </div>
-
-                        {/* Learning Rate */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Learning Rate</label>
-                            <select
+                            <input
+                                type="text"
                                 value={config.learning_rate}
-                                onChange={(e) => setConfig(c => ({ ...c, learning_rate: parseFloat(e.target.value) }))}
+                                onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    if (!isNaN(v)) setConfig(c => ({ ...c, learning_rate: v }));
+                                }}
                                 className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value={0.00001}>1e-5 (conservative)</option>
-                                <option value={0.0001}>1e-4 (default)</option>
-                                <option value={0.001}>1e-3 (aggressive)</option>
-                            </select>
+                                placeholder="e.g. 1e-4"
+                            />
                         </div>
-
-                        {/* Warmup Steps */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Warmup Steps</label>
                             <input
                                 type="number"
                                 value={config.warmup_steps}
-                                onChange={(e) => setConfig(c => ({ ...c, warmup_steps: parseInt(e.target.value) || 1000 }))}
+                                onChange={(e) => setConfig(c => ({ ...c, warmup_steps: parseInt(e.target.value) || 0 }))}
                                 className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
                                 min={0}
                                 step={100}
+                            />
+                        </div>
+                    </div>
+
+                    {/* System & Dataloader */}
+                    <div>
+                        <h4 className="text-xs font-semibold text-neutral-500 dark:text-zinc-500 uppercase tracking-wider mb-2">System & Dataloader</h4>
+                        <div className="grid grid-cols-3 gap-3">
+                            <div>
+                                <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Num Workers</label>
+                                <input
+                                    type="number"
+                                    value={config.num_workers}
+                                    onChange={(e) => setConfig(c => ({ ...c, num_workers: parseInt(e.target.value) || 4 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    min={0}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Save Freq</label>
+                                <input
+                                    type="number"
+                                    value={config.save_freq}
+                                    onChange={(e) => setConfig(c => ({ ...c, save_freq: parseInt(e.target.value) || 20000 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    min={100}
+                                    step={1000}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Eval Freq</label>
+                                <input
+                                    type="number"
+                                    value={config.eval_freq}
+                                    onChange={(e) => setConfig(c => ({ ...c, eval_freq: parseInt(e.target.value) || 20000 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    min={100}
+                                    step={1000}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Dataset */}
+                    <div>
+                        <h4 className="text-xs font-semibold text-neutral-500 dark:text-zinc-500 uppercase tracking-wider mb-2">Dataset</h4>
+                        <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Episodes <span className="text-neutral-400 dark:text-zinc-600">(optional)</span></label>
+                            <input
+                                type="text"
+                                value={config.dataset_episodes}
+                                onChange={(e) => setConfig(c => ({ ...c, dataset_episodes: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                placeholder="e.g. 0:76 or 0,1,2,5,10"
+                            />
+                        </div>
+                    </div>
+
+                    {/* Model / Vision */}
+                    <div>
+                        <h4 className="text-xs font-semibold text-neutral-500 dark:text-zinc-500 uppercase tracking-wider mb-2">Model / Vision</h4>
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Image Size <span className="text-neutral-400 dark:text-zinc-600">(optional)</span></label>
+                                <input
+                                    type="number"
+                                    value={config.image_size || ''}
+                                    onChange={(e) => setConfig(c => ({ ...c, image_size: parseInt(e.target.value) || 0 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    placeholder="e.g. 512"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Resize Size <span className="text-neutral-400 dark:text-zinc-600">(optional)</span></label>
+                                <input
+                                    type="text"
+                                    value={config.resize_size}
+                                    onChange={(e) => setConfig(c => ({ ...c, resize_size: e.target.value }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    placeholder="e.g. 512,512"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Evaluation */}
+                    <div>
+                        <h4 className="text-xs font-semibold text-neutral-500 dark:text-zinc-500 uppercase tracking-wider mb-2">Evaluation</h4>
+                        <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Eval Episodes <span className="text-neutral-400 dark:text-zinc-600">(optional)</span></label>
+                            <input
+                                type="number"
+                                value={config.eval_n_episodes || ''}
+                                onChange={(e) => setConfig(c => ({ ...c, eval_n_episodes: parseInt(e.target.value) || 0 }))}
+                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100 max-w-[200px]"
+                                placeholder="e.g. 50"
+                                min={0}
+                            />
+                        </div>
+                    </div>
+
+                    {/* Output */}
+                    <div>
+                        <h4 className="text-xs font-semibold text-neutral-500 dark:text-zinc-500 uppercase tracking-wider mb-2">Output</h4>
+                        <div>
+                            <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Output Directory <span className="text-neutral-400 dark:text-zinc-600">(optional override)</span></label>
+                            <input
+                                type="text"
+                                value={config.output_dir_custom}
+                                onChange={(e) => setConfig(c => ({ ...c, output_dir_custom: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                placeholder="e.g. outputs/my_custom_run"
                             />
                         </div>
                     </div>
@@ -331,22 +485,35 @@ export default function ConfigStep({
                                 onChange={(e) => setConfig(c => ({ ...c, n_obs_steps: parseInt(e.target.value) || 2 }))}
                                 className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
                                 min={1}
-                                max={10}
                             />
                         </div>
 
                         {/* Horizon */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Horizon (Action Chunk)</label>
-                            <select
-                                value={config.horizon}
-                                onChange={(e) => setConfig(c => ({ ...c, horizon: parseInt(e.target.value) }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value={8}>8 (short)</option>
-                                <option value={16}>16 (default)</option>
-                                <option value={32}>32 (long)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <>
+                                    <input
+                                        type="number"
+                                        value={config.horizon}
+                                        onChange={(e) => setConfig(c => ({ ...c, horizon: parseInt(e.target.value) || 16 }))}
+                                        className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                        min={8}
+                                        step={8}
+                                    />
+                                    <p className="text-xs text-neutral-400 dark:text-zinc-600 mt-1">Must be a multiple of 8</p>
+                                </>
+                            ) : (
+                                <select
+                                    value={config.horizon}
+                                    onChange={(e) => setConfig(c => ({ ...c, horizon: parseInt(e.target.value) }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value={8}>8 (short)</option>
+                                    <option value={16}>16 (default)</option>
+                                    <option value={32}>32 (long)</option>
+                                </select>
+                            )}
                         </div>
 
                         {/* Noise Scheduler */}
@@ -365,15 +532,25 @@ export default function ConfigStep({
                         {/* Diffusion Steps */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Diffusion Steps</label>
-                            <select
-                                value={config.num_train_timesteps}
-                                onChange={(e) => setConfig(c => ({ ...c, num_train_timesteps: parseInt(e.target.value) }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value={50}>50 (fast)</option>
-                                <option value={100}>100 (default)</option>
-                                <option value={200}>200 (high quality)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <input
+                                    type="number"
+                                    value={config.num_train_timesteps}
+                                    onChange={(e) => setConfig(c => ({ ...c, num_train_timesteps: parseInt(e.target.value) || 100 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    min={1}
+                                />
+                            ) : (
+                                <select
+                                    value={config.num_train_timesteps}
+                                    onChange={(e) => setConfig(c => ({ ...c, num_train_timesteps: parseInt(e.target.value) }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value={50}>50 (fast)</option>
+                                    <option value={100}>100 (default)</option>
+                                    <option value={200}>200 (high quality)</option>
+                                </select>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -432,41 +609,71 @@ export default function ConfigStep({
                         {/* Pretrained Model */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Pretrained Model</label>
-                            <select
-                                value={config.pretrained_path}
-                                onChange={(e) => setConfig(c => ({ ...c, pretrained_path: e.target.value }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value="lerobot/pi05_base">Pi0.5 Base (General)</option>
-                                <option value="lerobot/pi05_libero">Pi0.5 Libero (Sim-trained)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <input
+                                    type="text"
+                                    value={config.pretrained_path}
+                                    onChange={(e) => setConfig(c => ({ ...c, pretrained_path: e.target.value }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    placeholder="e.g. lerobot/pi05_base"
+                                />
+                            ) : (
+                                <select
+                                    value={config.pretrained_path}
+                                    onChange={(e) => setConfig(c => ({ ...c, pretrained_path: e.target.value }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value="lerobot/pi05_base">Pi0.5 Base (General)</option>
+                                    <option value="lerobot/pi05_libero">Pi0.5 Libero (Sim-trained)</option>
+                                </select>
+                            )}
                         </div>
 
                         {/* Data Type */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Precision (dtype)</label>
-                            <select
-                                value={config.dtype}
-                                onChange={(e) => setConfig(c => ({ ...c, dtype: e.target.value }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value="bfloat16">bfloat16 (recommended)</option>
-                                <option value="float32">float32 (higher memory)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <input
+                                    type="text"
+                                    value={config.dtype}
+                                    onChange={(e) => setConfig(c => ({ ...c, dtype: e.target.value }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    placeholder="e.g. bfloat16"
+                                />
+                            ) : (
+                                <select
+                                    value={config.dtype}
+                                    onChange={(e) => setConfig(c => ({ ...c, dtype: e.target.value }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value="bfloat16">bfloat16 (recommended)</option>
+                                    <option value="float32">float32 (higher memory)</option>
+                                </select>
+                            )}
                         </div>
 
                         {/* Chunk Size */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Chunk Size (Action Horizon)</label>
-                            <select
-                                value={config.chunk_size}
-                                onChange={(e) => setConfig(c => ({ ...c, chunk_size: parseInt(e.target.value) }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value={25}>25 (short horizon)</option>
-                                <option value={50}>50 (default)</option>
-                                <option value={100}>100 (long horizon)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <input
+                                    type="number"
+                                    value={config.chunk_size}
+                                    onChange={(e) => setConfig(c => ({ ...c, chunk_size: parseInt(e.target.value) || 50 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    min={1}
+                                />
+                            ) : (
+                                <select
+                                    value={config.chunk_size}
+                                    onChange={(e) => setConfig(c => ({ ...c, chunk_size: parseInt(e.target.value) }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value={25}>25 (short horizon)</option>
+                                    <option value={50}>50 (default)</option>
+                                    <option value={100}>100 (long horizon)</option>
+                                </select>
+                            )}
                         </div>
 
                         {/* Action Steps */}
@@ -503,16 +710,26 @@ export default function ConfigStep({
                             <div className="flex items-center gap-4 mt-2">
                                 <div>
                                     <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">LoRA Rank</label>
-                                    <select
-                                        value={config.lora_rank}
-                                        onChange={(e) => setConfig(c => ({ ...c, lora_rank: parseInt(e.target.value) }))}
-                                        className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                                    >
-                                        <option value={4}>4 (minimal)</option>
-                                        <option value={8}>8 (recommended)</option>
-                                        <option value={16}>16 (more capacity)</option>
-                                        <option value={32}>32 (high capacity)</option>
-                                    </select>
+                                    {preset === 'custom' ? (
+                                        <input
+                                            type="number"
+                                            value={config.lora_rank}
+                                            onChange={(e) => setConfig(c => ({ ...c, lora_rank: parseInt(e.target.value) || 8 }))}
+                                            className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100 w-20"
+                                            min={1}
+                                        />
+                                    ) : (
+                                        <select
+                                            value={config.lora_rank}
+                                            onChange={(e) => setConfig(c => ({ ...c, lora_rank: parseInt(e.target.value) }))}
+                                            className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                        >
+                                            <option value={4}>4 (minimal)</option>
+                                            <option value={8}>8 (recommended)</option>
+                                            <option value={16}>16 (more capacity)</option>
+                                            <option value={32}>32 (high capacity)</option>
+                                        </select>
+                                    )}
                                 </div>
                                 <div className="text-xs text-neutral-500 dark:text-zinc-500">
                                     Higher rank = more trainable params, better quality, more memory
@@ -574,15 +791,25 @@ export default function ConfigStep({
                         {/* Chunk Size */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Chunk Size (Action Horizon)</label>
-                            <select
-                                value={config.chunk_size_act}
-                                onChange={(e) => setConfig(c => ({ ...c, chunk_size_act: parseInt(e.target.value) }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value={25}>25 (short horizon)</option>
-                                <option value={50}>50 (medium)</option>
-                                <option value={100}>100 (default, 2s at 50Hz)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <input
+                                    type="number"
+                                    value={config.chunk_size_act}
+                                    onChange={(e) => setConfig(c => ({ ...c, chunk_size_act: parseInt(e.target.value) || 100 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    min={1}
+                                />
+                            ) : (
+                                <select
+                                    value={config.chunk_size_act}
+                                    onChange={(e) => setConfig(c => ({ ...c, chunk_size_act: parseInt(e.target.value) }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value={25}>25 (short horizon)</option>
+                                    <option value={50}>50 (medium)</option>
+                                    <option value={100}>100 (default, 2s at 50Hz)</option>
+                                </select>
+                            )}
                         </div>
 
                         {/* Action Steps */}
@@ -601,27 +828,47 @@ export default function ConfigStep({
                         {/* Vision Backbone */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Vision Backbone</label>
-                            <select
-                                value={config.vision_backbone}
-                                onChange={(e) => setConfig(c => ({ ...c, vision_backbone: e.target.value }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value="resnet18">ResNet18 (default, lighter)</option>
-                                <option value="resnet34">ResNet34 (more capacity)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <input
+                                    type="text"
+                                    value={config.vision_backbone}
+                                    onChange={(e) => setConfig(c => ({ ...c, vision_backbone: e.target.value }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    placeholder="e.g. resnet18"
+                                />
+                            ) : (
+                                <select
+                                    value={config.vision_backbone}
+                                    onChange={(e) => setConfig(c => ({ ...c, vision_backbone: e.target.value }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value="resnet18">ResNet18 (default, lighter)</option>
+                                    <option value="resnet34">ResNet34 (more capacity)</option>
+                                </select>
+                            )}
                         </div>
 
                         {/* Model Dimension */}
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Transformer Dim</label>
-                            <select
-                                value={config.dim_model}
-                                onChange={(e) => setConfig(c => ({ ...c, dim_model: parseInt(e.target.value) }))}
-                                className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                            >
-                                <option value={256}>256 (smaller)</option>
-                                <option value={512}>512 (default)</option>
-                            </select>
+                            {preset === 'custom' ? (
+                                <input
+                                    type="number"
+                                    value={config.dim_model}
+                                    onChange={(e) => setConfig(c => ({ ...c, dim_model: parseInt(e.target.value) || 512 }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    min={1}
+                                />
+                            ) : (
+                                <select
+                                    value={config.dim_model}
+                                    onChange={(e) => setConfig(c => ({ ...c, dim_model: parseInt(e.target.value) }))}
+                                    className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                >
+                                    <option value={256}>256 (smaller)</option>
+                                    <option value={512}>512 (default)</option>
+                                </select>
+                            )}
                         </div>
                     </div>
 
@@ -643,27 +890,48 @@ export default function ConfigStep({
                             <div className="flex items-center gap-4 mt-2">
                                 <div>
                                     <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Latent Dim</label>
-                                    <select
-                                        value={config.latent_dim}
-                                        onChange={(e) => setConfig(c => ({ ...c, latent_dim: parseInt(e.target.value) }))}
-                                        className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                                    >
-                                        <option value={16}>16</option>
-                                        <option value={32}>32 (default)</option>
-                                        <option value={64}>64</option>
-                                    </select>
+                                    {preset === 'custom' ? (
+                                        <input
+                                            type="number"
+                                            value={config.latent_dim}
+                                            onChange={(e) => setConfig(c => ({ ...c, latent_dim: parseInt(e.target.value) || 32 }))}
+                                            className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100 w-20"
+                                            min={1}
+                                        />
+                                    ) : (
+                                        <select
+                                            value={config.latent_dim}
+                                            onChange={(e) => setConfig(c => ({ ...c, latent_dim: parseInt(e.target.value) }))}
+                                            className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                        >
+                                            <option value={16}>16</option>
+                                            <option value={32}>32 (default)</option>
+                                            <option value={64}>64</option>
+                                        </select>
+                                    )}
                                 </div>
                                 <div>
                                     <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">KL Weight</label>
-                                    <select
-                                        value={config.kl_weight}
-                                        onChange={(e) => setConfig(c => ({ ...c, kl_weight: parseFloat(e.target.value) }))}
-                                        className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
-                                    >
-                                        <option value={1.0}>1.0 (low)</option>
-                                        <option value={10.0}>10.0 (default)</option>
-                                        <option value={50.0}>50.0 (high)</option>
-                                    </select>
+                                    {preset === 'custom' ? (
+                                        <input
+                                            type="number"
+                                            value={config.kl_weight}
+                                            onChange={(e) => setConfig(c => ({ ...c, kl_weight: parseFloat(e.target.value) || 10.0 }))}
+                                            className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100 w-20"
+                                            min={0}
+                                            step={0.1}
+                                        />
+                                    ) : (
+                                        <select
+                                            value={config.kl_weight}
+                                            onChange={(e) => setConfig(c => ({ ...c, kl_weight: parseFloat(e.target.value) }))}
+                                            className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                        >
+                                            <option value={1.0}>1.0 (low)</option>
+                                            <option value={10.0}>10.0 (default)</option>
+                                            <option value={50.0}>50.0 (high)</option>
+                                        </select>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -760,9 +1028,11 @@ export default function ConfigStep({
                     <div>Policy: <span className="font-medium text-neutral-900 dark:text-zinc-100 capitalize">{policyType === 'pi05' ? 'Pi0.5' : policyType === 'act' ? 'ACT' : policyType}</span></div>
                     <div>Steps: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.steps.toLocaleString()}</span></div>
                     <div>Batch Size: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.batch_size}</span></div>
+                    <div>LR: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.learning_rate}</span></div>
                     {policyType === 'diffusion' && (
                         <>
                             <div>Horizon: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.horizon}</span></div>
+                            <div>Obs Steps: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.n_obs_steps}</span></div>
                             <div>Diffusion Steps: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.num_train_timesteps}</span></div>
                         </>
                     )}
@@ -780,6 +1050,19 @@ export default function ConfigStep({
                             <div>Action Steps: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.n_action_steps_act}</span></div>
                             <div>VAE: <span className={`font-medium ${config.use_vae ? 'text-green-600 dark:text-green-400' : 'text-neutral-900 dark:text-zinc-100'}`}>{config.use_vae ? 'Enabled' : 'Disabled'}</span></div>
                             <div>Backbone: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.vision_backbone}</span></div>
+                        </>
+                    )}
+                    {/* Custom parameters (only show non-default values) */}
+                    {preset === 'custom' && (
+                        <>
+                            {config.num_workers !== 4 && <div>Workers: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.num_workers}</span></div>}
+                            {config.save_freq !== 20000 && <div>Save Freq: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.save_freq.toLocaleString()}</span></div>}
+                            {config.eval_freq !== 20000 && <div>Eval Freq: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.eval_freq.toLocaleString()}</span></div>}
+                            {config.dataset_episodes && <div>Split: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.dataset_episodes}</span></div>}
+                            {config.image_size > 0 && <div>Image Size: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.image_size}</span></div>}
+                            {config.resize_size && <div>Resize: <span className="font-medium text-neutral-900 dark:text-zinc-100">[{config.resize_size}]</span></div>}
+                            {config.eval_n_episodes > 0 && <div>Eval Episodes: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.eval_n_episodes}</span></div>}
+                            {config.output_dir_custom && <div>Output: <span className="font-medium text-neutral-900 dark:text-zinc-100">{config.output_dir_custom}</span></div>}
                         </>
                     )}
                 </div>
