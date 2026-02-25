@@ -42,6 +42,8 @@ from .tables import (
     PID_GAINS,
     MIT_GAINS,
     MIT_MOTOR_GAINS,
+    FILTER_OMEGA_OVERRIDES,
+    FRICTION_COMPENSATION,
     GRIPPER_PID,
     GRIPPER_TORQUE_THRESHOLD,
 )
@@ -1326,13 +1328,33 @@ class DamiaoMotorsBus:
                 # Replaces EMA smoothing + finite-difference velocity.
                 # Outputs smooth position AND analytical velocity with zero
                 # steady-state error and no differentiation noise.
-                omega = mcfg.filter_omega
+                omega = FILTER_OMEGA_OVERRIDES.get(name, mcfg.filter_omega)
                 if name == "gripper":
                     omega = 80.0  # Gripper needs fast tracking
                 value, v_des = self._apply_position_filter(name, value, real_dt, omega)
 
                 # Clamp v_des to encoding range for safety
                 v_des = max(-mcfg.v_max, min(mcfg.v_max, v_des))
+
+                # Static friction compensation: inject t_ff in direction of
+                # desired motion to break gearbox stiction instantly.
+                # Only active when filter outputs meaningful velocity (motor
+                # should be moving). Ramps smoothly from 0 to full compensation
+                # over a small velocity range to avoid torque discontinuities.
+                t_ff = 0.0
+                if name != "gripper":
+                    friction_nm = FRICTION_COMPENSATION.get(name, 0.0)
+                    if friction_nm > 0.0 and abs(v_des) > 0.01:
+                        # Smooth ramp: linear from 0 at |v_des|=0.01 to full
+                        # at |v_des|=0.5 rad/s. Prevents torque step at onset.
+                        ramp = min(1.0, (abs(v_des) - 0.01) / 0.49)
+                        t_ff = friction_nm * ramp * (1.0 if v_des > 0 else -1.0)
+                        # Clamp to 15% of t_max for safety
+                        t_ff = max(-mcfg.t_max * 0.15, min(mcfg.t_max * 0.15, t_ff))
+
+                if self._sync_write_count <= 5 and t_ff != 0.0:
+                    print(f"[Damiao] friction comp: {name} t_ff={t_ff:+.3f} Nm "
+                          f"(v_des={v_des:+.3f})", flush=True)
 
                 # Apply MIT encoder offset (dual-encoder motors like J8009P-2EC).
                 # Joint limit clamping above works in user-space; now shift to MIT-encoder-space.
@@ -1345,7 +1367,7 @@ class DamiaoMotorsBus:
                     v_des,      # v_des: velocity feedforward from position trajectory
                     kp,         # kp: position stiffness
                     kd,         # kd: velocity damping
-                    0.0,        # t_ff: feedforward torque
+                    t_ff,       # t_ff: feedforward torque (friction compensation)
                     mcfg.p_max, mcfg.v_max, mcfg.t_max  # encoding limits
                 )
             else:

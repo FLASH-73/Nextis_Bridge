@@ -41,7 +41,7 @@ DAMIAO_MOTOR_SPECS = {
         "position_smoothing": 0.80,
         # Second-order critically-damped filter natural frequency (rad/s).
         # Heavy motor with high inertia — more smoothing needed.
-        "filter_omega": 50.0,
+        "filter_omega": 75.0,
     },
     # J4340P: Medium torque motor for elbow joints
     "J4340P": {
@@ -58,7 +58,7 @@ DAMIAO_MOTOR_SPECS = {
         # DEPRECATED: replaced by filter_omega (second-order critically-damped filter)
         "position_smoothing": 0.85,
         # Second-order critically-damped filter natural frequency (rad/s).
-        "filter_omega": 55.0,
+        "filter_omega": 75.0,
     },
     # J4310: Precision motor for wrist joints and gripper
     "J4310": {
@@ -81,7 +81,7 @@ DAMIAO_MOTOR_SPECS = {
         "position_smoothing": 0.85,
         # Second-order critically-damped filter natural frequency (rad/s).
         # Light motor — can track faster.
-        "filter_omega": 60.0,
+        "filter_omega": 70.0,
     },
 }
 
@@ -125,8 +125,35 @@ MIT_GAINS = {
 # Per-motor MIT gain overrides (takes priority over per-type MIT_GAINS)
 # Use when identical motor types need different gains due to load/gravity differences.
 MIT_MOTOR_GAINS = {
-    "base":  {"kp": 10.0, "kd": 3.0},  # No gravity load — softer to avoid gear backlash chatter
-    "link3": {"kp": 22.0, "kd": 0.7},  # Lower payload than link2 — softer gains
+    "base":  {"kp": 25.0, "kd": 2.0},  # No gravity load — softer to avoid gear backlash chatter
+    "link3": {"kp": 30.0, "kd": 1.5},  # Lower payload than link2 — softer gains
+}
+
+# Per-motor static friction compensation (Nm).
+# Applied as t_ff in direction of motion when |v_des| exceeds a small
+# threshold, breaking gearbox stiction instantly instead of waiting
+# for kp * position_error to accumulate.
+#
+# Values are conservative first-pass estimates. Tune by:
+# 1. Disable kp (set to 0 temporarily), send only t_ff
+# 2. Increase until the motor JUST barely starts moving
+# 3. Use ~70% of that value (need margin so kp handles the rest)
+FRICTION_COMPENSATION = {
+    "base":    0.4,   # J8009P, 9:1 gear, NO gravity load (table-mounted)
+    "link1":   1.2,   # J8009P, 9:1 gear, heavy gravity load
+    "link2":   0.8,   # J4340P, 6:1 gear, medium gravity
+    "link3":   0.6,   # J4340P, 6:1 gear, lighter load than link2
+    "link4":   0.3,   # J4310, 10:1 gear, very light wrist
+    "link5":   0.2,   # J4310, 10:1 gear, very light
+    "gripper": 0.0,   # Handled by separate gripper control path
+}
+
+# Per-motor filter omega overrides (rad/s).
+# Takes priority over per-type filter_omega from DAMIAO_MOTOR_SPECS.
+# Use when identical motor types need different tracking speeds due to
+# load differences (e.g., base has no gravity load → can track faster).
+FILTER_OMEGA_OVERRIDES = {
+    "base": 90.0,   # No gravity, pure horizontal rotation — can track very fast
 }
 
 # Default joint limits (radians) — safety fallback, matches cal_test_7_02_1821 calibration

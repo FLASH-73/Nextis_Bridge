@@ -107,11 +107,11 @@ class TeleoperationService:
 
         # Joint Force Feedback: CURRENT_POSITION mode (same mechanism as gripper)
         # Goal_Position = follower position, Goal_Current = error magnitude
-        self._joint_ff_enabled = _teleop_cfg.get("joint_force_feedback", True)
-        self._joint_ff_k_spring = 15000.0   # mA/rad — gentler ramp for better tactile gradient
-        self._joint_ff_deadzone = 0.10      # rad (~6°) — covers normal tracking lag (0.03-0.06 rad)
-        self._joint_ff_max_current = 1750   # mA — full XL330 range
-        self._joint_ff_min_force = 100      # mA — lower entry threshold (larger deadzone means bigger initial error)
+        self._joint_ff_enabled = _teleop_cfg.get("joint_force_feedback", False)
+        self._joint_ff_k_spring = 4000.0    # mA/rad — gentle nudge (follower lag makes aggressive springs feel draggy)
+        self._joint_ff_deadzone = 0.30      # rad (~17°) — must exceed follower tracking dead zone (0.15-0.25 rad)
+        self._joint_ff_max_current = 800    # mA — ~46% of XL330 range (safety feel, not rigid constraint)
+        self._joint_ff_min_force = 40       # mA — barely perceptible entry threshold
 
         # Teleop Configuration
         # Lowered to 60Hz to match lerobot default and reduce USB congestion
