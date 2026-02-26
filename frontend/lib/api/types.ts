@@ -380,11 +380,14 @@ export interface RecordingSessionConfig {
   task: string;
   selected_cameras: string[] | null;
   selected_arms: string[] | null;
+  record_extended_state?: boolean;
 }
 
 export interface RecordingOptions {
   cameras: { id: string; name: string }[];
   arms: { id: string; name: string; joints: number; status: string }[];
+  pairings: { id: string; name: string; leader_id: string; follower_id: string }[];
+  supports_extended_state: boolean;
 }
 
 export interface ListenerStatus {

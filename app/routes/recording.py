@@ -67,7 +67,17 @@ def get_recording_options():
         except Exception:
             pass
 
-    return {"cameras": cameras, "arms": arms, "pairings": pairings}
+    # 5. Detect extended state support (Damiao followers with MIT response cache)
+    supports_extended_state = False
+    if system.arm_registry:
+        for arm_dict in system.arm_registry.get_followers():
+            instance = system.arm_registry.get_arm_instance(arm_dict["id"])
+            if instance and hasattr(instance, 'bus') and hasattr(instance.bus, 'read_cached_velocities'):
+                supports_extended_state = True
+                break
+
+    return {"cameras": cameras, "arms": arms, "pairings": pairings,
+            "supports_extended_state": supports_extended_state}
 
 @router.post("/recording/session/start")
 async def start_recording_session(request: Request):
@@ -82,6 +92,7 @@ async def start_recording_session(request: Request):
     selected_cameras = data.get("selected_cameras")        # list of camera IDs or None (all)
     selected_pairing_ids = data.get("selected_pairing_ids")  # list of follower arm IDs or None (all)
     selected_arms = data.get("selected_arms")              # legacy: list of arm prefixes or None (all)
+    record_extended_state = data.get("record_extended_state", False)  # include vel + torque in observation
     # Streaming encoding overrides (None = use config defaults)
     streaming_encoding = data.get("streaming_encoding")      # bool or None
     vcodec = data.get("vcodec")                              # str or None
@@ -107,6 +118,7 @@ async def start_recording_session(request: Request):
             selected_cameras=selected_cameras,
             selected_pairing_ids=selected_pairing_ids,
             selected_arms=selected_arms,
+            record_extended_state=record_extended_state,
             streaming_encoding=streaming_encoding,
             vcodec=vcodec,
             encoder_queue_maxsize=encoder_queue_maxsize,

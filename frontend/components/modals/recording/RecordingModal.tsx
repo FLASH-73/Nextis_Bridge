@@ -22,6 +22,7 @@ export default function RecordingModal({
     });
     const [selectedPairings, setSelectedPairings] = useState<string[]>([]);
     const [selectedCameras, setSelectedCameras] = useState<string[]>([]);
+    const [recordExtendedState, setRecordExtendedState] = useState(false);
     const [error, setError] = useState('');
     const [isStarting, setIsStarting] = useState(false);
 
@@ -67,6 +68,7 @@ export default function RecordingModal({
                 task: datasetConfig.task,
                 selected_cameras: selectedCameras.length > 0 ? selectedCameras : null,
                 selected_arms: followerIds.length > 0 ? followerIds : null,
+                record_extended_state: recordExtendedState,
             });
 
             if (data.status === 'success') {
@@ -97,6 +99,8 @@ export default function RecordingModal({
             setSelectedCameras={setSelectedCameras}
             error={error}
             isStarting={isStarting}
+            recordExtendedState={recordExtendedState}
+            setRecordExtendedState={setRecordExtendedState}
         />
     );
 }

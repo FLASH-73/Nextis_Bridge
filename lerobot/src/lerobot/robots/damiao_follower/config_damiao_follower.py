@@ -96,6 +96,11 @@ class DamiaoFollowerConfig(RobotConfig):
     # Calibration file path (if using external calibration)
     calibration_path: str = ""
 
+    # Extended observation: include velocity (.vel) and torque (.tau) per motor
+    # When True, observation vector grows from 7 (pos only) to 21 (pos + vel + tau)
+    # Zero CAN overhead — uses cached values from MIT feedback packets
+    record_extended_state: bool = False
+
     def __post_init__(self):
         super().__post_init__()
         if not self.calibration_dir:

@@ -310,8 +310,8 @@ class CommandMixin:
         if "learning_rate" in config:
             cmd.append(f"--policy.optimizer_lr={config['learning_rate']}")
 
-        # Warmup steps
-        if "warmup_steps" in config:
+        # Warmup steps (ACT has no scheduler)
+        if "warmup_steps" in config and job.policy_type != PolicyType.ACT:
             cmd.append(f"--policy.scheduler_warmup_steps={config['warmup_steps']}")
 
         # Disable push to hub by default (user can push manually later)

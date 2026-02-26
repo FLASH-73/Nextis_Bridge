@@ -314,6 +314,46 @@ def recording_capture_loop(svc):
                             action[key] = val
                             obs[key] = val
 
+                # SOURCE 1b: Extended motor state (velocity + torque) from follower robot
+                # These come from the MIT response cache, NOT from the leader action cache
+                if getattr(svc, '_record_extended_state', False):
+                    active_robot = None
+                    if svc._pairing_contexts:
+                        for ctx in svc._pairing_contexts:
+                            if ctx.active_robot and hasattr(ctx.active_robot, 'bus') and hasattr(ctx.active_robot.bus, 'read_cached_velocities'):
+                                active_robot = ctx.active_robot
+                                break
+                    elif hasattr(svc, '_active_robot') and svc._active_robot:
+                        active_robot = svc._active_robot
+                    elif svc.robot:
+                        active_robot = svc.robot
+
+                    if active_robot and hasattr(active_robot, 'bus') and hasattr(active_robot.bus, 'read_cached_velocities'):
+                        try:
+                            velocities = active_robot.bus.read_cached_velocities()
+                            torques = active_robot.bus.read_torques()
+                            for name, vel in velocities.items():
+                                key = f"{name}.vel"
+                                base = name
+                                if use_pairing_filter:
+                                    if base in leader_keys:
+                                        continue
+                                    if allowed_keys is not None and base not in allowed_keys:
+                                        continue
+                                obs[key] = vel
+                            for name, tau in torques.items():
+                                key = f"{name}.tau"
+                                base = name
+                                if use_pairing_filter:
+                                    if base in leader_keys:
+                                        continue
+                                    if allowed_keys is not None and base not in allowed_keys:
+                                        continue
+                                obs[key] = tau
+                        except Exception as e:
+                            if svc._recording_frame_counter == 0:
+                                print(f"[REC CAPTURE] Extended state read error: {e}")
+
                 # SOURCE 2: Capture camera images with async_read (FAST - ZOH pattern)
                 # Only capture selected cameras
                 # Priority: CameraService (standalone) > robot.cameras (legacy)
@@ -480,6 +520,7 @@ def start_recording_session(
     selected_cameras: list[str] | None = None,
     selected_pairing_ids: list[str] | None = None,
     selected_arms: list[str] | None = None,
+    record_extended_state: bool = False,
     streaming_encoding: bool | None = None,
     vcodec: str | None = None,
     encoder_queue_maxsize: int | None = None,
@@ -564,6 +605,24 @@ def start_recording_session(
     print(f"[START_SESSION] Dataset dir: {dataset_dir}")
 
     try:
+        # --- Toggle extended state BEFORE reading features ---
+        # This ensures observation_features includes .vel and .tau keys in the schema
+        svc._record_extended_state = record_extended_state
+        if record_extended_state:
+            if svc._pairing_contexts and selected_pairing_ids:
+                for ctx in svc._pairing_contexts:
+                    fid = ctx.pairing_id.split("\u2192")[-1].strip() if "\u2192" in ctx.pairing_id else ctx.pairing_id
+                    if fid in selected_pairing_ids and ctx.active_robot:
+                        if hasattr(ctx.active_robot, 'config') and hasattr(ctx.active_robot.config, 'record_extended_state'):
+                            ctx.active_robot.config.record_extended_state = True
+            elif svc._pairing_contexts:
+                for ctx in svc._pairing_contexts:
+                    if ctx.active_robot and hasattr(ctx.active_robot, 'config') and hasattr(ctx.active_robot.config, 'record_extended_state'):
+                        ctx.active_robot.config.record_extended_state = True
+            elif robot:
+                if hasattr(robot, 'config') and hasattr(robot.config, 'record_extended_state'):
+                    robot.config.record_extended_state = True
+
         # --- Build obs/action features from pairing contexts or legacy robot ---
         raw_obs_features: dict = {}
         raw_action_features: dict = {}
@@ -777,6 +836,14 @@ def stop_recording_session(svc):
             print(f"[STOP_SESSION] Emergency save completed (episode {svc.episode_count})")
         except Exception as e:
             print(f"[STOP_SESSION] WARNING: Emergency save failed: {e}")
+
+    # Reset extended state flag on robots (session-scoped, don't persist)
+    if getattr(svc, '_record_extended_state', False):
+        if svc._pairing_contexts:
+            for ctx in svc._pairing_contexts:
+                if ctx.active_robot and hasattr(ctx.active_robot, 'config') and hasattr(ctx.active_robot.config, 'record_extended_state'):
+                    ctx.active_robot.config.record_extended_state = False
+        svc._record_extended_state = False
 
     print("[STOP_SESSION] Stopping Recording Session...")
     svc.session_active = False

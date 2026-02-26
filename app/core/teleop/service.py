@@ -626,12 +626,14 @@ class TeleoperationService:
         selected_cameras: list[str] | None = None,
         selected_pairing_ids: list[str] | None = None,
         selected_arms: list[str] | None = None,
+        record_extended_state: bool = False,
         **kwargs,
     ) -> dict:
         from app.core.teleop.recording import start_recording_session
         return start_recording_session(
             self, repo_id, task, fps, root,
             selected_cameras, selected_pairing_ids, selected_arms,
+            record_extended_state=record_extended_state,
             **kwargs,
         )
 

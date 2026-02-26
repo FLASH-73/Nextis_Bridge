@@ -28,8 +28,6 @@ Safety Features:
 import logging
 import time
 import numpy as np
-from dataclasses import dataclass
-from functools import cached_property
 from typing import Any
 
 from lerobot.cameras.utils import make_cameras_from_configs
@@ -134,7 +132,13 @@ class DamiaoFollowerRobot(Robot):
     @property
     def _motors_ft(self) -> dict[str, type]:
         """Motor features for observation/action."""
-        return {f"{motor}.pos": float for motor in self._motor_names}
+        features = {f"{motor}.pos": float for motor in self._motor_names}
+        if self.config.record_extended_state:
+            for motor in self._motor_names:
+                features[f"{motor}.vel"] = float
+            for motor in self._motor_names:
+                features[f"{motor}.tau"] = float
+        return features
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
@@ -144,15 +148,15 @@ class DamiaoFollowerRobot(Robot):
             for cam in self.cameras
         }
 
-    @cached_property
+    @property
     def observation_features(self) -> dict[str, type | tuple]:
         """Features available in observations."""
         return {**self._motors_ft, **self._cameras_ft}
 
-    @cached_property
+    @property
     def action_features(self) -> dict[str, type]:
-        """Features accepted in actions."""
-        return self._motors_ft
+        """Features accepted in actions (position-only)."""
+        return {f"{motor}.pos": float for motor in self._motor_names}
 
     @property
     def is_connected(self) -> bool:
@@ -278,6 +282,14 @@ class DamiaoFollowerRobot(Robot):
                 key = f"{motor}.pos"
                 if is_inverted and key in obs_dict and motor != "gripper":
                     obs_dict[key] = -obs_dict[key]
+
+        # Extended state: velocity and torque from MIT response cache (zero CAN overhead)
+        if self.config.record_extended_state:
+            velocities = self.bus.read_cached_velocities()
+            torques = self.bus.read_torques()
+            for name in self._motor_names:
+                obs_dict[f"{name}.vel"] = velocities.get(name, 0.0)
+                obs_dict[f"{name}.tau"] = torques.get(name, 0.0)
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"[DamiaoFollower] Read state: {dt_ms:.1f}ms")

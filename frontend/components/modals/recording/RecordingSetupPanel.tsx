@@ -7,6 +7,7 @@ import {
   toolsApi,
   triggersApi,
   toolPairingsApi,
+  recordingApi,
 } from "../../../lib/api";
 import type {
   Arm,
@@ -16,6 +17,7 @@ import type {
   Tool,
   Trigger,
   ListenerStatus,
+  RecordingOptions,
 } from "../../../lib/api/types";
 import ArmPairCard from "./ArmPairCard";
 import CameraGrid from "./CameraGrid";
@@ -34,6 +36,8 @@ interface RecordingSetupPanelProps {
   setSelectedCameras: (ids: string[]) => void;
   error: string;
   isStarting: boolean;
+  recordExtendedState: boolean;
+  setRecordExtendedState: (value: boolean) => void;
 }
 
 export default function RecordingSetupPanel({
@@ -48,6 +52,8 @@ export default function RecordingSetupPanel({
   setSelectedCameras,
   error,
   isStarting,
+  recordExtendedState,
+  setRecordExtendedState,
 }: RecordingSetupPanelProps) {
   // ── Data Fetching (SWR) ─────────────────────────────────────────────────
   const { data: armsData } = useSWR<{
@@ -84,6 +90,11 @@ export default function RecordingSetupPanel({
     isOpen ? "/tool-pairings/listener/status" : null,
     () => toolPairingsApi.listenerStatus(),
     { refreshInterval: 5000 }
+  );
+
+  const { data: recordingOptions } = useSWR<RecordingOptions>(
+    isOpen ? "/recording/options" : null,
+    () => recordingApi.options()
   );
 
   const arms = armsData?.arms ?? [];
@@ -226,6 +237,52 @@ export default function RecordingSetupPanel({
                 selectedCameras={selectedCameras}
                 onToggleCamera={toggleCamera}
               />
+
+              {/* Extended State */}
+              {recordingOptions?.supports_extended_state && (
+                <div className="bg-neutral-50 dark:bg-zinc-800/50 rounded-xl border border-neutral-100 dark:border-zinc-700 p-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-zinc-400 mb-3">
+                    Motor State
+                  </h3>
+                  <label className="flex items-center justify-between cursor-pointer group">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-neutral-800 dark:text-zinc-200">
+                        Record velocity &amp; torque
+                      </p>
+                      <p className="text-xs text-neutral-500 dark:text-zinc-400 mt-0.5">
+                        Adds motor velocity (rad/s) and torque (Nm) to observation state.
+                        Required for contact-rich tasks like insertion.
+                        Zero CAN overhead — uses MIT response cache.
+                      </p>
+                    </div>
+                    <div className="ml-4 flex-shrink-0">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={recordExtendedState}
+                        onClick={() => setRecordExtendedState(!recordExtendedState)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          recordExtendedState
+                            ? 'bg-black dark:bg-white'
+                            : 'bg-neutral-300 dark:bg-zinc-600'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white dark:bg-zinc-900 transition-transform ${
+                            recordExtendedState ? 'translate-x-6' : 'translate-x-1'
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </label>
+                  {recordExtendedState && (
+                    <div className="mt-3 text-xs text-neutral-500 dark:text-zinc-400 bg-neutral-100 dark:bg-zinc-800 rounded-lg px-3 py-2">
+                      <span className="font-medium text-neutral-700 dark:text-zinc-300">State vector: </span>
+                      7 positions + 7 velocities + 7 torques = 21 floats per timestep
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Tools */}
               <ToolsList

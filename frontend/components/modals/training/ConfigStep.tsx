@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Play, AlertCircle, CheckCircle, Loader2, ChevronDown } from 'lucide-react';
 import { trainingApi } from '../../../lib/api';
 
@@ -78,6 +78,49 @@ const PRESETS = {
     full: { steps: 200000, batch_size: 16, description: 'Best quality (~4 hrs)' },
     custom: { steps: 100000, batch_size: 8, description: 'Your parameters' },
 };
+
+interface NumericInputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'type'> {
+    value: number;
+    onChange: (value: number) => void;
+}
+
+function NumericInput({ value, onChange, ...rest }: NumericInputProps) {
+    const [text, setText] = useState(String(value));
+    const [isFocused, setIsFocused] = useState(false);
+
+    useEffect(() => {
+        if (!isFocused) {
+            setText(String(value));
+        }
+    }, [value, isFocused]);
+
+    return (
+        <input
+            {...rest}
+            type="text"
+            value={isFocused ? text : String(value)}
+            onChange={(e) => {
+                const raw = e.target.value;
+                setText(raw);
+                const parsed = Number(raw);
+                if (raw !== '' && isFinite(parsed)) {
+                    onChange(parsed);
+                }
+            }}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => {
+                setIsFocused(false);
+                const parsed = Number(text);
+                if (text !== '' && isFinite(parsed)) {
+                    onChange(parsed);
+                    setText(String(parsed));
+                } else {
+                    setText(String(value));
+                }
+            }}
+        />
+    );
+}
 
 interface ConfigStepProps {
     policyType: PolicyType;
@@ -333,13 +376,9 @@ export default function ConfigStep({
                         </div>
                         <div>
                             <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Learning Rate</label>
-                            <input
-                                type="text"
+                            <NumericInput
                                 value={config.learning_rate}
-                                onChange={(e) => {
-                                    const v = parseFloat(e.target.value);
-                                    if (!isNaN(v)) setConfig(c => ({ ...c, learning_rate: v }));
-                                }}
+                                onChange={(v) => setConfig(c => ({ ...c, learning_rate: v }))}
                                 className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
                                 placeholder="e.g. 1e-4"
                             />
@@ -913,13 +952,11 @@ export default function ConfigStep({
                                 <div>
                                     <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">KL Weight</label>
                                     {preset === 'custom' ? (
-                                        <input
-                                            type="number"
+                                        <NumericInput
                                             value={config.kl_weight}
-                                            onChange={(e) => setConfig(c => ({ ...c, kl_weight: parseFloat(e.target.value) || 10.0 }))}
+                                            onChange={(v) => setConfig(c => ({ ...c, kl_weight: v }))}
                                             className="px-2 py-1 rounded-lg border border-neutral-200 dark:border-zinc-700 text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100 w-20"
-                                            min={0}
-                                            step={0.1}
+                                            placeholder="e.g. 10.0"
                                         />
                                     ) : (
                                         <select
@@ -977,12 +1014,11 @@ export default function ConfigStep({
                             </div>
                             <div>
                                 <label className="block text-xs font-medium text-neutral-600 dark:text-zinc-400 mb-1">Learning Rate</label>
-                                <input
-                                    type="number"
-                                    step="0.00001"
+                                <NumericInput
                                     value={config.learning_rate}
-                                    onChange={e => setConfig({ ...config, learning_rate: parseFloat(e.target.value) || 0 })}
+                                    onChange={(v) => setConfig(c => ({ ...c, learning_rate: v }))}
                                     className="w-full px-3 py-2 border border-neutral-200 dark:border-zinc-700 rounded-lg text-sm bg-white dark:bg-zinc-800 text-neutral-900 dark:text-zinc-100"
+                                    placeholder="e.g. 1e-4"
                                 />
                             </div>
                             <div>
