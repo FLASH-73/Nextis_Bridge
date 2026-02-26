@@ -38,8 +38,12 @@ class ObservationBuilder:
         self.task = task or "Do the task"
 
         # Caches (cleared via reset_cache)
+        self._dataset_info: Optional[dict] = None
+        self._dataset_info_loaded: bool = False
         self._training_state_names: Optional[List[str]] = None
         self._training_state_names_loaded = False
+        self._training_action_names: Optional[List[str]] = None
+        self._training_action_names_loaded = False
         self._norm_stats: Optional[dict] = None
         self._norm_stats_loaded = False
         self._pi05_tokenizer = None
@@ -49,40 +53,19 @@ class ObservationBuilder:
     # ------------------------------------------------------------------
 
     def get_training_state_names(self) -> Optional[List[str]]:
-        """Get motor names from the policy's training dataset.
-
-        Reads train_config.json from the checkpoint directory to find the
-        original training dataset, then loads its meta/info.json to get
-        the observation.state feature names.
+        """Get observation state names from the policy's training dataset.
 
         Returns:
-            List of motor names like ['left_base.pos', ...] or None.
+            List of state names like ['left_base.pos', ...] or None.
         """
         if self._training_state_names_loaded:
             return self._training_state_names
 
         self._training_state_names_loaded = True
 
-        train_config_path = self.checkpoint_path / "train_config.json"
-        if not train_config_path.exists():
-            logger.warning("train_config.json not found at %s", train_config_path)
+        info = self._load_dataset_info()
+        if info is None:
             return None
-
-        with open(train_config_path) as f:
-            train_config = json.load(f)
-
-        dataset_root = train_config.get("dataset", {}).get("root")
-        if not dataset_root:
-            logger.warning("dataset.root not found in train_config")
-            return None
-
-        info_path = Path(dataset_root) / "meta" / "info.json"
-        if not info_path.exists():
-            logger.warning("Training dataset info.json not found: %s", info_path)
-            return None
-
-        with open(info_path) as f:
-            info = json.load(f)
 
         state_names = info.get("features", {}).get("observation.state", {}).get("names")
         if state_names:
@@ -94,6 +77,43 @@ class ObservationBuilder:
 
         self._training_state_names = state_names
         return state_names
+
+    def get_training_action_names(self) -> Optional[List[str]]:
+        """Get action names from the policy's training dataset.
+
+        Action names correspond to the policy's output dimensions (e.g. 7
+        position targets), which may differ from observation state names
+        (e.g. 21 = pos + vel + tau) for extended-state policies.
+
+        Falls back to get_training_state_names() for older datasets that
+        don't store action names separately.
+
+        Returns:
+            List of action names like ['left_base.pos', ...] or None.
+        """
+        if self._training_action_names_loaded:
+            return self._training_action_names
+
+        self._training_action_names_loaded = True
+
+        info = self._load_dataset_info()
+        if info is not None:
+            action_names = info.get("features", {}).get("action", {}).get("names")
+            if action_names:
+                logger.info(
+                    "Loaded %d action names from training dataset: %s",
+                    len(action_names),
+                    action_names,
+                )
+                self._training_action_names = action_names
+                return action_names
+
+        # Backward compat: older datasets without separate action names
+        fallback = self.get_training_state_names()
+        if fallback:
+            logger.info("Action names not found in dataset, falling back to state names")
+        self._training_action_names = fallback
+        return fallback
 
     def load_normalization_stats(self) -> Optional[dict]:
         """Load normalization statistics from checkpoint or training dataset.
@@ -255,6 +275,18 @@ class ObservationBuilder:
             state_names = self.get_training_state_names()
             if state_names:
                 state_values = [float(raw_obs.get(name, 0.0)) for name in state_names]
+
+                missing = [n for n in state_names if n not in raw_obs]
+                if missing and not hasattr(self, '_warned_missing'):
+                    self._warned_missing = True
+                    logger.warning(
+                        "OBSERVATION MISMATCH: %d/%d state names missing from robot observation. "
+                        "Missing: %s. These default to 0.0 — policy input will be degraded! "
+                        "If the policy was trained with extended state (vel/tau), ensure "
+                        "record_extended_state=True on the follower robot.",
+                        len(missing), len(state_names), missing[:8],
+                    )
+
                 state_tensor = torch.tensor(state_values, dtype=torch.float32)
 
                 if (
@@ -295,13 +327,14 @@ class ObservationBuilder:
         1. Handles multi-step diffusion output (3D/2D → 1D)
         2. Denormalizes from [-1, 1] to motor ranges using stats
         3. Handles dead motors (min==max → midpoint)
-        4. Applies movement scaling (safety limiter)
-        5. Returns dict with named keys from training dataset
+        4. Returns dict with named keys from training dataset
 
         Args:
             action: Policy output tensor or numpy array.
-            raw_obs: Raw robot observation for movement scaling.
-            movement_scale: 0.1–1.0 safety limiter for action deltas.
+            raw_obs: Raw robot observation (used by callers, not by this method).
+            movement_scale: Deprecated, ignored. Velocity limiting is handled
+                by SafetyPipeline._limit_velocity() which uses proper delta
+                clamping (max_vel * dt) instead of this former asymptotic formula.
 
         Returns:
             Dict mapping motor names to position values, or empty dict on failure.
@@ -311,7 +344,7 @@ class ObservationBuilder:
         if isinstance(action, dict):
             return action
 
-        action_names = self.get_training_state_names()
+        action_names = self.get_training_action_names()
         if action_names is None:
             logger.warning("No action names available — cannot convert tensor to dict")
             return {}
@@ -350,26 +383,65 @@ class ObservationBuilder:
             action_np = (action_np + 1.0) / 2.0 * safe_range + action_min
             action_np = np.where(dead_motors, action_mid, action_np)
 
-        # Movement scaling
-        if movement_scale < 1.0 and raw_obs is not None:
-            if all(name in raw_obs for name in action_names):
-                current_state = np.array([float(raw_obs[name]) for name in action_names])
-                if len(current_state) == len(action_np):
-                    delta = action_np - current_state
-                    action_np = current_state + delta * movement_scale
+        # movement_scale intentionally removed — the asymptotic formula
+        # (current + delta * scale) never reaches the target and double-scales
+        # with SafetyPipeline._limit_velocity() which already does proper
+        # delta clamping (max_vel * dt).
 
         return {name: float(action_np[i]) for i, name in enumerate(action_names)}
 
     def reset_cache(self) -> None:
         """Clear cached state names and normalization stats."""
+        self._dataset_info = None
+        self._dataset_info_loaded = False
         self._training_state_names = None
         self._training_state_names_loaded = False
+        self._training_action_names = None
+        self._training_action_names_loaded = False
         self._norm_stats = None
         self._norm_stats_loaded = False
+        if hasattr(self, '_warned_missing'):
+            del self._warned_missing
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _load_dataset_info(self) -> Optional[dict]:
+        """Load and cache the training dataset's meta/info.json.
+
+        Resolves: checkpoint_path/train_config.json → dataset.root → meta/info.json.
+        Called by both get_training_state_names() and get_training_action_names()
+        so the file is only read once.
+        """
+        if self._dataset_info_loaded:
+            return self._dataset_info
+
+        self._dataset_info_loaded = True
+
+        train_config_path = self.checkpoint_path / "train_config.json"
+        if not train_config_path.exists():
+            logger.warning("train_config.json not found at %s", train_config_path)
+            return None
+
+        with open(train_config_path) as f:
+            train_config = json.load(f)
+
+        dataset_root = train_config.get("dataset", {}).get("root")
+        if not dataset_root:
+            logger.warning("dataset.root not found in train_config")
+            return None
+
+        info_path = Path(dataset_root) / "meta" / "info.json"
+        if not info_path.exists():
+            logger.warning("Training dataset info.json not found: %s", info_path)
+            return None
+
+        with open(info_path) as f:
+            info = json.load(f)
+
+        self._dataset_info = info
+        return info
 
     def _add_pi05_tokenization(self, policy_obs: dict, device) -> None:
         """Add Pi0.5 language tokenization to the observation."""

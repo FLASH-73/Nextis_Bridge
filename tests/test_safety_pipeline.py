@@ -367,3 +367,21 @@ def test_invalid_transitions():
     assert not RuntimeState.can_transition(RuntimeState.ESTOP, RuntimeState.IDLE)
     assert not RuntimeState.can_transition(RuntimeState.ERROR, RuntimeState.IDLE)
     assert not RuntimeState.can_transition(RuntimeState.ERROR, RuntimeState.RUNNING)
+
+
+# ---------------------------------------------------------------------------
+# 16. Pipeline processes only provided keys
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_processes_only_position_keys(basic_config):
+    """Pipeline returns exactly the keys from the input action — no extras injected."""
+    pipe = SafetyPipeline(basic_config)
+
+    action = {"base": 0.5, "link1": 0.3}
+    observation = {"base": 0.4, "link1": 0.2}
+
+    result = pipe.process(action, observation, dt=1 / 60)
+
+    assert set(result.keys()) == set(action.keys())
+    assert "gripper" not in result  # gripper is in joint_limits but not in action

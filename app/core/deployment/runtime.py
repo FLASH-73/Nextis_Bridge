@@ -113,19 +113,25 @@ class DeploymentRuntime:
             # 1. Resolve arms
             self._resolve_arms(active_arm_ids)
 
-            # 2. Load policy
+            # 2. Re-enable motors (may be disabled from teleop homing)
+            self._enable_follower_motors()
+
+            # 3. Pre-position follower to leader's current position
+            self._pre_position_to_leader()
+
+            # 4. Load policy
             self._load_policy(config.policy_id)
 
-            # 3. Populate safety config from arm definitions
+            # 5. Populate safety config from arm definitions
             self._populate_safety_config(config.safety)
 
-            # 4. Create safety pipeline
+            # 6. Create safety pipeline
             safety_layer = getattr(self._teleop, "safety", None)
             self._safety_pipeline = SafetyPipeline(
                 config.safety, safety_layer=safety_layer
             )
 
-            # 5. Create observation builder
+            # 7. Create observation builder
             self._obs_builder = ObservationBuilder(
                 checkpoint_path=self._checkpoint_path,
                 policy=self._policy,
@@ -133,7 +139,38 @@ class DeploymentRuntime:
                 task=config.task or "",
             )
 
-            # 6. Create intervention detector (for HIL/SERL modes)
+            # 8. Auto-enable extended observation if policy expects vel/tau
+            state_names = self._obs_builder.get_training_state_names()
+            if state_names:
+                needs_extended = any(
+                    n.endswith(".vel") or n.endswith(".tau")
+                    for n in state_names
+                )
+                if needs_extended and self._follower is not None:
+                    if (
+                        hasattr(self._follower, "config")
+                        and hasattr(self._follower.config, "record_extended_state")
+                    ):
+                        self._follower.config.record_extended_state = True
+                        logger.info(
+                            "Auto-enabled extended observation on follower "
+                            "(policy trained with %d states including vel/tau)",
+                            len(state_names),
+                        )
+                    else:
+                        logger.warning(
+                            "Policy expects extended state (vel/tau) but follower %s "
+                            "does not support record_extended_state. "
+                            "%d states will be zero at deployment!",
+                            type(self._follower).__name__,
+                            sum(
+                                1
+                                for n in state_names
+                                if n.endswith(".vel") or n.endswith(".tau")
+                            ),
+                        )
+
+            # 9. Create intervention detector (for HIL/SERL modes)
             policy_arms = (
                 getattr(self._policy_config, "arms", None) or ["left", "right"]
             )
@@ -142,11 +179,11 @@ class DeploymentRuntime:
                 loop_hz=DEFAULT_LOOP_HZ,
             )
 
-            # 7. Start recording for HIL/SERL modes
+            # 10. Start recording for HIL/SERL modes
             if config.mode in (DeploymentMode.HIL, DeploymentMode.HIL_SERL):
                 self._start_recording(config)
 
-            # 8. Start control loop
+            # 11. Start control loop
             self._transition(RuntimeState.RUNNING)
             self._loop_thread = threading.Thread(
                 target=self._control_loop,
@@ -323,10 +360,19 @@ class DeploymentRuntime:
                     k: v
                     for k, v in raw_obs.items()
                     if isinstance(v, (int, float))
+                    and not k.endswith((".vel", ".tau"))
                 }
                 filtered_action = self._safety_pipeline.process(
                     action, observation_positions, robot=self._follower, dt=dt
                 )
+
+                # 4b. Propagate safety-pipeline ESTOP to runtime state
+                if self._safety_pipeline._estop and self._state != RuntimeState.ESTOP:
+                    with self._state_lock:
+                        self._state = RuntimeState.ESTOP
+                    logger.critical(
+                        "Runtime ESTOP: safety pipeline triggered torque emergency stop"
+                    )
 
                 # 5. Send to robot
                 self._send_action(filtered_action)
@@ -366,6 +412,7 @@ class DeploymentRuntime:
                 k: v
                 for k, v in raw_obs.items()
                 if isinstance(v, (int, float))
+                and not k.endswith((".vel", ".tau"))
             }
 
         if source == ActionSource.HUMAN:
@@ -405,7 +452,11 @@ class DeploymentRuntime:
     # ------------------------------------------------------------------
 
     def _get_observation(self) -> Optional[dict]:
-        """Get observation from follower robot with lock."""
+        """Get observation from follower robot with lock.
+
+        Merges motor positions from the follower with camera frames
+        from CameraService (async_read, ZOH pattern).
+        """
         if self._follower is None:
             return None
         if hasattr(self._follower, "is_connected") and not self._follower.is_connected:
@@ -414,11 +465,24 @@ class DeploymentRuntime:
         try:
             if self._robot_lock:
                 with self._robot_lock:
-                    return self._follower.get_observation()
-            return self._follower.get_observation()
+                    obs = self._follower.get_observation()
+            else:
+                obs = self._follower.get_observation()
         except Exception as e:
             logger.debug("Observation error: %s", e)
             return None
+
+        # Inject camera frames from CameraService
+        if self._camera_service:
+            for cam_key, cam in self._camera_service.cameras.items():
+                try:
+                    frame = cam.async_read(blocking=False)
+                    if frame is not None:
+                        obs[cam_key] = frame
+                except Exception:
+                    pass
+
+        return obs
 
     # ------------------------------------------------------------------
     # Action sending
@@ -447,7 +511,16 @@ class DeploymentRuntime:
         """
         is_bimanual = hasattr(robot, "left_arm") and hasattr(robot, "right_arm")
         if not is_bimanual:
-            robot.send_action(action_dict)
+            # Strip any left_/right_ prefix so single-arm drivers recognise the keys.
+            stripped = {}
+            for k, v in action_dict.items():
+                if k.startswith("left_"):
+                    stripped[k.removeprefix("left_")] = v
+                elif k.startswith("right_"):
+                    stripped[k.removeprefix("right_")] = v
+                else:
+                    stripped[k] = v
+            robot.send_action(stripped)
             return
 
         left_action = {
@@ -614,6 +687,106 @@ class DeploymentRuntime:
             follower_id,
         )
 
+    def _enable_follower_motors(self) -> None:
+        """Re-enable follower motors (they may be disabled from teleop homing)."""
+        if self._follower is None:
+            return
+        try:
+            from lerobot.robots.damiao_follower.damiao_follower import (
+                DamiaoFollowerRobot,
+            )
+
+            if isinstance(self._follower, DamiaoFollowerRobot):
+                self._follower.bus.configure()
+                logger.info("Follower motors re-enabled (Damiao MIT mode)")
+            elif hasattr(self._follower, "bus"):
+                self._follower.bus.enable_torque()
+                logger.info("Follower motors re-enabled")
+        except Exception as e:
+            logger.warning("Failed to re-enable follower motors: %s", e)
+
+    def _pre_position_to_leader(self) -> None:
+        """Smoothly move follower to leader's current position before inference.
+
+        Training episodes always started from the leader's resting position.
+        Uses the homing_loop pattern: low velocity_limit + repeated sync_write.
+        """
+        if self._leader is None or self._follower is None:
+            return
+
+        from app.core.teleop.pairing import DYNAMIXEL_TO_DAMIAO_JOINT_MAP
+
+        # 1. Read leader positions
+        try:
+            leader_obs = self._leader.get_action()
+        except Exception as e:
+            logger.warning("Pre-position: cannot read leader: %s", e)
+            return
+
+        # 2. Map leader joint names → follower joint names
+        target = {}
+        for dyn_name, dam_name in DYNAMIXEL_TO_DAMIAO_JOINT_MAP.items():
+            leader_key = f"{dyn_name}.pos"
+            if leader_key in leader_obs:
+                target[dam_name] = float(leader_obs[leader_key])
+
+        if not target:
+            logger.warning("Pre-position: no leader positions mapped")
+            return
+
+        # 3. Ramp via send_action (applies inversions + joint limits)
+        #    with conservative velocity limit on the bus.
+        target_action = {f"{k}.pos": v for k, v in target.items()}
+
+        try:
+            from lerobot.motors.damiao.damiao import DamiaoMotorsBus
+
+            bus = getattr(self._follower, "bus", None)
+            has_damiao_bus = bus and isinstance(bus, DamiaoMotorsBus)
+
+            PRE_POSITION_VEL = 0.05   # Same as homing_vel — conservative
+            PRE_POSITION_DURATION = 3.0
+            SETTLE_DURATION = 1.0
+
+            old_vel = None
+            if has_damiao_bus:
+                old_vel = bus.velocity_limit
+                bus.velocity_limit = PRE_POSITION_VEL
+
+            logger.info(
+                "Pre-positioning follower to leader position "
+                "(vel=%.2f, duration=%.1fs, %d joints): %s",
+                PRE_POSITION_VEL,
+                PRE_POSITION_DURATION,
+                len(target),
+                {k: f"{v:+.3f}" for k, v in target_action.items()},
+            )
+
+            # Ramp phase
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < PRE_POSITION_DURATION:
+                if self._stop_event.is_set():
+                    break
+                self._follower.send_action(target_action)
+                time.sleep(1.0 / 30)
+
+            # Settle phase — hold position to let velocity decay
+            logger.info("Pre-position settling (%.1fs)...", SETTLE_DURATION)
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < SETTLE_DURATION:
+                if self._stop_event.is_set():
+                    break
+                self._follower.send_action(target_action)
+                time.sleep(1.0 / 30)
+
+            if has_damiao_bus and old_vel is not None:
+                bus.velocity_limit = old_vel
+
+            logger.info("Pre-positioning complete")
+
+        except Exception as e:
+            logger.warning("Pre-position failed: %s", e)
+
     def _load_policy(self, policy_id: str) -> None:
         """Load policy from training service.
 
@@ -649,9 +822,9 @@ class DeploymentRuntime:
                 )
 
             with open(config_path) as f:
-                policy_cfg = json.load(f)
+                _policy_cfg = json.load(f)
 
-            policy_type = policy_cfg.get("policy_type", "")
+            policy_type = policy_info.policy_type
             from lerobot.policies.factory import get_policy_class
 
             policy_cls = get_policy_class(policy_type)

@@ -589,6 +589,229 @@ class TestObservationBuilder:
         result = builder.convert_action_to_dict(action, {})
         assert result == {"left_base.pos": 0.5}
 
+    def test_get_training_action_names_from_info(self, tmp_path):
+        """Action names are read from features.action.names, separate from state names."""
+        import json
+
+        from app.core.deployment.observation_builder import ObservationBuilder
+
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+
+        dataset_dir = tmp_path / "dataset"
+        (dataset_dir / "meta").mkdir(parents=True)
+
+        train_config = {"dataset": {"root": str(dataset_dir)}}
+        (checkpoint / "train_config.json").write_text(json.dumps(train_config))
+
+        obs_names = [
+            "left_base.pos", "left_link1.pos", "left_link2.pos",
+            "left_base.vel", "left_link1.vel", "left_link2.vel",
+            "left_base.tau", "left_link1.tau", "left_link2.tau",
+        ]
+        action_names = ["left_base.pos", "left_link1.pos", "left_link2.pos"]
+        info = {
+            "features": {
+                "observation.state": {"names": obs_names},
+                "action": {"names": action_names},
+            }
+        }
+        (dataset_dir / "meta" / "info.json").write_text(json.dumps(info))
+
+        builder = ObservationBuilder(checkpoint_path=checkpoint, policy=MagicMock())
+
+        assert builder.get_training_state_names() == obs_names
+        assert builder.get_training_action_names() == action_names
+        assert len(builder.get_training_state_names()) == 9
+        assert len(builder.get_training_action_names()) == 3
+
+    def test_get_training_action_names_fallback(self, tmp_path):
+        """When action names are missing, fall back to state names (backward compat)."""
+        import json
+
+        from app.core.deployment.observation_builder import ObservationBuilder
+
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+
+        dataset_dir = tmp_path / "dataset"
+        (dataset_dir / "meta").mkdir(parents=True)
+
+        train_config = {"dataset": {"root": str(dataset_dir)}}
+        (checkpoint / "train_config.json").write_text(json.dumps(train_config))
+
+        state_names = ["left_base.pos", "left_link1.pos"]
+        info = {
+            "features": {
+                "observation.state": {"names": state_names},
+            }
+        }
+        (dataset_dir / "meta" / "info.json").write_text(json.dumps(info))
+
+        builder = ObservationBuilder(checkpoint_path=checkpoint, policy=MagicMock())
+
+        assert builder.get_training_action_names() == state_names
+
+    def test_convert_action_uses_action_names(self, tmp_path):
+        """convert_action_to_dict uses action names (7) not obs state names (21)."""
+        import json
+
+        import numpy as np
+
+        from app.core.deployment.observation_builder import ObservationBuilder
+
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+
+        dataset_dir = tmp_path / "dataset"
+        (dataset_dir / "meta").mkdir(parents=True)
+
+        train_config = {"dataset": {"root": str(dataset_dir)}}
+        (checkpoint / "train_config.json").write_text(json.dumps(train_config))
+
+        obs_names = [f"j{i}.pos" for i in range(7)] + [f"j{i}.vel" for i in range(7)] + [f"j{i}.tau" for i in range(7)]
+        action_names = [f"j{i}.pos" for i in range(7)]
+        info = {
+            "features": {
+                "observation.state": {"names": obs_names},
+                "action": {"names": action_names},
+            }
+        }
+        (dataset_dir / "meta" / "info.json").write_text(json.dumps(info))
+
+        builder = ObservationBuilder(checkpoint_path=checkpoint, policy=MagicMock())
+
+        action = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+        result = builder.convert_action_to_dict(action, {})
+        assert len(result) == 7
+        assert list(result.keys()) == action_names
+        assert result["j0.pos"] == pytest.approx(0.1)
+
+    def test_reset_cache_clears_action_names(self, tmp_path):
+        """reset_cache clears action name cache fields."""
+        import json
+
+        from app.core.deployment.observation_builder import ObservationBuilder
+
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+
+        dataset_dir = tmp_path / "dataset"
+        (dataset_dir / "meta").mkdir(parents=True)
+
+        train_config = {"dataset": {"root": str(dataset_dir)}}
+        (checkpoint / "train_config.json").write_text(json.dumps(train_config))
+
+        info = {
+            "features": {
+                "observation.state": {"names": ["j0.pos"]},
+                "action": {"names": ["j0.pos"]},
+            }
+        }
+        (dataset_dir / "meta" / "info.json").write_text(json.dumps(info))
+
+        builder = ObservationBuilder(checkpoint_path=checkpoint, policy=MagicMock())
+
+        builder.get_training_action_names()
+        assert builder._training_action_names_loaded
+        assert builder._dataset_info_loaded
+
+        builder.reset_cache()
+        assert not builder._training_action_names_loaded
+        assert builder._training_action_names is None
+        assert not builder._dataset_info_loaded
+        assert builder._dataset_info is None
+
+    def test_get_training_action_names_reads_action_feature(self, tmp_path):
+        """Action names (7) are read separately from state names (21)."""
+        import json
+
+        from app.core.deployment.observation_builder import ObservationBuilder
+
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+
+        dataset_dir = tmp_path / "dataset"
+        (dataset_dir / "meta").mkdir(parents=True)
+
+        train_config = {"dataset": {"root": str(dataset_dir)}}
+        (checkpoint / "train_config.json").write_text(json.dumps(train_config))
+
+        # 21 observation state names: 7 pos + 7 vel + 7 tau
+        obs_names = (
+            [f"left_j{i}.pos" for i in range(7)]
+            + [f"left_j{i}.vel" for i in range(7)]
+            + [f"left_j{i}.tau" for i in range(7)]
+        )
+        # 7 action names: positions only
+        action_names = [f"left_j{i}.pos" for i in range(7)]
+
+        info = {
+            "features": {
+                "observation.state": {"names": obs_names},
+                "action": {"names": action_names},
+            }
+        }
+        (dataset_dir / "meta" / "info.json").write_text(json.dumps(info))
+
+        builder = ObservationBuilder(checkpoint_path=checkpoint, policy=MagicMock())
+
+        assert builder.get_training_action_names() == action_names
+        assert len(builder.get_training_action_names()) == 7
+        assert builder.get_training_state_names() == obs_names
+        assert len(builder.get_training_state_names()) == 21
+
+    def test_get_training_action_names_fallback_to_state_names(self, tmp_path):
+        """Without action key in info.json, falls back to observation state names."""
+        import json
+
+        from app.core.deployment.observation_builder import ObservationBuilder
+
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+
+        dataset_dir = tmp_path / "dataset"
+        (dataset_dir / "meta").mkdir(parents=True)
+
+        train_config = {"dataset": {"root": str(dataset_dir)}}
+        (checkpoint / "train_config.json").write_text(json.dumps(train_config))
+
+        state_names = [f"left_j{i}.pos" for i in range(7)]
+        info = {
+            "features": {
+                "observation.state": {"names": state_names},
+                # No "action" key
+            }
+        }
+        (dataset_dir / "meta" / "info.json").write_text(json.dumps(info))
+
+        builder = ObservationBuilder(checkpoint_path=checkpoint, policy=MagicMock())
+
+        assert builder.get_training_action_names() == state_names
+
+    def test_convert_action_to_dict_uses_action_names(self, tmp_path):
+        """convert_action_to_dict maps a 7-element tensor to 7 .pos keys."""
+        import numpy as np
+
+        from app.core.deployment.observation_builder import ObservationBuilder
+
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+
+        builder = ObservationBuilder(checkpoint_path=checkpoint, policy=MagicMock())
+
+        action_names = [f"left_j{i}.pos" for i in range(7)]
+        builder.get_training_action_names = MagicMock(return_value=action_names)
+
+        action = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+        result = builder.convert_action_to_dict(action, {})
+
+        assert len(result) == 7
+        assert list(result.keys()) == action_names
+        assert all(k.endswith(".pos") for k in result)
+        assert result["left_j0.pos"] == pytest.approx(0.1)
+        assert result["left_j6.pos"] == pytest.approx(0.7)
+
 
 # ---------------------------------------------------------------------------
 # RLLearner tests
@@ -726,3 +949,284 @@ class TestPartialActionSending:
 
         robot.left_arm.send_action.assert_called_once()
         robot.right_arm.send_action.assert_not_called()
+
+    def test_single_arm_strips_prefix(self):
+        from app.core.deployment.runtime import DeploymentRuntime
+
+        robot = MagicMock()
+        del robot.left_arm
+        del robot.right_arm
+        action = {"left_base.pos": 0.5, "left_link1.pos": 0.3}
+
+        DeploymentRuntime._send_partial_action(robot, action)
+        robot.send_action.assert_called_once_with(
+            {"base.pos": 0.5, "link1.pos": 0.3}
+        )
+
+    def test_single_arm_neutral_keys_pass_through(self):
+        from app.core.deployment.runtime import DeploymentRuntime
+
+        robot = MagicMock()
+        del robot.left_arm
+        del robot.right_arm
+        action = {"gripper": 0.8, "left_base.pos": 0.5}
+
+        DeploymentRuntime._send_partial_action(robot, action)
+        robot.send_action.assert_called_once_with(
+            {"base.pos": 0.5, "gripper": 0.8}
+        )
+
+
+# ---------------------------------------------------------------------------
+# Extended state auto-enable tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtendedStateAutoEnable:
+    """Test auto-enabling record_extended_state on follower."""
+
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_auto_enables_extended_state(
+        self, mock_load, runtime, deployment_config, mock_arm_registry
+    ):
+        """Follower with config.record_extended_state gets it set to True."""
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        # Give follower a config with record_extended_state
+        follower = mock_arm_registry.arm_instances["follower_left"]
+        follower.config = MagicMock()
+        follower.config.record_extended_state = False
+
+        # Mock ObservationBuilder to return state names with vel/tau
+        with patch(
+            "app.core.deployment.runtime.ObservationBuilder"
+        ) as MockBuilder:
+            builder_inst = MockBuilder.return_value
+            builder_inst.get_training_state_names.return_value = [
+                "left_base.pos",
+                "left_link1.pos",
+                "left_base.vel",
+                "left_link1.vel",
+                "left_base.tau",
+                "left_link1.tau",
+            ]
+
+            runtime.start(deployment_config, ["leader_left", "follower_left"])
+            time.sleep(0.05)
+
+            assert follower.config.record_extended_state is True
+
+            runtime.stop()
+
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_no_extended_state_when_pos_only(
+        self, mock_load, runtime, deployment_config, mock_arm_registry
+    ):
+        """Follower record_extended_state stays False for pos-only policies."""
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        follower = mock_arm_registry.arm_instances["follower_left"]
+        follower.config = MagicMock()
+        follower.config.record_extended_state = False
+
+        with patch(
+            "app.core.deployment.runtime.ObservationBuilder"
+        ) as MockBuilder:
+            builder_inst = MockBuilder.return_value
+            builder_inst.get_training_state_names.return_value = [
+                "left_base.pos",
+                "left_link1.pos",
+            ]
+
+            runtime.start(deployment_config, ["leader_left", "follower_left"])
+            time.sleep(0.05)
+
+            assert follower.config.record_extended_state is False
+
+            runtime.stop()
+
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_warning_when_follower_lacks_extended_state(
+        self, mock_load, runtime, deployment_config, mock_arm_registry, caplog
+    ):
+        """Warning logged when follower doesn't support record_extended_state."""
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        # Follower without config.record_extended_state
+        follower = mock_arm_registry.arm_instances["follower_left"]
+        if hasattr(follower, "config"):
+            del follower.config
+
+        with patch(
+            "app.core.deployment.runtime.ObservationBuilder"
+        ) as MockBuilder:
+            builder_inst = MockBuilder.return_value
+            builder_inst.get_training_state_names.return_value = [
+                "left_base.pos",
+                "left_base.vel",
+                "left_base.tau",
+            ]
+
+            import logging
+
+            with caplog.at_level(logging.WARNING):
+                runtime.start(
+                    deployment_config, ["leader_left", "follower_left"]
+                )
+                time.sleep(0.05)
+
+            assert any(
+                "does not support record_extended_state" in msg
+                for msg in caplog.messages
+            )
+
+            runtime.stop()
+
+
+# ---------------------------------------------------------------------------
+# Observation / action filtering tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtendedStateFiltering:
+    """Test that .vel/.tau keys are excluded from safety pipeline input."""
+
+    def test_observation_positions_excludes_vel_tau(self):
+        """observation_positions must only contain .pos keys."""
+        raw_obs = {
+            "left_base.pos": 0.1,
+            "left_link1.pos": 0.2,
+            "left_base.vel": 1.5,
+            "left_link1.vel": 2.0,
+            "left_base.tau": 0.3,
+            "left_link1.tau": 0.4,
+            "camera_1": "image_data",
+        }
+
+        observation_positions = {
+            k: v
+            for k, v in raw_obs.items()
+            if isinstance(v, (int, float))
+            and not k.endswith((".vel", ".tau"))
+        }
+
+        assert observation_positions == {
+            "left_base.pos": 0.1,
+            "left_link1.pos": 0.2,
+        }
+
+    def test_hold_action_excludes_vel_tau(self, runtime):
+        """HOLD action must only return .pos keys."""
+        raw_obs = {
+            "left_base.pos": 0.1,
+            "left_link1.pos": 0.2,
+            "left_base.vel": 1.5,
+            "left_link1.vel": 2.0,
+            "left_base.tau": 0.3,
+            "camera_1": "image_data",
+        }
+
+        result = runtime._get_action(ActionSource.HOLD, raw_obs)
+
+        assert result == {
+            "left_base.pos": 0.1,
+            "left_link1.pos": 0.2,
+        }
+
+    def test_pos_only_obs_unchanged(self):
+        """Filtering has no effect on pos-only observations."""
+        raw_obs = {
+            "left_base.pos": 0.1,
+            "left_link1.pos": 0.2,
+            "camera_1": "image_data",
+        }
+
+        observation_positions = {
+            k: v
+            for k, v in raw_obs.items()
+            if isinstance(v, (int, float))
+            and not k.endswith((".vel", ".tau"))
+        }
+
+        assert observation_positions == {
+            "left_base.pos": 0.1,
+            "left_link1.pos": 0.2,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Extended state handling tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtendedStateHandling:
+    """Test the extended state deployment chain: vel/tau filtering."""
+
+    def test_observation_positions_exclude_vel_tau(self):
+        """observation_positions extraction filters out .vel, .tau, and camera arrays."""
+        import numpy as np
+
+        raw_obs = {
+            "base.pos": 0.5,
+            "link1.pos": 0.3,
+            "base.vel": 1.2,
+            "base.tau": 0.8,
+            "camera_1": np.zeros((480, 640, 3)),
+        }
+
+        observation_positions = {
+            k: v
+            for k, v in raw_obs.items()
+            if isinstance(v, (int, float))
+            and not k.endswith((".vel", ".tau"))
+        }
+
+        assert set(observation_positions.keys()) == {"base.pos", "link1.pos"}
+        assert observation_positions["base.pos"] == 0.5
+        assert observation_positions["link1.pos"] == 0.3
+        # No .vel/.tau keys
+        assert not any(k.endswith(".vel") for k in observation_positions)
+        assert not any(k.endswith(".tau") for k in observation_positions)
+        # Camera array excluded
+        assert "camera_1" not in observation_positions
+
+    def test_hold_action_excludes_vel_tau(self, runtime):
+        """HOLD action returns only .pos keys from raw_obs."""
+        runtime._state = RuntimeState.RUNNING
+
+        raw_obs = {
+            "left_base.pos": 0.5,
+            "left_link1.pos": 0.3,
+            "left_base.vel": 1.2,
+            "left_link1.vel": 2.0,
+            "left_base.tau": 0.8,
+            "left_link1.tau": 0.4,
+        }
+
+        result = runtime._get_action(ActionSource.HOLD, raw_obs)
+
+        assert set(result.keys()) == {"left_base.pos", "left_link1.pos"}
+        assert result["left_base.pos"] == 0.5
+        assert result["left_link1.pos"] == 0.3
+
+    def test_send_partial_action_ignores_vel_tau_keys(self):
+        """_send_partial_action passes vel keys through (arm driver ignores them)."""
+        from app.core.deployment.runtime import DeploymentRuntime
+
+        robot = MagicMock()
+        del robot.left_arm
+        del robot.right_arm
+
+        action = {"left_base.pos": 0.5, "left_base.vel": 1.0}
+
+        DeploymentRuntime._send_partial_action(robot, action)
+
+        robot.send_action.assert_called_once_with(
+            {"base.pos": 0.5, "base.vel": 1.0}
+        )

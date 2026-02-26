@@ -69,6 +69,10 @@ for _mod in [
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()
 
+# Make torch.Tensor a real class so isinstance() checks work
+_torch_mod = sys.modules["torch"]
+_torch_mod.Tensor = type("Tensor", (), {})
+
 # ── Now safe to import app code ──
 
 import threading  # noqa: E402
