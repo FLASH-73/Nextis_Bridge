@@ -398,3 +398,51 @@ export interface ListenerStatus {
   tool_pairing_count: number;
   ports: string[];
 }
+
+// ─── Deployment ─────────────────────────────────────────────────────────────
+
+export type DeploymentState =
+  | "idle"
+  | "starting"
+  | "running"
+  | "human_active"
+  | "paused"
+  | "stopping"
+  | "estop"
+  | "error";
+
+export type DeploymentModeType = "inference" | "hil" | "hil_serl";
+
+export interface DeploymentStatus {
+  state: DeploymentState;
+  mode: DeploymentModeType;
+  frame_count: number;
+  episode_count: number;
+  current_episode_frames: number;
+  safety: Record<string, unknown>;
+  policy_config?: {
+    cameras?: string[];
+    arms?: string[];
+    type?: string;
+  };
+  rl_metrics?: {
+    episode?: number;
+    total_episodes?: number;
+    avg_reward?: number;
+    intervention_rate?: number;
+    online_buffer_size?: number;
+    training_step?: number;
+    current_reward?: number;
+    episode_rewards?: number[];
+    loss_critic?: number;
+  };
+  active_arms?: { id: string; connected: boolean }[];
+}
+
+export interface SafetyReadings {
+  per_motor_velocity: Record<string, number>;
+  per_motor_torque: Record<string, number>;
+  active_clamps: Record<string, number>;
+  estop_active: boolean;
+  speed_scale: number;
+}

@@ -11,6 +11,7 @@ import {
   Cpu,
   Cloud,
   Camera,
+  Rocket,
 } from "lucide-react";
 import StatusMenu from "./StatusMenu";
 
@@ -21,6 +22,7 @@ interface ModalStates {
   isTrainOpen: boolean;
   isHILOpen: boolean;
   isRLTrainingOpen: boolean;
+  isDeployOpen: boolean;
   isChatOpen: boolean;
   isArmManagerOpen: boolean;
   isMotorMonitorOpen: boolean;
@@ -36,6 +38,7 @@ interface ControlDockProps {
   setIsTrainOpen: (open: boolean) => void;
   setIsHILOpen: (open: boolean) => void;
   setIsRLTrainingOpen: (open: boolean) => void;
+  setIsDeployOpen: (open: boolean) => void;
   setIsChatOpen: (open: boolean) => void;
   setIsArmManagerOpen: (open: boolean) => void;
   setIsMotorMonitorOpen: (open: boolean) => void;
@@ -51,6 +54,7 @@ export default function ControlDock({
   setIsTrainOpen,
   setIsHILOpen,
   setIsRLTrainingOpen,
+  setIsDeployOpen,
   setIsChatOpen,
   setIsArmManagerOpen,
   setIsMotorMonitorOpen,
@@ -122,6 +126,12 @@ export default function ControlDock({
           className={`px-4 py-2 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ${modalStates.isRLTrainingOpen ? "bg-orange-600 text-white shadow-md" : "hover:bg-orange-50 dark:hover:bg-orange-950 text-orange-600 dark:text-orange-400 hover:text-orange-700"}`}
         >
           <Activity className="w-3 h-3" /> RL
+        </button>
+        <button
+          onClick={() => setIsDeployOpen(true)}
+          className={`px-4 py-2 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 ${modalStates.isDeployOpen ? "bg-emerald-600 text-white shadow-md" : "hover:bg-emerald-50 dark:hover:bg-emerald-950 text-emerald-600 dark:text-emerald-400 hover:text-emerald-700"}`}
+        >
+          <Rocket className="w-3 h-3" /> Deploy
         </button>
         <button
           onClick={() => router.push("/dashboard")}

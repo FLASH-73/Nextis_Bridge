@@ -15,6 +15,7 @@ import AuthModal from "../components/AuthModal";
 import TrainModal from "../components/modals/training";
 import HILModal from "../components/modals/hil";
 import RLTrainingModal from "../components/modals/rl";
+import DeployModal from "../components/modals/deploy";
 import { useAuth } from "../lib/AuthContext";
 import { useTheme } from "../lib/ThemeContext";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -38,6 +39,7 @@ export default function Dashboard() {
   const [isArmManagerOpen, setIsArmManagerOpen] = useState(false);
   const [isMotorMonitorOpen, setIsMotorMonitorOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isDeployOpen, setIsDeployOpen] = useState(false);
 
   // Plan state — shared between ChatWindow (sets it) and TaskGraph (displays it)
   const [currentPlan, setCurrentPlan] = useState<any>(null);
@@ -129,6 +131,15 @@ export default function Dashboard() {
         maximizedWindow={maximizedWindow}
         setMaximizedWindow={setMaximizedWindow}
       />
+      <DeployModal
+        isOpen={isDeployOpen}
+        onClose={() => {
+          setIsDeployOpen(false);
+          if (maximizedWindow === "deploy") setMaximizedWindow(null);
+        }}
+        maximizedWindow={maximizedWindow}
+        setMaximizedWindow={setMaximizedWindow}
+      />
       <ArmManagerModal
         isOpen={isArmManagerOpen}
         onClose={() => setIsArmManagerOpen(false)}
@@ -214,6 +225,7 @@ export default function Dashboard() {
             isTrainOpen,
             isHILOpen,
             isRLTrainingOpen,
+            isDeployOpen,
             isChatOpen,
             isArmManagerOpen,
             isMotorMonitorOpen,
@@ -226,6 +238,7 @@ export default function Dashboard() {
           setIsTrainOpen={setIsTrainOpen}
           setIsHILOpen={setIsHILOpen}
           setIsRLTrainingOpen={setIsRLTrainingOpen}
+          setIsDeployOpen={setIsDeployOpen}
           setIsChatOpen={setIsChatOpen}
           setIsArmManagerOpen={setIsArmManagerOpen}
           setIsMotorMonitorOpen={setIsMotorMonitorOpen}

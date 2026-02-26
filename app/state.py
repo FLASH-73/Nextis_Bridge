@@ -26,6 +26,7 @@ class SystemState:
         self.gvl_reward_service = None
         self.sarm_reward_service = None
         self.rl_service = None
+        self.deployment_runtime = None
         self.arm_registry = None  # Arm Manager Service
         self.tool_registry = None
         self.trigger_listener = None
@@ -149,6 +150,16 @@ class SystemState:
             robot_lock=self.lock
         )
 
+        # 10. Deployment Runtime
+        from app.core.deployment import DeploymentRuntime
+        self.deployment_runtime = DeploymentRuntime(
+            teleop_service=self.teleop_service,
+            training_service=self.training_service,
+            arm_registry=self.arm_registry,
+            camera_service=self.camera_service,
+            robot_lock=self.lock,
+        )
+
         # NOTE: Planner is lazy-loaded on first /chat request
         self.planner = None
 
@@ -184,6 +195,13 @@ class SystemState:
 
     def shutdown(self):
         print("Shutting Down System State...")
+        # Stop deployment runtime first (it may be running a control loop)
+        if self.deployment_runtime:
+            try:
+                self.deployment_runtime.stop()
+            except Exception as e:
+                print(f"Error stopping deployment runtime: {e}")
+
         if self.orchestrator:
             self.orchestrator.stop()
 

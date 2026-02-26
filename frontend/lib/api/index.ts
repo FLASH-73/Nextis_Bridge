@@ -12,3 +12,4 @@ export { systemApi } from "./system";
 export { policiesApi } from "./policies";
 export { motorsApi } from "./motors";
 export { toolsApi, triggersApi, toolPairingsApi } from "./tools";
+export { deployApi } from "./deploy";
