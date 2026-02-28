@@ -12,6 +12,7 @@ from app.core.deployment.safety_pipeline import SafetyPipeline, SafetyReadings
 from app.core.deployment.types import (
     DEFAULT_VELOCITY_LIMITS,
     FALLBACK_VELOCITY_LIMIT,
+    SAFETY_PRESETS,
     RuntimeState,
     SafetyConfig,
 )
@@ -385,3 +386,85 @@ def test_pipeline_processes_only_position_keys(basic_config):
 
     assert set(result.keys()) == set(action.keys())
     assert "gripper" not in result  # gripper is in joint_limits but not in action
+
+
+# ---------------------------------------------------------------------------
+# 17. SafetyConfig.from_policy_type
+# ---------------------------------------------------------------------------
+
+
+def test_from_policy_type_act():
+    """ACT preset has light smoothing and high acceleration limit."""
+    config = SafetyConfig.from_policy_type("act")
+    assert config.smoothing_alpha == 0.85
+    assert config.max_acceleration == 50.0
+    assert config.speed_scale == 1.0
+
+
+def test_from_policy_type_diffusion():
+    """Diffusion preset has moderate smoothing."""
+    config = SafetyConfig.from_policy_type("diffusion")
+    assert config.smoothing_alpha == 0.5
+    assert config.max_acceleration == 30.0
+    assert config.speed_scale == 1.0
+
+
+def test_from_policy_type_unknown_falls_back_to_conservative():
+    """Unknown policy type falls back to conservative preset."""
+    config = SafetyConfig.from_policy_type("unknown_policy")
+    assert config.smoothing_alpha == 0.3
+    assert config.max_acceleration == 15.0
+    assert config.speed_scale == 0.5
+
+
+def test_from_policy_type_overrides():
+    """Overrides replace individual preset values."""
+    config = SafetyConfig.from_policy_type("act", smoothing_alpha=0.95)
+    assert config.smoothing_alpha == 0.95  # overridden
+    assert config.max_acceleration == 50.0  # from preset
+
+
+# ---------------------------------------------------------------------------
+# 18. disable_smoothing bypass
+# ---------------------------------------------------------------------------
+
+
+def test_disable_smoothing_bypasses_stage3(basic_config):
+    """With disable_smoothing=True, stage 3 is skipped entirely."""
+    basic_config.disable_smoothing = True
+    pipe = SafetyPipeline(basic_config)
+    obs = {"base": 0.0}
+    # Seed prev state
+    pipe.process(obs, obs, dt=1 / 60)
+    # Small move within velocity limit (J8009P: 1.5/60 = 0.025)
+    action = {"base": 0.02}
+    result = pipe.process(action, obs, dt=1 / 60)
+    # Without stage 3, no EMA or acceleration filtering — passes through
+    assert abs(result["base"] - 0.02) < 1e-6
+
+
+def test_disable_smoothing_logs_warning(basic_config, caplog):
+    """Creating a pipeline with disable_smoothing logs a warning."""
+    basic_config.disable_smoothing = True
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        SafetyPipeline(basic_config)
+    assert any("smoothing DISABLED" in msg for msg in caplog.messages)
+
+
+# ---------------------------------------------------------------------------
+# 19. Periodic debug logging
+# ---------------------------------------------------------------------------
+
+
+def test_periodic_debug_logging(basic_config, caplog):
+    """Debug summary is logged every 30 frames."""
+    pipe = SafetyPipeline(basic_config)
+    obs = {"base": 0.0}
+    import logging
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(30):
+            pipe.process({"base": 0.01}, obs, dt=1 / 60)
+    assert any("Safety[30]" in msg for msg in caplog.messages)

@@ -273,6 +273,12 @@ class CommandMixin:
                 cmd.append(f"--policy.vision_backbone={config['vision_backbone']}")
             if config.get("dim_model"):
                 cmd.append(f"--policy.dim_model={config['dim_model']}")
+
+            # Temporal ensembling
+            if config.get("temporal_ensemble_coeff") is not None:
+                cmd.append(
+                    f"--policy.temporal_ensemble_coeff={config['temporal_ensemble_coeff']}"
+                )
         else:
             # Generic policy type
             cmd.append(f"--policy.type={job.policy_type.value}")

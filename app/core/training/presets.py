@@ -156,4 +156,15 @@ ACT_DEFAULTS = {
     "learning_rate": 1e-5,
     "warmup_steps": 500,
     "num_workers": 4,
+    "temporal_ensemble_coeff": None,  # None = disabled (open-loop chunking)
+}
+
+# ACT with temporal ensembling enabled (Zhao et al. 2023 recommendation).
+# Queries the policy every step and exponentially-weights overlapping chunks
+# instead of executing 100 blind steps.
+ACT_DEFAULTS_WITH_TE = {
+    **ACT_DEFAULTS,
+    "chunk_size": 50,               # Shorter chunks work better with TE
+    "n_action_steps": 1,            # MUST be 1 when TE is enabled
+    "temporal_ensemble_coeff": 0.01, # Original ACT paper value
 }

@@ -47,6 +47,9 @@ class SafetyPipeline:
         self._config = config
         self._safety_layer = safety_layer
 
+        if config.disable_smoothing:
+            logger.warning("Safety pipeline: smoothing DISABLED (stage 3 bypassed)")
+
         # Internal frame-to-frame state
         self._prev_positions: Dict[str, float] = {}
         self._prev_velocities: Dict[str, float] = {}
@@ -94,7 +97,8 @@ class SafetyPipeline:
             filtered = self._limit_velocity(filtered, observation, dt)
 
             # Stage 3 — acceleration filter + EMA smoothing
-            filtered = self._filter_acceleration(filtered, dt)
+            if not self._config.disable_smoothing:
+                filtered = self._filter_acceleration(filtered, dt)
 
             # Stage 4 — torque monitor (periodic)
             if robot is not None:
@@ -104,6 +108,20 @@ class SafetyPipeline:
 
             # Commit state for next frame
             self._update_prev_state(filtered, observation, dt)
+
+            # Periodic debug logging (~1/s at 30Hz)
+            if self._frame_count % 30 == 0:
+                vel_clamps = self._readings.active_clamps.get("velocity", 0)
+                accel_clamps = self._readings.active_clamps.get("acceleration", 0)
+                logger.debug(
+                    "Safety[%d]: vel_clamps=%d accel_clamps=%d smoothing=%.2f scale=%.1f",
+                    self._frame_count,
+                    vel_clamps,
+                    accel_clamps,
+                    self._config.smoothing_alpha,
+                    self._config.speed_scale,
+                )
+
             return filtered
 
         except Exception as e:

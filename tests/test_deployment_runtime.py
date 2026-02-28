@@ -18,6 +18,7 @@ import pytest
 from app.core.deployment.intervention import InterventionDetector
 from app.core.deployment.rl_learner import RLLearner
 from app.core.deployment.types import (
+    SAFETY_PRESETS,
     ActionSource,
     DeploymentConfig,
     DeploymentMode,
@@ -1230,3 +1231,363 @@ class TestExtendedStateHandling:
         robot.send_action.assert_called_once_with(
             {"base.pos": 0.5, "base.vel": 1.0}
         )
+
+
+# ---------------------------------------------------------------------------
+# Safety preset auto-selection tests
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyPresetAutoSelection:
+    """Test auto-selection of safety presets based on policy type."""
+
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_act_preset_auto_selected(
+        self, mock_load, runtime, deployment_config, mock_training
+    ):
+        """ACT policy type triggers ACT safety preset values."""
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._checkpoint_path = Path("/tmp/fake")
+        runtime._policy_config = mock_training.get_policy_config("test_policy")
+
+        runtime.start(deployment_config, ["leader_left", "follower_left"])
+        time.sleep(0.05)
+
+        # policy_type is "act" from mock_training fixture
+        assert runtime._config.safety.smoothing_alpha == 0.85
+        assert runtime._config.safety.max_acceleration == 50.0
+        assert runtime._config.safety.speed_scale == 1.0
+
+        runtime.stop()
+
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_custom_motor_models_skips_preset(
+        self, mock_load, runtime, mock_training
+    ):
+        """When user provides custom motor_models, preset is not applied."""
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        custom_config = DeploymentConfig(
+            mode=DeploymentMode.INFERENCE,
+            policy_id="test_policy",
+            safety=SafetyConfig(
+                motor_models={"base": "J8009P"},
+                smoothing_alpha=0.4,
+                max_acceleration=20.0,
+            ),
+        )
+
+        runtime.start(custom_config, ["leader_left", "follower_left"])
+        time.sleep(0.05)
+
+        # Custom values preserved (not overwritten by ACT preset)
+        assert runtime._config.safety.smoothing_alpha == 0.4
+        assert runtime._config.safety.max_acceleration == 20.0
+
+        runtime.stop()
+
+
+# ---------------------------------------------------------------------------
+# Temporal ensemble override tests
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalEnsembleOverride:
+    """Test deployment-time temporal ensemble override for ACT policies."""
+
+    def test_te_override_attaches_ensembler(self, runtime, mock_training):
+        """TE override creates and attaches ACTTemporalEnsembler."""
+        runtime._policy = MagicMock()
+        runtime._policy.config = MagicMock()
+        runtime._policy.config.chunk_size = 50
+        runtime._policy_config = mock_training.get_policy_config("test_policy")
+
+        runtime._config = DeploymentConfig(
+            policy_id="test_policy",
+            temporal_ensemble_override=0.01,
+        )
+
+        mock_ensembler_cls = MagicMock()
+        mock_ensembler_inst = MagicMock()
+        mock_ensembler_cls.return_value = mock_ensembler_inst
+
+        with patch.dict("sys.modules", {
+            "lerobot.policies.act.modeling_act": MagicMock(
+                ACTTemporalEnsembler=mock_ensembler_cls
+            ),
+        }):
+            runtime._apply_temporal_ensemble_override()
+
+        mock_ensembler_cls.assert_called_once_with(0.01, 50)
+        assert runtime._policy.temporal_ensembler is mock_ensembler_inst
+        assert runtime._policy.config.temporal_ensemble_coeff == 0.01
+        assert runtime._policy.config.n_action_steps == 1
+
+    def test_te_override_ignored_for_non_act(self, runtime, caplog):
+        """TE override is ignored for non-ACT policy types."""
+        import logging
+
+        runtime._policy = MagicMock()
+        runtime._policy_config = MagicMock()
+        runtime._policy_config.policy_type = "diffusion"
+        runtime._config = DeploymentConfig(
+            policy_id="test_policy",
+            temporal_ensemble_override=0.01,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            runtime._apply_temporal_ensemble_override()
+
+        assert any("only supported for ACT" in msg for msg in caplog.messages)
+
+    def test_te_override_none_is_noop(self, runtime):
+        """No override when temporal_ensemble_override is None."""
+        runtime._policy = MagicMock()
+        runtime._policy.config = MagicMock()
+        runtime._config = DeploymentConfig(policy_id="test_policy")
+
+        original_coeff = runtime._policy.config.temporal_ensemble_coeff
+
+        runtime._apply_temporal_ensemble_override()
+
+        # Config should be untouched
+        assert runtime._policy.config.temporal_ensemble_coeff == original_coeff
+
+
+# ---------------------------------------------------------------------------
+# Dry-run diagnostic mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestDryRun:
+    """Test dry-run diagnostic mode."""
+
+    @patch("app.core.deployment.runtime.ObservationBuilder")
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_dry_run_stops_after_30_frames(
+        self, mock_load, MockBuilder, runtime, mock_arm_registry
+    ):
+        """Dry-run auto-stops after DRY_RUN_FRAMES frames."""
+        import numpy as np
+
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._policy.select_action.return_value = np.zeros(2)
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        builder_inst = MockBuilder.return_value
+        builder_inst.get_training_state_names.return_value = [
+            "left_base.pos", "left_link1.pos",
+        ]
+        builder_inst.prepare_observation.return_value = {
+            "observation.state": np.array([[0.1, 0.2]]),
+        }
+        builder_inst.convert_action_to_dict.return_value = {
+            "left_base.pos": 0.0, "left_link1.pos": 0.0,
+        }
+
+        config = DeploymentConfig(
+            mode=DeploymentMode.INFERENCE,
+            policy_id="test_policy",
+            safety=SafetyConfig(),
+            dry_run=True,
+        )
+
+        runtime.start(config, ["leader_left", "follower_left"])
+
+        # Wait for auto-stop (30 frames at 30Hz = ~1s, give extra margin)
+        thread = runtime._loop_thread
+        if thread:
+            thread.join(timeout=5.0)
+
+        assert runtime._frame_count == 30
+
+        runtime.stop()
+
+    @patch("app.core.deployment.runtime.ObservationBuilder")
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_dry_run_does_not_send_action(
+        self, mock_load, MockBuilder, runtime, mock_arm_registry
+    ):
+        """Dry-run never calls follower.send_action."""
+        import numpy as np
+
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._policy.select_action.return_value = np.zeros(2)
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        builder_inst = MockBuilder.return_value
+        builder_inst.get_training_state_names.return_value = [
+            "left_base.pos", "left_link1.pos",
+        ]
+        builder_inst.prepare_observation.return_value = {
+            "observation.state": np.array([[0.0, 0.0]]),
+        }
+        builder_inst.convert_action_to_dict.return_value = {
+            "left_base.pos": 0.0, "left_link1.pos": 0.0,
+        }
+
+        follower = mock_arm_registry.arm_instances["follower_left"]
+        follower.send_action.reset_mock()
+
+        config = DeploymentConfig(
+            mode=DeploymentMode.INFERENCE,
+            policy_id="test_policy",
+            safety=SafetyConfig(),
+            dry_run=True,
+        )
+
+        runtime.start(config, ["leader_left", "follower_left"])
+
+        thread = runtime._loop_thread
+        if thread:
+            thread.join(timeout=5.0)
+
+        follower.send_action.assert_not_called()
+
+        runtime.stop()
+
+    @patch("app.core.deployment.runtime.ObservationBuilder")
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_dry_run_collects_diagnostics(
+        self, mock_load, MockBuilder, runtime, mock_arm_registry
+    ):
+        """Dry-run log contains 30 entries with expected keys."""
+        import numpy as np
+
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        runtime._policy.select_action.return_value = np.array([0.1, 0.2])
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        builder_inst = MockBuilder.return_value
+        builder_inst.get_training_state_names.return_value = [
+            "left_base.pos", "left_link1.pos",
+        ]
+        builder_inst.prepare_observation.return_value = {
+            "observation.state": np.array([[0.5, 0.6]]),
+        }
+        builder_inst.convert_action_to_dict.return_value = {
+            "left_base.pos": 0.1, "left_link1.pos": 0.2,
+        }
+
+        config = DeploymentConfig(
+            mode=DeploymentMode.INFERENCE,
+            policy_id="test_policy",
+            safety=SafetyConfig(),
+            dry_run=True,
+        )
+
+        runtime.start(config, ["leader_left", "follower_left"])
+
+        thread = runtime._loop_thread
+        if thread:
+            thread.join(timeout=5.0)
+
+        # Capture before stop clears
+        log = list(runtime._dry_run_log)
+
+        assert len(log) == 30
+        assert log[0]["frame"] == 0
+        assert log[29]["frame"] == 29
+
+        # Each entry should have denorm_action and robot_pos
+        for entry in log:
+            assert "frame" in entry
+            assert "denorm_action" in entry
+            assert "robot_pos" in entry
+
+        runtime.stop()
+
+    @patch("app.core.deployment.runtime.ObservationBuilder")
+    @patch("app.core.deployment.runtime.DeploymentRuntime._load_policy")
+    def test_dry_run_validates_ranges(
+        self, mock_load, MockBuilder, runtime, mock_arm_registry
+    ):
+        """Extreme values produce validation warnings in dry-run log."""
+        import numpy as np
+
+        mock_load.return_value = None
+        runtime._policy = MagicMock()
+        # Return extreme action values that will trigger range warnings
+        runtime._policy.select_action.return_value = np.array([10.0, -10.0])
+        runtime._checkpoint_path = Path("/tmp/fake")
+
+        builder_inst = MockBuilder.return_value
+        builder_inst.get_training_state_names.return_value = [
+            "left_base.pos", "left_link1.pos",
+        ]
+        builder_inst.prepare_observation.return_value = {
+            "observation.state": np.array([[0.5, 0.6]]),
+        }
+        builder_inst.convert_action_to_dict.return_value = {
+            "left_base.pos": 10.0, "left_link1.pos": -10.0,
+        }
+
+        config = DeploymentConfig(
+            mode=DeploymentMode.INFERENCE,
+            policy_id="test_policy",
+            safety=SafetyConfig(),
+            dry_run=True,
+        )
+
+        runtime.start(config, ["leader_left", "follower_left"])
+
+        thread = runtime._loop_thread
+        if thread:
+            thread.join(timeout=5.0)
+
+        log = list(runtime._dry_run_log)
+
+        # First frame should have warnings from range validation
+        assert "warnings" in log[0]
+        assert len(log[0]["warnings"]) > 0
+        # Should mention the range issue
+        assert any("exceeds" in w for w in log[0]["warnings"])
+
+        runtime.stop()
+
+    def test_get_policy_action_return_raw(self, runtime):
+        """_get_policy_action with return_raw=True returns 3-tuple."""
+        import numpy as np
+
+        runtime._policy = MagicMock()
+        action_out = np.array([0.1, 0.2])
+        runtime._policy.select_action.return_value = action_out
+
+        runtime._obs_builder = MagicMock()
+        runtime._obs_builder.prepare_observation.return_value = {
+            "observation.state": np.array([0.5, 0.6])
+        }
+        runtime._obs_builder.convert_action_to_dict.return_value = {
+            "left_base.pos": 0.1, "left_link1.pos": 0.2
+        }
+        runtime._config = DeploymentConfig(policy_id="test_policy")
+
+        # return_raw=False (default) returns dict
+        result = runtime._get_policy_action({"left_base.pos": 0.0})
+        assert isinstance(result, dict)
+
+        # return_raw=True returns 3-tuple
+        action_dict, policy_obs, action_tensor = runtime._get_policy_action(
+            {"left_base.pos": 0.0}, return_raw=True
+        )
+        assert isinstance(action_dict, dict)
+        assert "observation.state" in policy_obs
+        assert action_tensor is action_out
+
+    def test_get_policy_action_return_raw_none(self, runtime):
+        """_get_policy_action with return_raw=True returns (None, None, None) when no policy."""
+        runtime._policy = None
+        runtime._obs_builder = None
+
+        result = runtime._get_policy_action({}, return_raw=True)
+        assert result == (None, None, None)
+
+        # Without return_raw
+        result = runtime._get_policy_action({})
+        assert result is None

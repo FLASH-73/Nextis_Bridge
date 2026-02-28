@@ -53,10 +53,70 @@ async def start_deployment(request: Request):
             reward_source=data.get("reward_source"),
             reward_model=data.get("reward_model"),
             max_episodes=data.get("max_episodes"),
+            temporal_ensemble_override=(
+                float(data["temporal_ensemble_override"])
+                if data.get("temporal_ensemble_override") is not None
+                else None
+            ),
         )
 
         system.deployment_runtime.start(config, active_arms)
         return {"status": "started", "mode": mode.value, "policy_id": policy_id, "active_arms": active_arms}
+
+    except RuntimeError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@router.post("/deploy/dry-run")
+async def dry_run_deployment(request: Request):
+    """Run a diagnostic dry-run: full pipeline for 30 frames without sending actions.
+
+    Returns per-frame diagnostics and range-validation warnings as JSON.
+    """
+    system = get_state()
+    if not system.deployment_runtime:
+        return JSONResponse(status_code=503, content={"error": "Deployment runtime not initialized"})
+
+    try:
+        data = await request.json()
+
+        policy_id = data.get("policy_id")
+        active_arms = data.get("active_arms")
+
+        if not policy_id:
+            return JSONResponse(status_code=400, content={"error": "policy_id required"})
+        if not active_arms or not isinstance(active_arms, list):
+            return JSONResponse(status_code=400, content={"error": "active_arms required (list of arm IDs)"})
+
+        from app.core.deployment import DeploymentConfig, DeploymentMode, SafetyConfig
+
+        config = DeploymentConfig(
+            mode=DeploymentMode.INFERENCE,
+            policy_id=policy_id,
+            safety=SafetyConfig(),
+            dry_run=True,
+        )
+
+        system.deployment_runtime.start(config, active_arms)
+
+        # Wait for the dry-run loop to finish (auto-stops after 30 frames)
+        thread = system.deployment_runtime._loop_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=10.0)
+
+        # Capture logs before stop() clears them
+        dry_run_log = list(system.deployment_runtime._dry_run_log)
+        frame_count = system.deployment_runtime._frame_count
+
+        system.deployment_runtime.stop()
+
+        return {
+            "status": "completed",
+            "frames": frame_count,
+            "diagnostics": dry_run_log,
+        }
 
     except RuntimeError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})

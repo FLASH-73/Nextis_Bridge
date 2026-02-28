@@ -7,6 +7,7 @@ happens with the data.  Safety is always applied.
 """
 
 import logging
+import math
 import threading
 import time
 from typing import Dict, List, Optional
@@ -26,6 +27,7 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOOP_HZ = 30
+DRY_RUN_FRAMES = 30
 
 
 class DeploymentRuntime:
@@ -70,6 +72,9 @@ class DeploymentRuntime:
         self._leader = None
         self._follower = None
         self._arm_defs: List = []
+
+        # Dry-run diagnostics log (populated during dry_run=True)
+        self._dry_run_log: list = []
 
         # Counters
         self._frame_count = 0
@@ -122,7 +127,30 @@ class DeploymentRuntime:
             # 4. Load policy
             self._load_policy(config.policy_id)
 
-            # 5. Populate safety config from arm definitions
+            # 4b. Apply temporal ensembling override (must happen BEFORE reset,
+            #     because reset() initializes the ensembler's internal state)
+            self._apply_temporal_ensemble_override()
+
+            # 4c. Reset policy internal state (clears stale action queue /
+            #     temporal ensembler from prior deployments)
+            if hasattr(self._policy, "reset"):
+                self._policy.reset()
+                logger.info("Policy internal state reset")
+
+            # 5. Auto-select safety preset if no custom safety tuning provided
+            if not config.safety.motor_models:
+                policy_type = getattr(self._policy_config, "policy_type", "")
+                preset_config = SafetyConfig.from_policy_type(policy_type)
+                config.safety.smoothing_alpha = preset_config.smoothing_alpha
+                config.safety.max_acceleration = preset_config.max_acceleration
+                config.safety.speed_scale = preset_config.speed_scale
+                logger.info(
+                    "Auto-selected '%s' safety preset for policy type '%s'",
+                    policy_type or "conservative",
+                    policy_type,
+                )
+
+            # 5b. Populate safety config from arm definitions
             self._populate_safety_config(config.safety)
 
             # 6. Create safety pipeline
@@ -176,7 +204,7 @@ class DeploymentRuntime:
             )
             self._intervention_detector = InterventionDetector(
                 policy_arms=policy_arms,
-                loop_hz=DEFAULT_LOOP_HZ,
+                loop_hz=config.loop_hz,
             )
 
             # 10. Start recording for HIL/SERL modes
@@ -218,6 +246,8 @@ class DeploymentRuntime:
             self._safety_pipeline.reset()
         if self._intervention_detector:
             self._intervention_detector.reset()
+        if self._policy and hasattr(self._policy, "reset"):
+            self._policy.reset()
 
         self._policy = None
         self._checkpoint_path = None
@@ -230,6 +260,7 @@ class DeploymentRuntime:
         self._arm_defs = []
         self._config = None
         self._loop_thread = None
+        self._dry_run_log = []
 
         self._transition(RuntimeState.IDLE)
         logger.info("Deployment stopped")
@@ -318,13 +349,25 @@ class DeploymentRuntime:
 
     def _control_loop(self) -> None:
         """Unified 30Hz control loop for all deployment modes."""
-        loop_period = 1.0 / DEFAULT_LOOP_HZ
+        loop_hz = self._config.loop_hz if self._config else DEFAULT_LOOP_HZ
+        loop_period = 1.0 / loop_hz
         dt = loop_period
         is_hil = self._config and self._config.mode in (
             DeploymentMode.HIL,
             DeploymentMode.HIL_SERL,
         )
-        logger.info("Control loop started (%.0f Hz)", DEFAULT_LOOP_HZ)
+        is_dry_run = self._config and self._config.dry_run
+        if is_dry_run:
+            self._dry_run_log = []
+            logger.info(
+                "DRY RUN mode: will run %d frames without sending actions",
+                DRY_RUN_FRAMES,
+            )
+        logger.info("Control loop running at %dHz", loop_hz)
+
+        # Reset policy state at loop entry (belt-and-suspenders with start())
+        if self._policy and hasattr(self._policy, "reset"):
+            self._policy.reset()
 
         while not self._stop_event.is_set():
             t0 = time.monotonic()
@@ -347,13 +390,25 @@ class DeploymentRuntime:
                     )
 
                 # 3. Determine action based on source
-                if self._state == RuntimeState.PAUSED:
+                if is_dry_run:
+                    action_source = ActionSource.POLICY
+                elif self._state == RuntimeState.PAUSED:
                     action_source = ActionSource.HOLD
 
-                action = self._get_action(action_source, raw_obs)
-                if action is None:
-                    time.sleep(0.001)
-                    continue
+                # In dry-run mode, get intermediates for diagnostics
+                policy_obs = None
+                action_tensor = None
+                if is_dry_run:
+                    result = self._get_policy_action(raw_obs, return_raw=True)
+                    if result[0] is None:
+                        time.sleep(0.001)
+                        continue
+                    action, policy_obs, action_tensor = result
+                else:
+                    action = self._get_action(action_source, raw_obs)
+                    if action is None:
+                        time.sleep(0.001)
+                        continue
 
                 # 4. ALWAYS apply safety pipeline
                 observation_positions = {
@@ -374,11 +429,28 @@ class DeploymentRuntime:
                         "Runtime ESTOP: safety pipeline triggered torque emergency stop"
                     )
 
-                # 5. Send to robot
-                self._send_action(filtered_action)
+                # 4c. Warm-up blending: ramp from current position to
+                #     policy target over the first N frames to avoid jerks
+                warmup = self._config.warmup_frames if self._config else 0
+                if warmup > 0 and self._frame_count < warmup:
+                    blend_alpha = (self._frame_count + 1) / warmup
+                    for key in filtered_action:
+                        if key in observation_positions:
+                            current = observation_positions[key]
+                            target = filtered_action[key]
+                            filtered_action[key] = current + (target - current) * blend_alpha
 
-                # 6. Cache for recording
-                self._cache_for_recording(filtered_action, raw_obs)
+                # 5. Dry-run diagnostics or send to robot
+                if is_dry_run:
+                    self._log_dry_run_frame(
+                        self._frame_count, policy_obs, action_tensor,
+                        action, filtered_action, raw_obs,
+                    )
+                else:
+                    self._send_action(filtered_action)
+
+                    # 6. Cache for recording
+                    self._cache_for_recording(filtered_action, raw_obs)
 
                 # 7. Update counters
                 self._frame_count += 1
@@ -387,6 +459,13 @@ class DeploymentRuntime:
                     self._human_frames += 1
                 elif action_source == ActionSource.POLICY:
                     self._autonomous_frames += 1
+
+                # 7b. Auto-stop after DRY_RUN_FRAMES in dry-run mode
+                if is_dry_run and self._frame_count >= DRY_RUN_FRAMES:
+                    logger.info(
+                        "Dry run complete (%d frames)", self._frame_count
+                    )
+                    self._stop_event.set()
 
             except Exception as e:
                 logger.error("Control loop error: %s", e)
@@ -421,21 +500,30 @@ class DeploymentRuntime:
         # POLICY
         return self._get_policy_action(raw_obs)
 
-    def _get_policy_action(self, raw_obs: dict) -> Optional[Dict[str, float]]:
-        """Run policy inference and return denormalized action dict."""
+    def _get_policy_action(self, raw_obs: dict, return_raw: bool = False):
+        """Run policy inference and return denormalized action dict.
+
+        When *return_raw* is True, returns a 3-tuple
+        ``(action_dict, policy_obs, action_tensor)`` so that callers
+        (e.g. dry-run diagnostics) can inspect intermediates.
+        """
         if self._policy is None or self._obs_builder is None:
-            return None
+            return (None, None, None) if return_raw else None
 
         policy_obs = self._obs_builder.prepare_observation(raw_obs)
-        action = self._policy.select_action(policy_obs)
+        action_tensor = self._policy.select_action(policy_obs)
 
         movement_scale = 1.0
         if self._config:
             movement_scale = self._config.movement_scale
 
-        return self._obs_builder.convert_action_to_dict(
-            action, raw_obs, movement_scale=movement_scale
+        action_dict = self._obs_builder.convert_action_to_dict(
+            action_tensor, raw_obs, movement_scale=movement_scale
         )
+
+        if return_raw:
+            return action_dict, policy_obs, action_tensor
+        return action_dict
 
     def _get_human_action(self) -> Optional[Dict[str, float]]:
         """Read leader arm positions for human teleop."""
@@ -592,6 +680,164 @@ class DeploymentRuntime:
 
         except Exception:
             return dict(action_dict)
+
+    # ------------------------------------------------------------------
+    # Dry-run diagnostics
+    # ------------------------------------------------------------------
+
+    def _log_dry_run_frame(
+        self,
+        frame: int,
+        policy_obs: dict,
+        action_tensor,
+        denorm_action: dict,
+        filtered_action: dict,
+        raw_obs: dict,
+    ) -> dict:
+        """Log comprehensive diagnostics for one dry-run frame."""
+        entry: Dict = {"frame": frame}
+        logger.info("=== DRY RUN FRAME %d/%d ===", frame + 1, DRY_RUN_FRAMES)
+
+        # Observation state diagnostics
+        if policy_obs and "observation.state" in policy_obs:
+            s = policy_obs["observation.state"]
+            if hasattr(s, "shape"):
+                info = {
+                    "shape": list(s.shape),
+                    "min": float(s.min()),
+                    "max": float(s.max()),
+                    "mean": float(s.mean()),
+                }
+                logger.info(
+                    "  OBS STATE: shape=%s min=%.4f max=%.4f mean=%.4f",
+                    info["shape"], info["min"], info["max"], info["mean"],
+                )
+                entry["obs_state"] = info
+
+        # Image observation diagnostics
+        if policy_obs:
+            for k, v in policy_obs.items():
+                if "image" in k and hasattr(v, "shape"):
+                    img_info = {
+                        "shape": list(v.shape),
+                        "min": float(v.min()),
+                        "max": float(v.max()),
+                    }
+                    logger.info(
+                        "  OBS IMAGE %s: shape=%s min=%.3f max=%.3f",
+                        k, img_info["shape"], img_info["min"], img_info["max"],
+                    )
+                    entry.setdefault("obs_images", {})[k] = img_info
+
+        # Raw action tensor diagnostics
+        if action_tensor is not None and hasattr(action_tensor, "shape"):
+            act_info = {
+                "shape": list(action_tensor.shape),
+                "min": float(action_tensor.min()),
+                "max": float(action_tensor.max()),
+                "mean": float(action_tensor.mean()),
+            }
+            logger.info(
+                "  RAW ACTION: shape=%s min=%.4f max=%.4f mean=%.4f",
+                act_info["shape"], act_info["min"], act_info["max"],
+                act_info["mean"],
+            )
+            entry["raw_action"] = act_info
+
+        # Denormalized action
+        if denorm_action:
+            denorm_fmt = {k: f"{v:+.4f}" for k, v in denorm_action.items()}
+            logger.info("  DENORM ACTION: %s", denorm_fmt)
+            entry["denorm_action"] = {
+                k: float(v) for k, v in denorm_action.items()
+            }
+
+        # Safety filter delta
+        if filtered_action and denorm_action:
+            delta = {
+                k: float(filtered_action[k] - denorm_action[k])
+                for k in filtered_action
+                if k in denorm_action
+            }
+            delta_fmt = {k: f"{v:+.4f}" for k, v in delta.items()}
+            logger.info("  SAFETY DELTA: %s", delta_fmt)
+            entry["safety_delta"] = delta
+
+        # Current robot positions
+        obs_positions = {
+            k: float(v)
+            for k, v in raw_obs.items()
+            if isinstance(v, (int, float)) and k.endswith(".pos")
+        }
+        if obs_positions:
+            logger.info(
+                "  ROBOT POS: %s",
+                {k: f"{v:+.4f}" for k, v in obs_positions.items()},
+            )
+            entry["robot_pos"] = obs_positions
+
+        # Range validation on first frame
+        if frame == 0:
+            warnings = self._validate_dry_run_ranges(
+                policy_obs, action_tensor, denorm_action
+            )
+            if warnings:
+                entry["warnings"] = warnings
+
+        self._dry_run_log.append(entry)
+        return entry
+
+    def _validate_dry_run_ranges(
+        self,
+        policy_obs: Optional[dict],
+        action_tensor,
+        denorm_action: Optional[dict],
+    ) -> List[str]:
+        """Check if values are in sane ranges. Returns list of warning strings."""
+        warnings: List[str] = []
+
+        # Check normalized observation state
+        if policy_obs and "observation.state" in policy_obs:
+            s = policy_obs["observation.state"]
+            if hasattr(s, "min") and hasattr(s, "max"):
+                s_min, s_max = float(s.min()), float(s.max())
+                if s_min < -3.0 or s_max > 3.0:
+                    msg = (
+                        f"Observation state range [min={s_min:.2f}, "
+                        f"max={s_max:.2f}] exceeds [-3, 3]. "
+                        "Normalization may not be applied. "
+                        "Check norm stats keys in checkpoint."
+                    )
+                    logger.error("RANGE CHECK: %s", msg)
+                    warnings.append(msg)
+
+        # Check raw action tensor
+        if action_tensor is not None and hasattr(action_tensor, "min"):
+            a_min, a_max = float(action_tensor.min()), float(action_tensor.max())
+            if a_min < -3.0 or a_max > 3.0:
+                msg = (
+                    f"Raw action tensor range [min={a_min:.2f}, "
+                    f"max={a_max:.2f}] exceeds [-3, 3]. "
+                    "Output may be raw radians instead of normalized. "
+                    "Check policy output normalization."
+                )
+                logger.error("RANGE CHECK: %s", msg)
+                warnings.append(msg)
+
+        # Check denormalized actions (motor positions, should be in [-pi, pi])
+        if denorm_action:
+            for k, v in denorm_action.items():
+                if abs(v) > math.pi:
+                    msg = (
+                        f"Denormalized action '{k}'={v:+.4f} "
+                        f"exceeds [-pi, pi]. "
+                        "Denormalization may be incorrect."
+                    )
+                    logger.error("RANGE CHECK: %s", msg)
+                    warnings.append(msg)
+                    break  # One warning per check is enough
+
+        return warnings
 
     # ------------------------------------------------------------------
     # State machine
@@ -838,6 +1084,56 @@ class DeploymentRuntime:
                 f"Failed to load policy {policy_id}: {e}"
             ) from e
 
+    def _apply_temporal_ensemble_override(self) -> None:
+        """Attach or replace ACTTemporalEnsembler at deployment time.
+
+        When config.temporal_ensemble_override is set and the loaded policy
+        is ACT, we manually create the ensembler and wire it in.  This lets
+        users experiment with TE at deploy time without retraining.
+
+        Must be called BEFORE policy.reset() — reset() will call
+        ensembler.reset() when temporal_ensemble_coeff is set.
+        """
+        if self._config is None or self._config.temporal_ensemble_override is None:
+            return
+
+        policy_type = ""
+        if self._policy_config:
+            policy_type = getattr(self._policy_config, "policy_type", "")
+
+        if policy_type != "act":
+            logger.warning(
+                "temporal_ensemble_override is only supported for ACT policies "
+                "(got policy_type=%r), ignoring",
+                policy_type,
+            )
+            return
+
+        if self._policy is None:
+            return
+
+        coeff = self._config.temporal_ensemble_override
+
+        try:
+            from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
+        except ImportError:
+            logger.error(
+                "Cannot apply temporal_ensemble_override: "
+                "lerobot.policies.act.modeling_act not importable"
+            )
+            return
+
+        chunk_size = getattr(self._policy.config, "chunk_size", 100)
+        self._policy.temporal_ensembler = ACTTemporalEnsembler(coeff, chunk_size)
+        self._policy.config.temporal_ensemble_coeff = coeff
+        self._policy.config.n_action_steps = 1
+
+        logger.info(
+            "Temporal ensemble override applied: coeff=%.4f, chunk_size=%d",
+            coeff,
+            chunk_size,
+        )
+
     def _populate_safety_config(self, safety: SafetyConfig) -> None:
         """Fill joint_limits and motor_models from arm definitions."""
         for arm_def in self._arm_defs:
@@ -880,7 +1176,7 @@ class DeploymentRuntime:
                 self._teleop.start_recording_session(
                     repo_id=repo_id,
                     task=task,
-                    fps=DEFAULT_LOOP_HZ,
+                    fps=config.loop_hz,
                 )
                 logger.info("Recording session started: %s", repo_id)
         except Exception as e:

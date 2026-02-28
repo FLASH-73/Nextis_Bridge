@@ -68,6 +68,28 @@ DEFAULT_VELOCITY_LIMITS: Dict[str, float] = {
 }
 FALLBACK_VELOCITY_LIMIT: float = 2.0
 
+# ---------------------------------------------------------------------------
+# Safety presets by policy type
+# ---------------------------------------------------------------------------
+
+SAFETY_PRESETS: Dict[str, Dict[str, float]] = {
+    "act": {
+        "smoothing_alpha": 0.85,      # Light smoothing — ACT handles its own via temporal ensemble
+        "max_acceleration": 50.0,      # ACT's chunked actions are already smooth
+        "speed_scale": 1.0,            # ACT trained at full speed
+    },
+    "diffusion": {
+        "smoothing_alpha": 0.5,        # Moderate — diffusion can be noisy
+        "max_acceleration": 30.0,
+        "speed_scale": 1.0,
+    },
+    "conservative": {
+        "smoothing_alpha": 0.3,        # Current defaults — for untested policies
+        "max_acceleration": 15.0,
+        "speed_scale": 0.5,
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -91,12 +113,24 @@ class SafetyConfig:
     torque_check_interval: int = 3
     # Global speed multiplier for all velocity limits [0.1, 1.0]
     speed_scale: float = 1.0
+    # When True, skip stage 3 (acceleration filter + EMA) entirely
+    disable_smoothing: bool = False
 
     def effective_max_velocity(self, motor_name: str) -> float:
         """Look up the velocity limit for a motor by its model and apply speed_scale."""
         model = self.motor_models.get(motor_name, "")
         base_limit = DEFAULT_VELOCITY_LIMITS.get(model, FALLBACK_VELOCITY_LIMIT)
         return base_limit * max(0.1, min(1.0, self.speed_scale))
+
+    @classmethod
+    def from_policy_type(cls, policy_type: str, **overrides) -> "SafetyConfig":
+        """Create a SafetyConfig from a policy-type preset with optional overrides."""
+        preset = SAFETY_PRESETS.get(policy_type, SAFETY_PRESETS["conservative"])
+        config = cls(**preset)
+        for k, v in overrides.items():
+            if hasattr(config, k):
+                setattr(config, k, v)
+        return config
 
 
 @dataclass
@@ -114,6 +148,17 @@ class DeploymentConfig:
     reward_source: Optional[str] = None
     reward_model: Optional[str] = None
     max_episodes: Optional[int] = None
+    # Control loop frequency (must match training recording fps)
+    loop_hz: int = 30
+    # Warm-up frames: blend policy output with current position to avoid jerks
+    warmup_frames: int = 5
+    # ACT temporal ensembling override: float (e.g. 0.01) enables TE at
+    # deployment time even if trained without it. None = use training config.
+    temporal_ensemble_override: Optional[float] = None
+    # Dry-run diagnostic mode: run full pipeline for 30 frames without
+    # sending actions to the robot. Logs per-frame diagnostics and
+    # validates value ranges.
+    dry_run: bool = False
 
 
 @dataclass

@@ -8,6 +8,7 @@ from .safety_pipeline import SafetyPipeline, SafetyReadings
 from .types import (
     DEFAULT_VELOCITY_LIMITS,
     FALLBACK_VELOCITY_LIMIT,
+    SAFETY_PRESETS,
     ActionSource,
     DeploymentConfig,
     DeploymentMode,
@@ -31,4 +32,5 @@ __all__ = [
     "SafetyConfig",
     "DEFAULT_VELOCITY_LIMITS",
     "FALLBACK_VELOCITY_LIMIT",
+    "SAFETY_PRESETS",
 ]
