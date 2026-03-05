@@ -395,37 +395,65 @@ class DeploymentRuntime:
         return True
 
     def restart(self) -> None:
-        """Stop the current deployment and restart with the same configuration.
+        """Warm-restart: reset policy and re-home without losing motor torque.
 
-        Performs a full stop (thread join, cleanup), then re-starts with
-        the saved config and arm IDs.  The robot is re-homed to the leader
-        position before policy execution resumes.
+        Unlike stop() + start(), this keeps motors enabled throughout.
+        The control loop thread is stopped, policy/safety state is reset,
+        the follower is re-homed to the leader, and a new loop thread starts.
+
+        Motors hold position via MIT impedance during the brief gap between
+        the old loop exiting and pre-positioning beginning.
 
         Raises:
-            RuntimeError: If no active deployment or restart fails.
+            RuntimeError: If no active deployment.
         """
         if self._state == RuntimeState.IDLE:
             raise RuntimeError("Cannot restart: no active deployment")
 
-        # Capture config and arm IDs before stop() clears them
-        saved_config = self._config
-        saved_arm_ids = list(self._active_arm_ids)
-
-        if saved_config is None:
-            raise RuntimeError("Cannot restart: no saved configuration")
-
         logger.info(
-            "Restarting deployment (mode=%s, policy=%s)...",
-            saved_config.mode.value,
-            saved_config.policy_id,
+            "Warm-restarting deployment (mode=%s, policy=%s)...",
+            self._config.mode.value if self._config else "?",
+            self._config.policy_id if self._config else "?",
         )
 
-        # Full stop — joins thread, resets pipelines, clears state → IDLE
-        self.stop()
+        # 1. Stop control loop thread (motors keep holding via MIT impedance)
+        self._stop_event.set()
+        if self._loop_thread and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=5.0)
 
-        # Re-start with same config (policy load, pre-position, new thread)
-        self.start(saved_config, saved_arm_ids)
-        logger.info("Deployment restarted successfully")
+        # 2. Reset policy internal state (clears action queue / ensembler)
+        if self._policy and hasattr(self._policy, "reset"):
+            self._policy.reset()
+
+        # 3. Re-apply temporal ensemble override if configured
+        self._apply_temporal_ensemble_override()
+
+        # 4. Reset safety pipeline state (clears velocity/acceleration history)
+        if self._safety_pipeline:
+            self._safety_pipeline.reset()
+        if self._intervention_detector:
+            self._intervention_detector.reset()
+
+        # 5. Reset frame counters
+        self._frame_count = 0
+        self._episode_count = 0
+        self._current_episode_frames = 0
+        self._autonomous_frames = 0
+        self._human_frames = 0
+
+        # 6. Pre-position back to leader (motors are STILL ENABLED)
+        self._stop_event.clear()
+        self._pre_position_to_leader()
+
+        # 7. Start new control loop thread
+        self._transition(RuntimeState.RUNNING)
+        self._loop_thread = threading.Thread(
+            target=self._control_loop,
+            name="deployment-runtime",
+            daemon=True,
+        )
+        self._loop_thread.start()
+        logger.info("Deployment warm-restarted successfully")
 
     def estop(self) -> bool:
         """Emergency stop — hold position immediately."""

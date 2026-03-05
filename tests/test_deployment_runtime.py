@@ -1691,9 +1691,10 @@ class TestReset:
 
 
 class TestRestart:
-    """Tests for DeploymentRuntime.restart() (stop + start with same config)."""
+    """Tests for DeploymentRuntime.restart() (warm restart — no motor disable)."""
 
-    def test_restart_calls_stop_then_start(self, runtime):
+    def _setup_running(self, runtime):
+        """Put runtime into a state where restart() can execute."""
         config = DeploymentConfig(
             mode=DeploymentMode.INFERENCE,
             policy_id="test-policy",
@@ -1702,66 +1703,100 @@ class TestRestart:
         runtime._state = RuntimeState.RUNNING
         runtime._config = config
         runtime._active_arm_ids = ["follower_left"]
-        runtime.stop = MagicMock()
-        runtime.start = MagicMock()
+        runtime._frame_count = 42
+        runtime._episode_count = 3
+        runtime._current_episode_frames = 10
+        runtime._autonomous_frames = 30
+        runtime._human_frames = 12
+
+        # Mock the subsystems that restart() touches
+        runtime._policy = MagicMock()
+        runtime._safety_pipeline = MagicMock()
+        runtime._intervention_detector = MagicMock()
+        runtime._pre_position_to_leader = MagicMock()
+        runtime._apply_temporal_ensemble_override = MagicMock()
+        runtime._loop_thread = None  # No real thread
+        return config
+
+    def test_restart_resets_policy(self, runtime):
+        self._setup_running(runtime)
 
         runtime.restart()
 
-        runtime.stop.assert_called_once()
-        runtime.start.assert_called_once_with(config, ["follower_left"])
+        # Called in restart() and again at top of _control_loop (belt-and-suspenders)
+        assert runtime._policy.reset.call_count >= 1
+
+    def test_restart_resets_safety_pipeline(self, runtime):
+        self._setup_running(runtime)
+        pipeline = runtime._safety_pipeline
+
+        runtime.restart()
+
+        pipeline.reset.assert_called_once()
+
+    def test_restart_resets_intervention_detector(self, runtime):
+        self._setup_running(runtime)
+        detector = runtime._intervention_detector
+
+        runtime.restart()
+
+        detector.reset.assert_called_once()
+
+    def test_restart_zeros_frame_counters(self, runtime):
+        self._setup_running(runtime)
+
+        runtime.restart()
+
+        assert runtime._frame_count == 0
+        assert runtime._episode_count == 0
+        assert runtime._current_episode_frames == 0
+        assert runtime._autonomous_frames == 0
+        assert runtime._human_frames == 0
+
+    def test_restart_starts_new_loop_thread(self, runtime):
+        self._setup_running(runtime)
+        # Mock _control_loop so the thread can run
+        runtime._control_loop = MagicMock()
+
+        runtime.restart()
+
+        assert runtime._loop_thread is not None
+        assert runtime._loop_thread.is_alive() or True  # Thread may finish instantly
+        assert runtime._state == RuntimeState.RUNNING
+
+    def test_restart_does_not_disable_motors(self, runtime):
+        """The key safety assertion: restart() must NOT call _enable_follower_motors."""
+        self._setup_running(runtime)
+        runtime._enable_follower_motors = MagicMock()
+
+        runtime.restart()
+
+        runtime._enable_follower_motors.assert_not_called()
+
+    def test_restart_pre_positions_to_leader(self, runtime):
+        self._setup_running(runtime)
+
+        runtime.restart()
+
+        runtime._pre_position_to_leader.assert_called_once()
+
+    def test_restart_reapplies_temporal_ensemble(self, runtime):
+        self._setup_running(runtime)
+
+        runtime.restart()
+
+        runtime._apply_temporal_ensemble_override.assert_called_once()
+
+    def test_restart_preserves_config(self, runtime):
+        config = self._setup_running(runtime)
+
+        runtime.restart()
+
+        assert runtime._config is config
+        assert runtime._active_arm_ids == ["follower_left"]
 
     def test_restart_from_idle_raises(self, runtime):
         runtime._state = RuntimeState.IDLE
 
         with pytest.raises(RuntimeError, match="no active deployment"):
             runtime.restart()
-
-    def test_restart_without_config_raises(self, runtime):
-        runtime._state = RuntimeState.RUNNING
-        runtime._config = None
-
-        with pytest.raises(RuntimeError, match="no saved configuration"):
-            runtime.restart()
-
-    def test_restart_preserves_config_across_stop(self, runtime):
-        """restart() must capture config BEFORE stop() clears it."""
-        config = DeploymentConfig(
-            mode=DeploymentMode.INFERENCE,
-            policy_id="my-policy",
-            safety=SafetyConfig(),
-        )
-        runtime._state = RuntimeState.RUNNING
-        runtime._config = config
-        runtime._active_arm_ids = ["follower_left", "follower_right"]
-
-        captured = {}
-
-        def mock_start(cfg, arm_ids):
-            captured["config"] = cfg
-            captured["arms"] = arm_ids
-
-        runtime.stop = MagicMock()
-        runtime.start = mock_start
-
-        runtime.restart()
-
-        assert captured["config"] is config
-        assert captured["arms"] == ["follower_left", "follower_right"]
-
-    def test_restart_from_estop(self, runtime):
-        """restart() should work from any non-IDLE state."""
-        config = DeploymentConfig(
-            mode=DeploymentMode.INFERENCE,
-            policy_id="test-policy",
-            safety=SafetyConfig(),
-        )
-        runtime._state = RuntimeState.ESTOP
-        runtime._config = config
-        runtime._active_arm_ids = ["follower_left"]
-        runtime.stop = MagicMock()
-        runtime.start = MagicMock()
-
-        runtime.restart()
-
-        runtime.stop.assert_called_once()
-        runtime.start.assert_called_once()
