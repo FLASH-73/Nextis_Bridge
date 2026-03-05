@@ -103,6 +103,20 @@ def consolidate_dataset_endpoint(repo_id: str):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+@router.post("/datasets/{repo_id:path}/repair")
+def repair_dataset_endpoint(repo_id: str):
+    """Re-index episode indices to be contiguous 0..N-1 and rebuild frame indices."""
+    system = get_state()
+    if not system.dataset_service:
+        return JSONResponse(status_code=503, content={"error": "Dataset service not ready"})
+    try:
+        result = system.dataset_service.repair_dataset(repo_id)
+        return result
+    except FileNotFoundError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @router.delete("/datasets/{repo_id:path}")
 def delete_dataset_endpoint(repo_id: str):
     """Delete an entire dataset repository."""

@@ -166,21 +166,21 @@ class DatasetService:
         else:
             raise ValueError(f"No episode index column found. Columns: {list(episodes_df.columns)}")
 
-        # CRITICAL: Sort by episode_index to ensure array indexing matches episode IDs
-        # After deletion and renumbering, episodes should be contiguous (0, 1, 2...)
-        # but the parquet row order may not match
+        # Sort by episode_index for consistent ordering
         episodes_df = episodes_df.sort_values(index_col).reset_index(drop=True)
 
-        # Get episode length - now array indexing matches episode_index
-        lengths = episodes_df["length"].values
-        if episode_index < len(lengths):
-            start_frame = int(np.sum(lengths[:episode_index]))
-            length = int(lengths[episode_index])
+        # Look up episode by its actual episode_index value (not array position).
+        # This handles non-contiguous indices (e.g. after failed deletes) and
+        # avoids the cumulative-sum frame calculation that breaks with orphan data.
+        ep_row = episodes_df[episodes_df[index_col] == episode_index]
+        if not ep_row.empty:
+            length = int(ep_row["length"].iloc[0])
+            start_frame = int(ep_row["dataset_from_index"].iloc[0])
         else:
-            # Episode index out of range
             start_frame = 0
             length = 0
-            logger.warning(f"Episode {episode_index} not found. Available: 0-{len(lengths)-1}")
+            available = sorted(episodes_df[index_col].tolist())
+            logger.warning(f"Episode {episode_index} not found. Available: {available}")
 
         end_frame = start_frame + length
 
@@ -191,21 +191,29 @@ class DatasetService:
         try:
             if length > 0:
                 data_dir = dataset_root / "data"
-                # Load all parquet files in data directory
                 data_df = pd.read_parquet(data_dir)
 
-                # Extract the relevant slice
-                if len(data_df) > start_frame:
-                    chunk_df = data_df.iloc[start_frame:end_frame]
+                # Filter by episode_index column for robustness — this works even
+                # when orphaned frames exist or indices are non-contiguous.
+                chunk_df = data_df[data_df["episode_index"] == episode_index]
 
-                    # Get action columns
+                if len(chunk_df) == 0:
+                    # Fallback: slice by dataset_from_index/dataset_to_index range
+                    if "index" in data_df.columns:
+                        chunk_df = data_df[
+                            (data_df["index"] >= start_frame)
+                            & (data_df["index"] < end_frame)
+                        ]
+                    else:
+                        chunk_df = data_df.iloc[start_frame:end_frame]
+
+                if len(chunk_df) > 0:
                     if "action" in chunk_df.columns:
                         actions = [x.tolist() if hasattr(x, 'tolist') else list(x) for x in chunk_df["action"].values]
                         logger.info(f"Loaded {len(actions)} actions for episode {episode_index} (dim={len(actions[0]) if actions else 'N/A'})")
                     else:
                         logger.warning(f"No 'action' column in data for episode {episode_index}. Columns: {list(chunk_df.columns)}")
 
-                    # Get timestamps
                     if "timestamp" in chunk_df.columns:
                         timestamps = chunk_df["timestamp"].tolist()
         except Exception as e:
@@ -449,6 +457,108 @@ class DatasetService:
             "total_episodes": len(valid_episode_indices),
             "total_frames": total_frames,
             "orphan_frames_removed": total_removed,
+        }
+
+    def repair_dataset(self, repo_id: str) -> dict:
+        """Re-index a dataset so episode indices are contiguous 0..N-1.
+
+        Fixes datasets corrupted by the discard-during-recording bug where
+        episode_index values have gaps (e.g. 9,10,...,15 instead of 0,1,...,6)
+        and the global frame index column doesn't start at 0.
+
+        Steps:
+        1. Build old→new episode index remap from episodes parquet.
+        2. Remap episode_index in episodes and data parquet files.
+        3. Rebuild contiguous global 'index' column in data parquet.
+        4. Recompute dataset_from_index / dataset_to_index in episodes parquet.
+        5. Update info.json (total_episodes, total_frames, splits).
+        """
+        import numpy as np
+
+        dataset_root = self.base_path / repo_id
+        if not dataset_root.exists():
+            raise FileNotFoundError(f"Dataset {repo_id} not found")
+
+        # ── 1. Load episodes metadata ──
+        episodes_path = dataset_root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        if not episodes_path.exists():
+            raise FileNotFoundError("Episodes metadata not found")
+
+        ep_df = pd.read_parquet(episodes_path)
+        if "episode_index" not in ep_df.columns:
+            raise ValueError(f"No episode_index column. Columns: {list(ep_df.columns)}")
+
+        ep_df = ep_df.sort_values("episode_index").reset_index(drop=True)
+        old_indices = sorted(ep_df["episode_index"].unique())
+        remap = {old: new for new, old in enumerate(old_indices)}
+        already_clean = all(old == new for old, new in remap.items())
+
+        if already_clean:
+            logger.info(f"[Repair] {repo_id}: episode indices already contiguous, checking data...")
+
+        # ── 2. Remap episode_index in episodes parquet ──
+        ep_df["episode_index"] = ep_df["episode_index"].map(remap)
+
+        # ── 3. Load and remap data parquet ──
+        data_dir = dataset_root / "data"
+        if not data_dir.exists():
+            raise FileNotFoundError("Data directory not found")
+
+        total_frames = 0
+        for parquet_file in sorted(data_dir.rglob("*.parquet")):
+            df = pd.read_parquet(parquet_file)
+
+            # Keep only frames belonging to valid episodes
+            df = df[df["episode_index"].isin(remap.keys())].copy()
+
+            # Remap episode_index
+            df["episode_index"] = df["episode_index"].map(remap)
+
+            # Rebuild contiguous global index
+            df["index"] = range(total_frames, total_frames + len(df))
+            total_frames += len(df)
+
+            df.to_parquet(parquet_file, index=False)
+
+        # ── 4. Recompute dataset_from_index / dataset_to_index ──
+        all_data = pd.read_parquet(data_dir)
+        for new_idx in sorted(remap.values()):
+            ep_mask = all_data["episode_index"] == new_idx
+            ep_frames = all_data[ep_mask]
+            if len(ep_frames) > 0:
+                from_idx = int(ep_frames["index"].iloc[0])
+                to_idx = int(ep_frames["index"].iloc[-1]) + 1
+                row_mask = ep_df["episode_index"] == new_idx
+                ep_df.loc[row_mask, "dataset_from_index"] = from_idx
+                ep_df.loc[row_mask, "dataset_to_index"] = to_idx
+                ep_df.loc[row_mask, "length"] = len(ep_frames)
+
+        ep_df.to_parquet(episodes_path, index=False)
+
+        # ── 5. Update info.json ──
+        info_path = dataset_root / "meta" / "info.json"
+        with open(info_path, "r") as f:
+            info = json.load(f)
+
+        info["total_episodes"] = len(remap)
+        info["total_frames"] = total_frames
+        if "splits" in info:
+            info["splits"]["train"] = f"0:{len(remap)}"
+
+        with open(info_path, "w") as f:
+            json.dump(info, f, indent=4)
+
+        old_range = f"{min(old_indices)}-{max(old_indices)}" if old_indices else "none"
+        logger.info(
+            f"[Repair] {repo_id}: remapped {len(remap)} episodes "
+            f"({old_range} → 0-{len(remap)-1}), {total_frames} frames"
+        )
+
+        return {
+            "status": "ok",
+            "total_episodes": len(remap),
+            "total_frames": total_frames,
+            "remap": {str(k): v for k, v in remap.items()},
         }
 
     def delete_dataset(self, repo_id: str):
