@@ -12,6 +12,7 @@ import {
   Cloud,
   Camera,
   Rocket,
+  GitBranch,
 } from "lucide-react";
 import StatusMenu from "./StatusMenu";
 
@@ -23,6 +24,7 @@ interface ModalStates {
   isHILOpen: boolean;
   isRLTrainingOpen: boolean;
   isDeployOpen: boolean;
+  isPipelineOpen: boolean;
   isChatOpen: boolean;
   isArmManagerOpen: boolean;
   isMotorMonitorOpen: boolean;
@@ -39,6 +41,7 @@ interface ControlDockProps {
   setIsHILOpen: (open: boolean) => void;
   setIsRLTrainingOpen: (open: boolean) => void;
   setIsDeployOpen: (open: boolean) => void;
+  setIsPipelineOpen: (open: boolean) => void;
   setIsChatOpen: (open: boolean) => void;
   setIsArmManagerOpen: (open: boolean) => void;
   setIsMotorMonitorOpen: (open: boolean) => void;
@@ -62,6 +65,7 @@ export default function ControlDock({
   setIsHILOpen,
   setIsRLTrainingOpen,
   setIsDeployOpen,
+  setIsPipelineOpen,
   setIsChatOpen,
   setIsArmManagerOpen,
   setIsMotorMonitorOpen,
@@ -134,6 +138,12 @@ export default function ControlDock({
           className={`${BTN_BASE} ${modalStates.isDeployOpen ? "bg-emerald-600 text-white shadow-md" : "hover:bg-emerald-50 dark:hover:bg-emerald-950 text-emerald-600 dark:text-emerald-400 hover:text-emerald-700"}`}
         >
           <Rocket className="w-3 h-3" /> Deploy
+        </button>
+        <button
+          onClick={() => setIsPipelineOpen(true)}
+          className={`${BTN_BASE} ${modalStates.isPipelineOpen ? "bg-teal-600 text-white shadow-md" : "hover:bg-teal-50 dark:hover:bg-teal-950 text-teal-600 dark:text-teal-400 hover:text-teal-700"}`}
+        >
+          <GitBranch className="w-3 h-3" /> Pipeline
         </button>
       </div>
 

@@ -91,9 +91,28 @@ class DeploymentRuntime:
         self._autonomous_frames = 0
         self._human_frames = 0
 
+        # Policy hot-swap support
+        self._swap_lock = threading.Lock()
+        self._pending_swap: Optional[dict] = None
+        self._latest_obs: Optional[dict] = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def swap_policy(self, policy, obs_builder, checkpoint_path: str, warmup_frames: int = 15) -> None:
+        """Queue a policy swap. Applied at the top of the next control loop iteration."""
+        with self._swap_lock:
+            self._pending_swap = {
+                "policy": policy,
+                "obs_builder": obs_builder,
+                "checkpoint_path": checkpoint_path,
+                "warmup_frames": warmup_frames,
+            }
+
+    def get_latest_observation(self) -> Optional[dict]:
+        """Return the most recent raw observation from the control loop."""
+        return self._latest_obs
 
     def start(
         self,
@@ -636,6 +655,7 @@ class DeploymentRuntime:
 
         while not self._stop_event.is_set():
             t0 = time.monotonic()
+            self._apply_pending_swap()
 
             try:
                 # 1. Get observation from follower
@@ -643,6 +663,7 @@ class DeploymentRuntime:
                 if raw_obs is None:
                     time.sleep(0.01)
                     continue
+                self._latest_obs = raw_obs
 
                 # 2. Intervention detection (HIL/SERL only)
                 action_source = ActionSource.POLICY
@@ -864,6 +885,31 @@ class DeploymentRuntime:
             return dict(action) if action else None
         except Exception:
             return None
+
+    # ------------------------------------------------------------------
+    # Policy hot-swap
+    # ------------------------------------------------------------------
+
+    def _apply_pending_swap(self) -> bool:
+        """Pop and apply a pending policy swap if queued. Returns True if swapped."""
+        with self._swap_lock:
+            swap = self._pending_swap
+            self._pending_swap = None
+        if swap is None:
+            return False
+        self._policy = swap["policy"]
+        self._obs_builder = swap["obs_builder"]
+        self._checkpoint_path = swap["checkpoint_path"]
+        if hasattr(self._policy, "reset"):
+            self._policy.reset()
+        # Reset warmup so velocity ramp re-engages from frame 0
+        if self._config:
+            self._config.warmup_frames = swap["warmup_frames"]
+        self._frame_count = 0
+        target_speed_scale = self._config.safety.speed_scale if self._config else 1.0
+        self._safety_pipeline.update_speed_scale(target_speed_scale * 0.7)
+        logger.info("Policy swapped to %s", swap["checkpoint_path"])
+        return True
 
     # ------------------------------------------------------------------
     # Observation

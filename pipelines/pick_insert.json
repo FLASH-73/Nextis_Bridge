@@ -1,0 +1,39 @@
+{
+  "name": "pick_insert",
+  "steps": [
+    {
+      "policy_id": "bearing_pickup_cell_v1_act_8158afe8_20260305_121332",
+      "name": "Step 1",
+      "transition": {
+        "trigger": "frame_count",
+        "threshold_value": 150,
+        "threshold_position": {},
+        "timeout_seconds": 5,
+        "debounce_frames": 8
+      },
+      "warmup_frames": 12,
+      "speed_scale": 1,
+      "temporal_ensemble_coeff": 0.1
+    },
+    {
+      "policy_id": "bearing_insertion_step2_c3ce2301_20260306_005958",
+      "name": "Step 2",
+      "transition": {
+        "trigger": "frame_count",
+        "threshold_value": 150,
+        "threshold_position": {},
+        "timeout_seconds": 5,
+        "debounce_frames": 8
+      },
+      "warmup_frames": 12,
+      "speed_scale": 1,
+      "temporal_ensemble_coeff": 0.1
+    }
+  ],
+  "active_arms": [
+    "aira_zero_leader",
+    "aira_zero"
+  ],
+  "loop_hz": 30,
+  "safety_overrides": null
+}

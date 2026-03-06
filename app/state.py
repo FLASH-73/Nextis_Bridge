@@ -30,6 +30,7 @@ class SystemState:
         self.arm_registry = None  # Arm Manager Service
         self.tool_registry = None
         self.trigger_listener = None
+        self.pipeline_runtime = None
         self.safety_watchdog = None
         self.leader_assists = {} # {arm_prefix: LeaderAssistService}
         self.lock = threading.Lock()
@@ -158,6 +159,13 @@ class SystemState:
             arm_registry=self.arm_registry,
             camera_service=self.camera_service,
             robot_lock=self.lock,
+        )
+
+        # 11. Pipeline Runtime (wraps deployment_runtime for multi-step pipelines)
+        from app.core.deployment.pipeline_runtime import PipelineRuntime
+        self.pipeline_runtime = PipelineRuntime(
+            deploy=self.deployment_runtime,
+            training_service=self.training_service,
         )
 
         # NOTE: Planner is lazy-loaded on first /chat request

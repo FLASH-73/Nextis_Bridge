@@ -24,6 +24,7 @@ from app.routes import (  # noqa: E402
     debug,
     deploy,
     hil,
+    pipeline,
     motors,
     policies,
     recording,
@@ -48,7 +49,7 @@ app.add_middleware(
 
 for r in [system, arms, motors, calibration, teleop, cameras,
           recording, datasets, training, policies, hil, rl, chat, debug, tools, deploy,
-          tablet]:
+          pipeline, tablet]:
     app.include_router(r.router)
 
 

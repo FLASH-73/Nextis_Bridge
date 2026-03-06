@@ -2,6 +2,17 @@
 
 from .intervention import InterventionDetector
 from .observation_builder import ObservationBuilder
+from .pipeline_runtime import PipelineRuntime
+from .pipeline_types import (
+    AlignmentWarning,
+    PipelineConfig,
+    PipelineState,
+    PipelineStatus,
+    PipelineStep,
+    TransitionCondition,
+    TransitionProgress,
+    TransitionTrigger,
+)
 from .rl_learner import RLLearner
 from .runtime import DeploymentRuntime
 from .safety_pipeline import SafetyPipeline, SafetyReadings
@@ -18,12 +29,21 @@ from .types import (
 )
 
 __all__ = [
+    "AlignmentWarning",
     "DeploymentRuntime",
     "InterventionDetector",
     "ObservationBuilder",
+    "PipelineConfig",
+    "PipelineState",
+    "PipelineStatus",
+    "PipelineRuntime",
+    "PipelineStep",
     "RLLearner",
     "SafetyPipeline",
     "SafetyReadings",
+    "TransitionCondition",
+    "TransitionProgress",
+    "TransitionTrigger",
     "ActionSource",
     "DeploymentConfig",
     "DeploymentMode",
