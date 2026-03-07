@@ -29,6 +29,7 @@ export default function StepProgressBar({
       {steps.map((step, i) => {
         const isCompleted = i < currentIndex || (isTerminal && state === "completed");
         const isCurrent = i === currentIndex && !isTerminal;
+        const isBridging = isCurrent && state === "transitioning";
         const isUpcoming = !isCompleted && !isCurrent;
 
         let bg: string;
@@ -36,6 +37,9 @@ export default function StepProgressBar({
         if (isCompleted) {
           bg = "bg-neutral-200 dark:bg-zinc-700";
           text = "text-neutral-500 dark:text-zinc-400";
+        } else if (isBridging) {
+          bg = "bg-amber-500 dark:bg-amber-400 animate-pulse";
+          text = "text-white dark:text-black";
         } else if (isCurrent) {
           bg = "bg-black dark:bg-white";
           text = "text-white dark:text-black";
@@ -59,11 +63,15 @@ export default function StepProgressBar({
               <span className="text-xs font-medium truncate">
                 {step.name || `Step ${i + 1}`}
               </span>
-              {isCurrent && stepElapsed > 0 && (
+              {isBridging ? (
+                <span className="text-[10px] font-medium opacity-90 flex-shrink-0 ml-auto">
+                  Bridging...
+                </span>
+              ) : isCurrent && stepElapsed > 0 ? (
                 <span className="text-[10px] font-mono opacity-70 flex-shrink-0 ml-auto">
                   {formatElapsed(stepElapsed)}
                 </span>
-              )}
+              ) : null}
             </div>
             {i < steps.length - 1 && (
               <ChevronRight

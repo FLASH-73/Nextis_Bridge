@@ -5,6 +5,7 @@ from .observation_builder import ObservationBuilder
 from .pipeline_runtime import PipelineRuntime
 from .pipeline_types import (
     AlignmentWarning,
+    BridgeConfig,
     PipelineConfig,
     PipelineState,
     PipelineStatus,
@@ -16,6 +17,7 @@ from .pipeline_types import (
 from .rl_learner import RLLearner
 from .runtime import DeploymentRuntime
 from .safety_pipeline import SafetyPipeline, SafetyReadings
+from .start_pose import StartPoseResult, extract_start_pose
 from .types import (
     DEFAULT_VELOCITY_LIMITS,
     FALLBACK_VELOCITY_LIMIT,
@@ -30,6 +32,7 @@ from .types import (
 
 __all__ = [
     "AlignmentWarning",
+    "BridgeConfig",
     "DeploymentRuntime",
     "InterventionDetector",
     "ObservationBuilder",
@@ -53,4 +56,6 @@ __all__ = [
     "DEFAULT_VELOCITY_LIMITS",
     "FALLBACK_VELOCITY_LIMIT",
     "SAFETY_PRESETS",
+    "StartPoseResult",
+    "extract_start_pose",
 ]

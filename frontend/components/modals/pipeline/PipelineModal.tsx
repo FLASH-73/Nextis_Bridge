@@ -91,13 +91,7 @@ export default function PipelineModal({ isOpen, onClose, maximizedWindow, setMax
       {!isMinimized && (
         <div className="flex-1 flex flex-col overflow-hidden">
           {phase === "builder" && (
-            <PipelineBuilder onLoad={(w) => {
-              // PipelineBuilder calls pipelineApi.load() which sets config server-side.
-              // We need to capture the config for PipelineMonitor.
-              // Re-fetch from builder's internal state via a ref pattern isn't possible,
-              // so we pass warnings and let monitor read status from API.
-              handleLoad(w, { name: "", steps: [], active_arms: [], loop_hz: 30, safety_overrides: null });
-            }} />
+            <PipelineBuilder onLoad={handleLoad} />
           )}
 
           {phase === "warnings" && (

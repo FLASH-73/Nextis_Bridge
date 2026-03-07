@@ -23,13 +23,14 @@ import ArmSelector from "./ArmSelector";
 import { createDefaultStep, createDefaultConfig } from "./types";
 
 interface PipelineBuilderProps {
-  onLoad: (warnings: AlignmentWarning[]) => void;
+  onLoad: (warnings: AlignmentWarning[], config: PipelineConfig) => void;
 }
 
 export default function PipelineBuilder({ onLoad }: PipelineBuilderProps) {
   const [config, setConfig] = useState<PipelineConfig>(createDefaultConfig());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const [startPoses, setStartPoses] = useState<Record<string, Record<string, number>>>({});
 
   // Data fetching
   const { data: allPolicies } = useSWR<PolicyInfo[]>("/policies", () =>
@@ -98,7 +99,8 @@ export default function PipelineBuilder({ onLoad }: PipelineBuilderProps) {
     setIsLoading(true);
     try {
       const result = await pipelineApi.load(config);
-      onLoad(result.alignment_warnings ?? []);
+      setStartPoses(result.start_poses ?? {});
+      onLoad(result.alignment_warnings ?? [], config);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load pipeline");
     } finally {
@@ -170,6 +172,8 @@ export default function PipelineBuilder({ onLoad }: PipelineBuilderProps) {
                     onMove={(dir) => moveStep(i, dir)}
                     onRemove={() => removeStep(i)}
                     policies={completedPolicies}
+                    startPose={startPoses[String(i)]}
+                    prevStartPose={i > 0 ? startPoses[String(i - 1)] : undefined}
                   />
                   {/* Connector line between steps */}
                   {!isLast ? (

@@ -51,6 +51,19 @@ class TransitionCondition:
 
 
 @dataclass
+class BridgeConfig:
+    """Configuration for the bridge move between pipeline steps.
+
+    When enabled, the arm smoothly moves to the next step's empirical
+    start pose (extracted from its training dataset) before the policy starts.
+    """
+    enabled: bool = True
+    speed_scale: float = 0.3
+    settle_frames: int = 15
+    source: str = "auto"
+
+
+@dataclass
 class PipelineStep:
     """A single step in a multi-step deployment pipeline."""
     policy_id: str = ""
@@ -59,6 +72,7 @@ class PipelineStep:
     warmup_frames: int = 12
     speed_scale: float = 1.0
     temporal_ensemble_coeff: Optional[float] = None
+    bridge: Optional['BridgeConfig'] = None
 
 
 @dataclass

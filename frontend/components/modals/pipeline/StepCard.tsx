@@ -12,6 +12,8 @@ interface StepCardProps {
   onMove: (direction: "up" | "down") => void;
   onRemove: () => void;
   policies: PolicyInfo[];
+  startPose?: Record<string, number>;
+  prevStartPose?: Record<string, number>;
 }
 
 export default function StepCard({
@@ -22,6 +24,8 @@ export default function StepCard({
   onMove,
   onRemove,
   policies,
+  startPose,
+  prevStartPose,
 }: StepCardProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -87,6 +91,31 @@ export default function StepCard({
             </option>
           ))}
         </select>
+
+        {/* Start pose readouts */}
+        {startPose && (
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+            {Object.entries(startPose).map(([joint, rad]) => {
+              const prev = prevStartPose?.[joint];
+              const delta = prev !== undefined ? Math.abs(rad - prev) : 0;
+              const isHigh = delta > 0.15;
+              return (
+                <span
+                  key={joint}
+                  className={`text-[10px] font-mono ${
+                    isHigh
+                      ? "text-amber-600 dark:text-amber-400 font-bold"
+                      : "text-neutral-400 dark:text-zinc-500"
+                  }`}
+                  title={isHigh ? `Δ ${delta.toFixed(2)} rad from prev step` : undefined}
+                >
+                  {joint.replace(".pos", "")}:{rad >= 0 ? "+" : ""}{rad.toFixed(2)}
+                  {isHigh && " ⚠"}
+                </span>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Advanced toggle */}

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Square, ShieldAlert, CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
+import { Square, ShieldAlert, CheckCircle2, AlertTriangle, XCircle, Loader2 } from "lucide-react";
 import { usePolling } from "../../../hooks/usePolling";
 import { pipelineApi, type PipelineConfig, type PipelineStatus, type PipelineState } from "../../../lib/api/pipeline";
 import { camerasApi } from "../../../lib/api";
@@ -68,8 +68,18 @@ export default function PipelineMonitor({ config, onDone }: PipelineMonitorProps
         />
       </div>
 
-      {/* 2. Transition Panel */}
-      {showTransition && (
+      {/* 2a. Bridging indicator */}
+      {st === "transitioning" && (
+        <div className="flex-shrink-0 mb-4 bg-amber-50 dark:bg-amber-950/30 rounded-xl border border-amber-200 dark:border-amber-800 p-4 flex items-center gap-3">
+          <Loader2 className="w-4 h-4 animate-spin text-amber-600 dark:text-amber-400 flex-shrink-0" />
+          <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
+            Bridging to {status?.current_step_name || `Step ${(status?.current_step_index ?? 0) + 1}`}...
+          </span>
+        </div>
+      )}
+
+      {/* 2b. Transition Panel */}
+      {showTransition && st !== "transitioning" && (
         <div className="flex-shrink-0 mb-4 bg-neutral-50 dark:bg-zinc-800/50 rounded-xl border border-neutral-100 dark:border-zinc-700 p-4 space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-zinc-400">

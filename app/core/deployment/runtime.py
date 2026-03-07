@@ -1386,9 +1386,32 @@ class DeploymentRuntime:
             logger.warning("Pre-position: no leader positions mapped")
             return
 
-        # 3. Ramp via send_action (applies inversions + joint limits)
-        #    with conservative velocity limit on the bus.
+        # 3. Ramp via send_action with conservative velocity limit
         target_action = {f"{k}.pos": v for k, v in target.items()}
+        self._pre_position_ramp(target_action)
+
+    def _pre_position_ramp(
+        self,
+        target_action: dict,
+        velocity: float = 0.05,
+        duration: float = 3.0,
+        settle_seconds: float = 1.0,
+    ) -> None:
+        """Ramp follower to target_action with collision detection and settle.
+
+        This is the shared motor-control core used by both
+        _pre_position_to_leader() and bridge_to_pose(). It applies
+        inversions and joint limits via send_action(), monitors torques
+        for collision, and holds position during the settle phase.
+
+        Args:
+            target_action: {joint_name.pos: float_rad} target positions.
+            velocity: velocity limit during ramp (rad/s).
+            duration: ramp phase duration (seconds).
+            settle_seconds: hold-at-target duration (seconds).
+        """
+        if self._follower is None:
+            return
 
         try:
             from lerobot.motors.damiao.damiao import DamiaoMotorsBus
@@ -1396,21 +1419,18 @@ class DeploymentRuntime:
             bus = getattr(self._follower, "bus", None)
             has_damiao_bus = bus and isinstance(bus, DamiaoMotorsBus)
 
-            PRE_POSITION_VEL = 0.05   # Same as homing_vel — conservative
-            PRE_POSITION_DURATION = 3.0
-            SETTLE_DURATION = 1.0
-
             old_vel = None
             if has_damiao_bus:
                 old_vel = bus.velocity_limit
-                bus.velocity_limit = PRE_POSITION_VEL
+                bus.velocity_limit = velocity
 
             logger.info(
-                "Pre-positioning follower to leader position "
-                "(vel=%.2f, duration=%.1fs, %d joints): %s",
-                PRE_POSITION_VEL,
-                PRE_POSITION_DURATION,
-                len(target),
+                "Pre-positioning follower "
+                "(vel=%.2f, duration=%.1fs, settle=%.1fs, %d joints): %s",
+                velocity,
+                duration,
+                settle_seconds,
+                len(target_action),
                 {k: f"{v:+.3f}" for k, v in target_action.items()},
             )
 
@@ -1418,7 +1438,7 @@ class DeploymentRuntime:
             t0 = time.monotonic()
             ramp_frame = 0
             collision_detected = False
-            while time.monotonic() - t0 < PRE_POSITION_DURATION:
+            while time.monotonic() - t0 < duration:
                 if self._stop_event.is_set():
                     break
                 self._follower.send_action(target_action)
@@ -1454,13 +1474,14 @@ class DeploymentRuntime:
                 time.sleep(1.0 / 30)
 
             # Settle phase — hold position to let velocity decay
-            logger.info("Pre-position settling (%.1fs)...", SETTLE_DURATION)
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < SETTLE_DURATION:
-                if self._stop_event.is_set():
-                    break
-                self._follower.send_action(target_action)
-                time.sleep(1.0 / 30)
+            if settle_seconds > 0:
+                logger.info("Pre-position settling (%.1fs)...", settle_seconds)
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < settle_seconds:
+                    if self._stop_event.is_set():
+                        break
+                    self._follower.send_action(target_action)
+                    time.sleep(1.0 / 30)
 
             # NOTE: Do NOT "freeze" motors by sending actual positions as
             # goals.  The MIT position error (p_des − p_actual ≈ gravity/kp)
@@ -1479,6 +1500,62 @@ class DeploymentRuntime:
 
         except Exception as e:
             logger.warning("Pre-position failed: %s", e)
+
+    def bridge_to_pose(
+        self,
+        target: dict,
+        velocity: float = 0.05,
+        settle_seconds: float = 0.5,
+        on_loop_ready=None,
+    ) -> None:
+        """Bridge move: stop control loop, ramp to target, restart loop.
+
+        Used by PipelineRuntime between steps to bring the arm from
+        wherever step N left it to the empirical start pose of step N+1.
+        Follows the same stop-ramp-start pattern as restart().
+
+        Args:
+            target: {joint_name: float_rad} e.g. {"base.pos": -0.04, ...}
+                Keys must already include the ".pos" suffix.
+            velocity: velocity limit during ramp (rad/s).
+            settle_seconds: hold-at-target duration (seconds).
+            on_loop_ready: optional callback invoked after ramp/settle
+                completes but before the new control loop starts.  Used
+                by PipelineRuntime to queue a policy swap so the first
+                loop iteration runs the correct policy (no race).
+        """
+        # 1. Stop control loop (motors hold via MIT impedance)
+        self._stop_event.set()
+        if self._loop_thread and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=5.0)
+
+        # 2. Reset safety pipeline state
+        if self._safety_pipeline:
+            self._safety_pipeline.reset()
+
+        # 3. Ramp to target
+        self._stop_event.clear()
+        self._pre_position_ramp(target, velocity=velocity,
+                                settle_seconds=settle_seconds)
+
+        # 4. Update position snapshot (eliminates false DRIFT warnings)
+        self._log_follower_positions("after pre-position")
+
+        # 5. Hook: let caller queue policy swap before loop starts
+        if on_loop_ready:
+            on_loop_ready()
+
+        # 6. Reset frame counters for next step
+        self._frame_count = 0
+
+        # 7. Start new control loop thread
+        self._loop_thread = threading.Thread(
+            target=self._control_loop,
+            name="deployment-runtime",
+            daemon=True,
+        )
+        self._loop_thread.start()
+        logger.info("Bridge move complete, control loop restarted")
 
     def _load_policy(self, policy_id: str) -> None:
         """Load policy from training service.

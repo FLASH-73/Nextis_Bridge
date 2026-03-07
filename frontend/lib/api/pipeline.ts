@@ -31,6 +31,13 @@ export interface TransitionCondition {
   debounce_frames: number;
 }
 
+export interface BridgeConfig {
+  enabled: boolean;
+  speed_scale: number;
+  settle_frames: number;
+  source: string;
+}
+
 export interface PipelineStep {
   policy_id: string;
   name: string;
@@ -38,6 +45,7 @@ export interface PipelineStep {
   warmup_frames: number;
   speed_scale: number;
   temporal_ensemble_coeff: number | null;
+  bridge?: BridgeConfig;
 }
 
 export interface PipelineConfig {
@@ -83,10 +91,12 @@ export interface PipelineStatus {
 
 export const pipelineApi = {
   load: (config: PipelineConfig) =>
-    api.post<{ status: string; total_steps: number; alignment_warnings: AlignmentWarning[] }>(
-      "/pipeline/load",
-      config
-    ),
+    api.post<{
+      status: string;
+      total_steps: number;
+      alignment_warnings: AlignmentWarning[];
+      start_poses: Record<string, Record<string, number>>;
+    }>("/pipeline/load", config),
 
   start: () =>
     api.post<{ status: string }>("/pipeline/start"),

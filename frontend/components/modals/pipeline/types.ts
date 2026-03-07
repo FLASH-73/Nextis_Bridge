@@ -20,6 +20,7 @@ export function createDefaultStep(index: number): PipelineStep {
     warmup_frames: 12,
     speed_scale: 1.0,
     temporal_ensemble_coeff: null,
+    bridge: { enabled: true, speed_scale: 0.3, settle_frames: 15, source: "auto" },
   };
 }
 

@@ -27,6 +27,7 @@ class PipelineRuntime:
         self._state, self._lock = PipelineState.IDLE, threading.Lock()
         self._stop_event, self._manual_trigger = threading.Event(), threading.Event()
         self._loaded: Dict[int, Tuple] = {}
+        self._start_poses: Dict[int, dict] = {}
         self._config: Optional[PipelineConfig] = None
         self._step, self._step_start_time = 0, 0.0
         self._total_frames, self._start_time = 0, 0.0
@@ -51,6 +52,7 @@ class PipelineRuntime:
             with self._lock:
                 self._state, self._error_message = PipelineState.ERROR, str(e)
             raise RuntimeError(f"Failed to load step '{s.name}': {e}") from e
+        self._start_poses = self._precompute_start_poses(config)
         warnings = self._check_alignment(config)
         self._config = config
         with self._lock:
@@ -100,6 +102,10 @@ class PipelineRuntime:
             self._manual_trigger.set()
             return True
         return False
+
+    def get_start_poses(self) -> Dict[int, dict]:
+        """Return pre-computed start poses {step_index: {joint_name: rad}}."""
+        return dict(self._start_poses)
 
     def get_status(self) -> PipelineStatus:
         try:
@@ -191,8 +197,50 @@ class PipelineRuntime:
                 pass
             logger.info("Pipeline completed (%d steps)", len(self._config.steps))
             return
-        logger.info("Pipeline → step %d '%s'", self._step, self._config.steps[self._step].name)
-        self._begin_step(self._step)
+
+        step = self._config.steps[self._step]
+
+        # Bridge move: ramp to next step's empirical start pose
+        bridge = step.bridge
+        if bridge and bridge.enabled and self._step in self._start_poses:
+            with self._lock:
+                self._state = PipelineState.TRANSITIONING
+            # Filter gripper joints out of bridge target — gripper state
+            # should be preserved from the previous step (e.g. holding a bearing).
+            target = {k: v for k, v in self._start_poses[self._step].items()
+                      if k not in _GRIPPER_KEYS}
+            velocity = 0.05 * bridge.speed_scale
+            settle_sec = bridge.settle_frames / (self._config.loop_hz or 30)
+
+            # Queue policy swap via on_loop_ready callback so it is
+            # applied AFTER the ramp but BEFORE the control loop starts.
+            # Without this, the first loop frame(s) would run the OLD
+            # policy at the NEW position → OOD actions → shaking.
+            policy, obs_builder, ckpt = self._loaded[self._step]
+            def _swap():
+                self._deploy.swap_policy(
+                    policy, obs_builder, ckpt, step.warmup_frames)
+
+            logger.info(
+                "Pipeline: bridge move to step %d '%s' "
+                "(vel=%.3f, settle=%.1fs, %d joints)",
+                self._step, step.name, velocity, settle_sec, len(target),
+            )
+            try:
+                self._deploy.bridge_to_pose(
+                    target, velocity=velocity, settle_seconds=settle_sec,
+                    on_loop_ready=_swap)
+            except Exception as e:
+                logger.error("Pipeline: bridge move failed: %s", e)
+                _swap()
+
+            self._step_start_time = time.monotonic()
+            self._debounce_count = 0
+            self._manual_trigger.clear()
+        else:
+            logger.info("Pipeline → step %d '%s'", self._step, step.name)
+            self._begin_step(self._step)
+
         with self._lock:
             self._state = PipelineState.RUNNING
 
@@ -257,6 +305,37 @@ class PipelineRuntime:
             except Exception:
                 continue
         return warnings
+
+    def _precompute_start_poses(self, config: PipelineConfig) -> Dict[int, dict]:
+        """Pre-compute empirical start poses for each step from training data.
+
+        Skips step 0 (uses leader pre-position) and any steps whose
+        checkpoint dataset cannot be read.
+        """
+        from .start_pose import extract_start_pose
+
+        poses: Dict[int, dict] = {}
+        for i in range(1, len(config.steps)):
+            if i not in self._loaded:
+                continue
+            _, _, ckpt = self._loaded[i]
+            try:
+                result = extract_start_pose(ckpt)
+                poses[i] = result.mean
+                logger.info(
+                    "Pipeline: extracted start pose for step %d '%s' "
+                    "(%d episodes, %d joints)",
+                    i, config.steps[i].name,
+                    result.num_episodes, len(result.mean),
+                )
+                for w in result.warnings:
+                    logger.warning("Pipeline step %d '%s': %s", i, config.steps[i].name, w)
+            except Exception as e:
+                logger.warning(
+                    "Pipeline: cannot extract start pose for step %d '%s': %s",
+                    i, config.steps[i].name, e,
+                )
+        return poses
 
     @staticmethod
     def _load_stats(checkpoint_path: str) -> Optional[dict]:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from app.core.deployment import (
     PipelineConfig, PipelineStep, TransitionCondition, TransitionTrigger)
+from app.core.deployment.pipeline_types import BridgeConfig
 from app.dependencies import get_state
 
 CONFIGS_DIR = Path("pipelines")
@@ -40,13 +41,23 @@ def parse_pipeline_config(body: dict) -> PipelineConfig:
                 threshold_position=t.get("threshold_position", {}),
                 timeout_seconds=float(t.get("timeout_seconds", 0.0)),
                 debounce_frames=int(t.get("debounce_frames", 8)))
+        bridge_raw = s.get("bridge")
+        if bridge_raw and isinstance(bridge_raw, dict):
+            bridge = BridgeConfig(
+                enabled=bridge_raw.get("enabled", True),
+                speed_scale=float(bridge_raw.get("speed_scale", 0.3)),
+                settle_frames=int(bridge_raw.get("settle_frames", 15)),
+                source=bridge_raw.get("source", "auto"))
+        else:
+            bridge = BridgeConfig()
         steps.append(PipelineStep(
             policy_id=s["policy_id"], name=s.get("name", f"step_{i}"),
             transition=transition, warmup_frames=int(s.get("warmup_frames", 12)),
             speed_scale=float(s.get("speed_scale", 1.0)),
             temporal_ensemble_coeff=(
                 float(s["temporal_ensemble_coeff"])
-                if s.get("temporal_ensemble_coeff") is not None else None)))
+                if s.get("temporal_ensemble_coeff") is not None else None),
+            bridge=bridge))
     return PipelineConfig(
         name=name, steps=steps, active_arms=body.get("active_arms", []),
         loop_hz=int(body.get("loop_hz", 30)), safety_overrides=body.get("safety_overrides"))
@@ -59,7 +70,8 @@ async def load_pipeline(request: Request):
         config = parse_pipeline_config(await request.json())
         warnings = rt.load(config)
         return {"status": "loaded", "total_steps": len(config.steps),
-                "alignment_warnings": [dataclasses.asdict(w) for w in warnings]}
+                "alignment_warnings": [dataclasses.asdict(w) for w in warnings],
+                "start_poses": rt.get_start_poses()}
     except (RuntimeError, ValueError) as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
